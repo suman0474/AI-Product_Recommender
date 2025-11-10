@@ -1,0 +1,177 @@
+"""
+MongoDB Configuration and Connection Management
+Handles MongoDB connection, GridFS setup, and database operations
+"""
+
+import os
+import logging
+from typing import Optional, Dict, Any
+from pymongo import MongoClient
+from pymongo.database import Database
+from pymongo.collection import Collection
+from gridfs import GridFS
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+logger = logging.getLogger(__name__)
+
+class MongoDBManager:
+    """Singleton MongoDB connection manager with GridFS support"""
+    
+    _instance: Optional['MongoDBManager'] = None
+    _client: Optional[MongoClient] = None
+    _database: Optional[Database] = None
+    _gridfs: Optional[GridFS] = None
+    
+    def __new__(cls) -> 'MongoDBManager':
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+    
+    def __init__(self):
+        if not hasattr(self, 'initialized'):
+            self.initialized = True
+            self._setup_connection()
+    
+    def _setup_connection(self):
+        """Setup MongoDB connection and GridFS"""
+        try:
+            # Get MongoDB URI from environment variables
+            mongodb_uri = os.getenv('MONGODB_URI')
+            # if not mongodb_uri:
+            #     # Fallback to local MongoDB
+            #     mongodb_uri = 'mongodb://localhost:27017/'
+            #     logger.warning("MONGODB_URI not found in environment, using local MongoDB")
+            
+            # Database name
+            db_name = os.getenv('MONGODB_DATABASE', 'product-recommender')
+            
+            # Create MongoDB client
+            self._client = MongoClient(
+            mongodb_uri
+        )
+            self._database = self._client[db_name]
+            
+            # Setup GridFS for file storage
+            self._gridfs = GridFS(self._database)
+            
+            # Test connection
+            self._client.admin.command('ping')
+            logger.info(f"Successfully connected to MongoDB database: {db_name}")
+            
+        except Exception as e:
+            logger.error(f"Failed to connect to MongoDB: {e}")
+            raise
+    
+    @property
+    def client(self) -> MongoClient:
+        """Get MongoDB client"""
+        if self._client is None:
+            self._setup_connection()
+        return self._client
+    
+    @property
+    def database(self) -> Database:
+        """Get MongoDB database"""
+        if self._database is None:
+            self._setup_connection()
+        return self._database
+    
+    @property
+    def gridfs(self) -> GridFS:
+        """Get GridFS instance"""
+        if self._gridfs is None:
+            self._setup_connection()
+        return self._gridfs
+    
+    def get_collection(self, name: str) -> Collection:
+        """Get a specific collection"""
+        return self.database[name]
+    
+    def close(self):
+        """Close MongoDB connection"""
+        if self._client:
+            self._client.close()
+            self._client = None
+            self._database = None
+            self._gridfs = None
+            logger.info("MongoDB connection closed")
+
+# Global instance
+mongodb_manager = MongoDBManager()
+
+# Collection names constants
+class Collections:
+    """MongoDB collection names"""
+    # Main collections for 3 folders
+    SPECS = "specs"                          # specs/ folder → product type schemas
+    VENDORS = "vendors"                      # vendors/ folder → vendor data
+    DOCUMENT_METADATA = "document_metadata"  # documents/ folder → PDF metadata
+    
+    # GridFS and other collections
+    FILES = "files"                          # GridFS files collection
+    DOCUMENTS = "documents"                  # Legacy collection
+
+def get_mongodb_connection():
+    """Get MongoDB connection components"""
+    return {
+        'client': mongodb_manager.client,
+        'database': mongodb_manager.database,
+        'gridfs': mongodb_manager.gridfs,
+        'collections': {
+            # Main collections for 3 folders
+            'specs': mongodb_manager.get_collection(Collections.SPECS),
+            'vendors': mongodb_manager.get_collection(Collections.VENDORS),
+            'document_metadata': mongodb_manager.get_collection(Collections.DOCUMENT_METADATA),
+            
+            # Legacy collection
+            'documents': mongodb_manager.get_collection(Collections.DOCUMENTS),
+        }
+    }
+
+def ensure_indexes():
+    """Create necessary indexes for efficient querying"""
+    try:
+        conn = get_mongodb_connection()
+        collections = conn['collections']
+        
+        # Specs collection indexes (specs/ folder)
+        collections['specs'].create_index([
+            ("product_type", 1)
+        ])
+        
+        # Vendors collection indexes (vendors/ folder)
+        collections['vendors'].create_index([
+            ("product_type", 1),
+            ("vendor", 1)
+        ])
+        collections['vendors'].create_index([
+            ("metadata.product_type", 1),
+            ("metadata.vendor_name", 1)
+        ])
+        
+        # Document metadata indexes (documents/ folder)
+        collections['document_metadata'].create_index([
+            ("product_type", 1),
+            ("vendor_name", 1),
+            ("file_type", 1)
+        ])
+        collections['document_metadata'].create_index([
+            ("metadata.product_type", 1),
+            ("metadata.vendor_name", 1),
+            ("metadata.file_type", 1)
+        ])
+        
+        logger.info("MongoDB indexes created successfully")
+        
+    except Exception as e:
+        logger.error(f"Failed to create MongoDB indexes: {e}")
+        raise
+
+# Initialize indexes on import
+try:
+    ensure_indexes()
+except Exception as e:
+    logger.warning(f"Could not initialize MongoDB indexes: {e}")
