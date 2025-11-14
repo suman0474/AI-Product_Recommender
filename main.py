@@ -14,8 +14,7 @@ import tempfile
 import requests
 from io import BytesIO
 from serpapi import GoogleSearch
-import threading
-import uuid
+import redis
 
 from functools import wraps
 from dotenv import load_dotenv
@@ -40,8 +39,9 @@ from flask_session import Session
 from advanced_parameters import discover_advanced_parameters
 
 # Import MongoDB utilities
-from mongodb_utils import get_schema_from_mongodb, get_json_from_mongodb
+from mongodb_utils import get_schema_from_mongodb, get_json_from_mongodb, MongoDBFileManager, mongodb_file_manager
 from mongodb_config import get_mongodb_connection
+
 # Load environment variables
 load_dotenv()
 
@@ -50,39 +50,92 @@ load_dotenv()
 # =========================================================================
 app = Flask(__name__, static_folder="static")
 
-# Manual CORS handling
+# ----------------------------
+# 1) Base secret + session defaults (use env vars; no hard-coded secrets)
+# ----------------------------
+app.secret_key = os.getenv("SECRET_KEY", "fallback-secret-key-for-development")
 
-# A list of allowed origins for CORS
+# Detect production environment (Railway or FLASK_ENV=production)
+IS_PRODUCTION = (
+    os.getenv("FLASK_ENV") == "production"
+    or bool(os.getenv("RAILWAY_ENVIRONMENT"))
+    or os.getenv("ENV") == "production"
+)
+
+# Default sensible session config
+app.config["SESSION_PERMANENT"] = False
+
+# Session storage: use Redis in production (Railway), filesystem in development
+if IS_PRODUCTION:
+    app.config["SESSION_TYPE"] = "redis"
+    app.config["SESSION_PERMANENT"] = True  # sessions can expire per your session settings
+    redis_url = os.getenv("REDIS_URL")
+    if redis_url:
+        try:
+            app.config["SESSION_REDIS"] = redis.from_url(redis_url)
+        except Exception as e:
+            logging.warning(f"Failed to parse REDIS_URL or connect to Redis: {e}")
+    else:
+        logging.warning("REDIS_URL not found in environment; sessions may not be persistent in production.")
+else:
+    # development
+    app.config["SESSION_TYPE"] = "filesystem"
+    app.config["SESSION_PERMANENT"] = False
+
+# ----------------------------
+# 2) Cookie flags (critical for cross-site auth)
+# ----------------------------
+# In production we must set SameSite=None and Secure=True so cookies are sent from en-genie -> railway
+if IS_PRODUCTION:
+    app.config["SESSION_COOKIE_SAMESITE"] = "None"
+    app.config["SESSION_COOKIE_SECURE"] = True
+    app.config["SESSION_COOKIE_HTTPONLY"] = True
+else:
+    # Local dev: Lax or None depending on your dev flow; Lax is safer for local debugging
+    app.config["SESSION_COOKIE_SAMESITE"] = os.getenv("DEV_SESSION_COOKIE_SAMESITE", "Lax")
+    app.config["SESSION_COOKIE_SECURE"] = False
+    app.config["SESSION_COOKIE_HTTPONLY"] = True
+
+# Optional: expose a readable setting for debugging
+logging.info(f"IS_PRODUCTION={IS_PRODUCTION}, SESSION_COOKIE_SAMESITE={app.config.get('SESSION_COOKIE_SAMESITE')}")
+
+# ----------------------------
+# 3) Initialize server-side session support
+# ----------------------------
+Session(app)
+
+# ----------------------------
+# 4) Manual CORS handling (after session config)
+# ----------------------------
 allowed_origins = [
-    "https://ai-product-recommender-ui.vercel.app",  # Your production frontend
-    "http://localhost:8080",                         # Add your specific local dev port
+    "https://en-genie.vercel.app",  # Your production frontend
+    "http://localhost:8080",        # Add your specific local dev port if needed
     "http://localhost:5173",
     "http://localhost:3000"
 ]
 
+# Make sure supports_credentials=True so cookies are allowed in cross-origin requests
+CORS(
+    app,
+    origins=allowed_origins,
+    supports_credentials=True,
+    allow_headers=["Content-Type", "Authorization"],
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    expose_headers=["Content-Type", "Authorization"]
+)
 
-# Replace your old CORS line with this one
-CORS(app, origins=allowed_origins, supports_credentials=True)
-logging.basicConfig(level=logging.INFO)
 logging.basicConfig(level=logging.INFO)
 
-if os.getenv('FLASK_ENV') == 'production' or os.getenv('RAILWAY_ENVIRONMENT'):
-    # Production session settings
-    app.config["SESSION_PERMANENT"] = True
-    app.config["SESSION_TYPE"] = "filesystem"
-    app.config["SESSION_FILE_DIR"] = "/tmp/flask_session"
-    app.config["SESSION_COOKIE_SECURE"] = True
-    app.config["SESSION_COOKIE_HTTPONLY"] = True
-    app.config["SESSION_COOKIE_SAMESITE"] = "None"
+# --- DYNAMIC DATABASE CONFIGURATION (unchanged from your code) ---
+database_url = os.getenv('DATABASE_URL')
+if database_url:
+    app.config['SQLALCHEMY_DATABASE_URI'] = database_url.replace("mysql://", "mysql+pymysql://")
 else:
-    # Development session settings
-    app.config["SESSION_PERMANENT"] = False
-    app.config["SESSION_TYPE"] = "filesystem" 
+    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///users.db'
 
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///users.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.secret_key = os.getenv('SECRET_KEY', 'fallback-secret-key-for-development')
-Session(app)
+
+# initialize db
 db.init_app(app)
 
 # =========================================================================
@@ -251,14 +304,19 @@ def api_intent():
     if not user_input:
         return jsonify({"error": "userInput is required"}), 400
 
-    # Get current workflow state from session
-    current_step = session.get('current_step', None)
-    current_intent = session.get('current_intent', None)
+    # Get search session ID if provided (for session isolation)
+    search_session_id = data.get("search_session_id", "default")
+
+    # Get current workflow state from session (session-isolated)
+    current_step_key = f'current_step_{search_session_id}'
+    current_intent_key = f'current_intent_{search_session_id}'
+    current_step = session.get(current_step_key, None)
+    current_intent = session.get(current_intent_key, None)
     
     # --- Handle skip for missing mandatory fields ---
     # Accept both legacy and frontend step names when user wants to skip missing mandatory fields
     if current_step in ("awaitMandatory", "awaitMissingInfo") and user_input.lower() in ["yes", "skip", "y"]:
-        session['current_step'] = "awaitOptional"
+        session[f'current_step_{search_session_id}'] = "awaitOptional"
         response = {
             "intent": "workflow",
             "nextStep": "awaitOptional",
@@ -267,9 +325,9 @@ def api_intent():
         }
         return jsonify(response), 200
     
-    # --- Handle transition from advanced to summary ---
+    # --- Handle transition from advanced specifications to summary ---
     if current_step == "awaitAdvanced" and user_input.lower() in ["no", "n", "skip", "done"]:
-        session['current_step'] = "showSummary"
+        session[f'current_step_{search_session_id}'] = "showSummary"
         response = {
             "intent": "workflow",
             "nextStep": "showSummary",
@@ -321,8 +379,8 @@ Priority: Product requirements should take precedence over greetings if technica
 Next Step Logic:
 - After greeting: "initialInput" (ask for product type)
 - After product requirements: "initialInput" (validate requirements)  
-- After optional requirements: "awaitAdvanced" (ask for advanced parameters)
-- After advanced parameters: "showSummary" (show final summary)
+- After optional requirements: "awaitAdvanced" (ask for latest advanced specifications)
+- After latest advanced specifications: "showSummary" (show final summary)
 - During workflow: determine based on current step progression
 - Knowledge questions: maintain current step for resume
 
@@ -354,20 +412,19 @@ Respond ONLY with valid JSON.
 
         # Update session based on classification
         if result_json.get("intent") == "greeting":
-            session['current_step'] = 'greeting'
-            session['current_intent'] = 'greeting'
+            session[f'current_step_{search_session_id}'] = 'greeting'
+            session[f'current_intent_{search_session_id}'] = 'greeting'
         elif result_json.get("intent") == "productRequirements":
-            session['current_step'] = 'initialInput'
-            session['current_intent'] = 'productRequirements'
+            session[f'current_step_{search_session_id}'] = 'initialInput'
+            session[f'current_intent_{search_session_id}'] = 'productRequirements'
         elif result_json.get("intent") == "workflow" and result_json.get("nextStep"):
-            session['current_step'] = result_json.get("nextStep")
-            session['current_intent'] = 'workflow'
+            session[f'current_step_{search_session_id}'] = result_json.get("nextStep")
+            session[f'current_intent_{search_session_id}'] = 'workflow'
         # For knowledge questions, maintain current step for resumption
         # Don't update session for chitchat or other intents
         
         # Debug logging
         logging.info(f"Intent classification result: {result_json}")
-        logging.info(f"Session updated - current_step: {session.get('current_step')}, current_intent: {session.get('current_intent')}")
 
         return jsonify(result_json), 200
 
@@ -403,10 +460,16 @@ def api_sales_agent():
         data_context = data.get("dataContext", {})
         user_message = data.get("userMessage", "")
         intent = data.get("intent", "")
+        search_session_id = data.get("search_session_id", "default")
 
-        # Get session state for workflow continuity
-        current_step = session.get('current_step')
-        current_intent = session.get('current_intent')
+        # Log session-specific request for debugging
+        logging.info(f"[SALES_AGENT] Session {search_session_id}: Step={step}, Intent={intent}")
+
+        # Get session state for workflow continuity (session-isolated)
+        current_step_key = f'current_step_{search_session_id}'
+        current_intent_key = f'current_intent_{search_session_id}'
+        current_step = session.get(current_step_key)
+        current_intent = session.get(current_intent_key)
         
         # Handle knowledge questions - answer and resume workflow
         if intent == "knowledgeQuestion":
@@ -447,36 +510,41 @@ Focus on being helpful while maintaining the conversation flow.
         # --- Original Prompt Selection Based on Step ---
         if step == 'initialInput':
             product_type = data_context.get('productType', 'a product')
+            
+
+            
             prompt_template = f"""
-You are a helpful sales agent. The user shared their requirements, and you identified the product type as '{product_type}'.
+[Session: {search_session_id}] - You are a helpful sales agent in a fresh conversation. The user shared their requirements, and you identified the product type as '{product_type}'.
 Your response must:
 1. Start positively (e.g., "Great choice!" or similar).
 2. Confirm the identified product type in a friendly way.
 3. Ask if they have any other requirements.
+
+Important: This is an independent conversation session. Do not reference any previous interactions.
 """
             next_step = "awaitOptional"
             
         elif step == 'awaitOptional':
-            # Check if user wants to proceed to advanced parameters
+            # Check if user wants to proceed to latest advanced specifications
             user_lower = user_message.lower().strip()
             
-            # If user says no to optional requirements, automatically move to advanced parameters
+            # If user says no to optional requirements, automatically move to advanced specifications
             if user_lower in ['no', 'n', 'none', 'skip', 'done', 'proceed', 'ready']:
-                product_type = data_context.get('productType', session.get('product_type', 'this product'))
+                product_type = data_context.get('productType', session.get(f'product_type_{search_session_id}', 'this product'))
                 prompt_template = f"""
 You are a helpful sales agent. The user indicated they're done with optional requirements.
-Respond with: "Perfect! Would you like to add advanced parameters to enhance your selection for {product_type}?. I will get the parameters for you."
+Respond with: "Perfect! Would you like to add latest advanced specifications with series numbers to enhance your selection for {product_type}?. I will get the specifications for you."
 """
                 next_step = "awaitAdvanced"
             else:
-                # User provided additional requirements - check if they seem ready for advanced parameters
+                # User provided additional requirements - check if they seem ready for advanced specifications
                 # Use LLM to decide if enough requirements have been gathered
                 context_prompt = f"""
 Analyze this user input in the context of product requirements gathering: "{user_message}"
 
 The user has been adding optional requirements. Based on their input, should we:
 1. Continue collecting more optional requirements (respond with "CONTINUE")
-2. Move to advanced parameters discovery (respond with "ADVANCED")
+2. Move to latest advanced specifications discovery with series numbers (respond with "ADVANCED")
 
 Consider factors like:
 - If the user seems satisfied with their current requirements
@@ -495,10 +563,10 @@ Respond with only "CONTINUE" or "ADVANCED".
                 decision = chain.invoke({}).strip().upper()
                 
                 if decision == "ADVANCED":
-                    product_type = data_context.get('productType', session.get('product_type', 'this product'))
+                    product_type = data_context.get('productType', session.get(f'product_type_{search_session_id}', 'this product'))
                     prompt_template = f"""
 You are a helpful sales agent. The user provided additional requirements and seems ready to proceed.
-Acknowledge their input and say: "Great! Now would you like to add advanced parameters to enhance your selection for {product_type}?. I will get the parameters for you."
+Acknowledge their input and say: "Great! Now would you like to add latest advanced specifications with series numbers to enhance your selection for {product_type}?. I will get the specifications for you."
 """
                     next_step = "awaitAdvanced"
                 else:
@@ -513,8 +581,8 @@ Keep it friendly and concise.
             # Handle advanced parameters step
             user_lower = user_message.lower().strip()
             
-            # Get context data
-            product_type = data_context.get('productType') or session.get('product_type')
+            # Get context data (session-isolated)
+            product_type = data_context.get('productType') or session.get(f'product_type_{search_session_id}')
             available_parameters = data_context.get('availableParameters', [])
             selected_parameters = data_context.get('selectedParameters', {})
             total_selected = data_context.get('totalSelected', 0)
@@ -701,11 +769,13 @@ Keep it clear and professional.
             
         # === NEW WORKFLOW STEPS (Added for enhanced functionality) ===
         elif step == 'greeting':
-            prompt_template = """
-You are a friendly and professional industrial sales consultant.
+            prompt_template = f"""
+[Session: {search_session_id}] - You are a friendly and professional industrial sales consultant starting a fresh conversation.
 Greet the user warmly and ask them what type of industrial product they are looking for.
 Mention that you can help them find the right solution from various manufacturers.
 Keep it concise and welcoming.
+
+Important: This is the start of a new, independent conversation session.
 """
             next_step = "initialInput"
             
@@ -724,10 +794,10 @@ You are a helpful sales agent. Reply to the user's message: "{user_message}" in 
         else:
             llm_response = ""
 
-        # Update session with new step
+        # Update session with new step (session-isolated)
         if next_step:
-            session['current_step'] = next_step
-            session['current_intent'] = 'workflow'
+            session[f'current_step_{search_session_id}'] = next_step
+            session[f'current_intent_{search_session_id}'] = 'workflow'
 
         # Prepare response
         response_data = {
@@ -853,6 +923,7 @@ def identify_instruments():
     try:
         data = request.get_json(force=True)
         requirements = data.get("requirements", "").strip()
+        search_session_id = data.get("search_session_id", "default")
         
         if not requirements:
             return jsonify({"error": "Requirements text is required"}), 400
@@ -870,15 +941,15 @@ Instructions:
    - Category (e.g., Pressure Transmitter, Temperature Transmitter, Flow Meter, etc.)
    - Product Name (generic name based on the requirements)
    - Specifications (extract from requirements or infer based on industry standards)
-   - Sample Input (create a detailed sample input that can be used for product recommendation)
-
+   - Sample Input(must include all specification details exactly as listed in the specifications field (no field should be missing)).
+   - Ensure every parameter appears explicitly in the sample input text.
 3. Mark inferred requirements explicitly with [INFERRED] tag
 
 Additionally, identify any accessories, consumables, or ancillary items required to support the instruments (for example: impulse lines, mounting brackets, isolation valves, manifolds, cable/connector types, junction boxes, power supplies, or calibration kits). For accessories, provide:
     - Category (e.g., Impulse Line, Isolation Valve, Mounting Bracket, Junction Box)
     - Accessory Name (generic)
     - Specifications (size, material, pressure rating, connector type, etc.)
-    - Sample Input (a short sentence describing the accessory need)
+    - Sample Input(must also include every specification field listed.)
 
 Return ONLY a valid JSON object with this structure:
 {{
@@ -891,7 +962,7 @@ Return ONLY a valid JSON object with this structure:
         "<spec_field>": "<spec_value>",
         "<spec_field>": "<spec_value>"
       }},
-      "sample_input": "I need a <category> with <key specifications>"
+      "sample_input": "<category> with <key specifications>"
     }}
   ],
     "accessories": [
@@ -901,7 +972,7 @@ Return ONLY a valid JSON object with this structure:
             "specifications": {{
                 "<spec_field>": "<spec_value>"
             }},
-            "sample_input": "I need a <accessory category> for <instrument or purpose> with <key specs>"
+            "sample_input": " <accessory category> for <instrument or purpose> with <key specs>"
         }}
     ],
   "summary": "Brief summary of identified instruments"
@@ -910,10 +981,12 @@ Return ONLY a valid JSON object with this structure:
 Respond ONLY with valid JSON, no additional text.
 """
 
-        # Build and execute LLM chain
+        # Build and execute LLM chain with session isolation
+        session_isolated_requirements = f"[Session: {search_session_id}] - This is an independent instrument identification request. Requirements: {requirements}"
+        
         full_prompt = ChatPromptTemplate.from_template(prompt_template)
         response_chain = full_prompt | components['llm'] | StrOutputParser()
-        llm_response = response_chain.invoke({"requirements": requirements})
+        llm_response = response_chain.invoke({"requirements": session_isolated_requirements})
 
         # Clean the LLM response - remove markdown code blocks if present
         cleaned_response = llm_response.strip()
@@ -1457,17 +1530,70 @@ def fetch_price_and_reviews(product_name: str):
 # === IMAGE SEARCH FUNCTIONS ===
 # =========================================================================
 
-# Common manufacturer domains for image search
-MANUFACTURER_DOMAINS = [
-    "emerson.com", "yokogawa.com", "siemens.com", "abb.com", "honeywell.com",
-    "schneider-electric.com", "ge.com", "rockwellautomation.com", "endress.com",
-    "fluke.com", "krohne.com", "rosemount.com", "fisher.com", "metso.com",
-    "valmet.com", "foxboro.com", "invensys.com", "triconex.com", "deltaV.com",
-    "dcs.com", "hima.com", "sis.com", "panalytical.com", "thermo.com",
-    "agilent.com", "waters.com", "perkinelmer.com", "shimadzu.com", "bruker.com",
-    "varian.com", "beckman.com", "bio-rad.com", "teledyne.com", "omega.com",
-    "ni.com", "keysight.com", "tektronix.com", "rohde-schwarz.com", "anritsu.com"
-]
+def get_manufacturer_domains_from_llm(vendor_name: str) -> list:
+    """
+    Use LLM to dynamically generate manufacturer domain names based on vendor name
+    """
+    if not components or not components.get('llm'):
+        # Fallback to common domains if LLM is not available
+        return [
+            "emerson.com", "yokogawa.com", "siemens.com", "abb.com", "honeywell.com",
+            "schneider-electric.com", "ge.com", "rockwellautomation.com", "endress.com",
+            "fluke.com", "krohne.com", "rosemount.com", "fisher.com", "metso.com"
+        ]
+    
+    try:
+        prompt_template = """
+Based on the vendor/manufacturer name "{vendor_name}", generate a list of possible official domain names for this company and related manufacturers in the industrial/instrumentation sector.
+
+Instructions:
+1. Include the most likely official domain for "{vendor_name}"
+2. Include common domain variations (.com, .de, .co.uk, etc.)
+3. Include subsidiary or parent company domains if applicable
+4. Include related industrial automation/instrumentation companies
+5. Maximum 10-15 domains
+6. Return only domain names, one per line, no explanations
+
+Vendor: {vendor_name}
+
+Domains:
+"""
+        
+        from langchain_core.prompts import ChatPromptTemplate
+        from langchain_core.output_parsers import StrOutputParser
+        
+        full_prompt = ChatPromptTemplate.from_template(prompt_template)
+        chain = full_prompt | components['llm'] | StrOutputParser()
+        
+        response = chain.invoke({"vendor_name": vendor_name})
+        
+        # Parse the response to extract domain names
+        domains = []
+        for line in response.strip().split('\n'):
+            line = line.strip()
+            if line and '.' in line:
+                # Clean up the line - remove any prefixes, bullets, numbers
+                domain = line.split()[-1] if ' ' in line else line
+                domain = domain.replace('www.', '').replace('http://', '').replace('https://', '')
+                domain = domain.strip('.,()[]{}')
+                
+                if '.' in domain and len(domain) > 3:
+                    domains.append(domain)
+        
+        # Ensure we have at least some domains
+        if not domains:
+            # Fallback: generate based on vendor name
+            vendor_clean = vendor_name.lower().replace(' ', '').replace('&', '').replace('+', '')
+            domains = [f"{vendor_clean}.com", f"{vendor_clean}.de", f"{vendor_clean}group.com"]
+        
+        logging.info(f"LLM generated {len(domains)} domains for {vendor_name}: {domains[:5]}...")
+        return domains[:15]  # Limit to 15 domains
+        
+    except Exception as e:
+        logging.warning(f"Failed to generate domains via LLM for {vendor_name}: {e}")
+        # Fallback: generate based on vendor name
+        vendor_clean = vendor_name.lower().replace(' ', '').replace('&', '').replace('+', '')
+        return [f"{vendor_clean}.com", f"{vendor_clean}.de", f"{vendor_clean}group.com"]
 
 def fetch_images_google_cse_sync(vendor_name: str, product_name: str = None):
     """
@@ -1482,8 +1608,9 @@ def fetch_images_google_cse_sync(vendor_name: str, product_name: str = None):
         if product_name:
             query += f" {product_name}"
         
-        # Build site restriction for manufacturer domains
-        domain_filter = " OR ".join([f"site:{domain}" for domain in MANUFACTURER_DOMAINS])
+        # Build site restriction for manufacturer domains using LLM
+        manufacturer_domains = get_manufacturer_domains_from_llm(vendor_name)
+        domain_filter = " OR ".join([f"site:{domain}" for domain in manufacturer_domains])
         search_query = f"{query} ({domain_filter}) filetype:jpg OR filetype:png"
         
         # Use Google Custom Search API
@@ -1654,8 +1781,9 @@ def fetch_vendor_logo_sync(vendor_name: str):
         try:
             # Use Google CSE first for official logos
             if GOOGLE_API_KEY and GOOGLE_CX:
-                # Build site restriction for manufacturer domains
-                domain_filter = " OR ".join([f"site:{domain}" for domain in MANUFACTURER_DOMAINS])
+                # Build site restriction for manufacturer domains using LLM
+                manufacturer_domains = get_manufacturer_domains_from_llm(vendor_name)
+                domain_filter = " OR ".join([f"site:{domain}" for domain in manufacturer_domains])
                 search_query = f"{query} ({domain_filter}) filetype:jpg OR filetype:png OR filetype:svg"
                 
                 service = build("customsearch", "v1", developerKey=GOOGLE_API_KEY)
@@ -1723,8 +1851,9 @@ async def fetch_images_google_cse(vendor_name: str, product_name: str = None):
         if product_name:
             query += f" {product_name}"
         
-        # Build site restriction for manufacturer domains
-        domain_filter = " OR ".join([f"site:{domain}" for domain in MANUFACTURER_DOMAINS])
+        # Build site restriction for manufacturer domains using LLM
+        manufacturer_domains = get_manufacturer_domains_from_llm(vendor_name)
+        domain_filter = " OR ".join([f"site:{domain}" for domain in manufacturer_domains])
         search_query = f"{query} ({domain_filter}) filetype:jpg OR filetype:png"
         
         # Use Google Custom Search API
@@ -1891,12 +2020,16 @@ def test_image_search():
         # Use synchronous version for reliability
         images, source_used = fetch_product_images_with_fallback_sync(vendor_name, product_name)
         
+        # Also test domain generation
+        generated_domains = get_manufacturer_domains_from_llm(vendor_name)
+        
         return jsonify({
             "vendor": vendor_name,
             "product": product_name,
             "images": images,
             "source_used": source_used,
-            "count": len(images)
+            "count": len(images),
+            "generated_domains": generated_domains
         })
         
     except Exception as e:
@@ -1907,8 +2040,38 @@ def test_image_search():
             "product": product_name,
             "images": [],
             "source_used": "error",
-            "count": 0
+            "count": 0,
+            "generated_domains": []
         }), 500
+
+
+# @app.route("/api/test_domain_generation", methods=["GET"])
+# @login_required
+# def test_domain_generation():
+#     """
+#     Test endpoint for LLM-based domain generation
+#     """
+#     vendor_name = request.args.get("vendor", "Emerson")
+    
+#     try:
+#         generated_domains = get_manufacturer_domains_from_llm(vendor_name)
+        
+#         return jsonify({
+#             "vendor": vendor_name,
+#             "generated_domains": generated_domains,
+#             "count": len(generated_domains),
+#             "status": "success"
+#         })
+        
+#     except Exception as e:
+#         logging.error(f"Domain generation test failed: {e}")
+#         return jsonify({
+#             "error": str(e),
+#             "vendor": vendor_name,
+#             "generated_domains": [],
+#             "count": 0,
+#             "status": "error"
+#         }), 500
 
 
 @app.route("/api/get_analysis_product_images", methods=["POST"])
@@ -2021,7 +2184,9 @@ def get_analysis_product_images():
             
             # Domain quality (official domains get higher score)
             domain = img.get("domain", "").lower()
-            if any(mfg_domain in domain for mfg_domain in MANUFACTURER_DOMAINS):
+            # Get manufacturer domains for this vendor using LLM
+            manufacturer_domains = get_manufacturer_domains_from_llm(vendor)
+            if any(mfg_domain in domain for mfg_domain in manufacturer_domains):
                 score += 15
             
             # Source quality
@@ -2343,6 +2508,41 @@ def get_operation_progress():
 # === VALIDATION ENDPOINT ===
 # =========================================================================
 
+@app.route("/debug-session/<session_id>", methods=["GET"])
+@login_required
+def debug_session_state(session_id):
+    """Debug endpoint to check session state for a specific search session"""
+    current_step_key = f'current_step_{session_id}'
+    current_intent_key = f'current_intent_{session_id}'
+    product_type_key = f'product_type_{session_id}'
+    
+    session_data = {
+        'session_id': session_id,
+        'current_step': session.get(current_step_key, 'None'),
+        'current_intent': session.get(current_intent_key, 'None'),
+        'product_type': session.get(product_type_key, 'None'),
+        'all_session_keys': [k for k in session.keys() if session_id in k],
+        'all_keys': list(session.keys()),  # Show all keys for debugging
+        'session_size': len(session.keys())
+    }
+    
+    return jsonify(session_data), 200
+
+@app.route("/debug-session-clear/<session_id>", methods=["POST"])
+@login_required  
+def clear_session_state(session_id):
+    """Debug endpoint to manually clear session state for testing"""
+    keys_to_remove = [k for k in session.keys() if session_id in k]
+    
+    for key in keys_to_remove:
+        del session[key]
+    
+    return jsonify({
+        'session_id': session_id,
+        'cleared_keys': keys_to_remove,
+        'status': 'cleared'
+    }), 200
+
 @app.route("/validate", methods=["POST"])
 @login_required
 def api_validate():
@@ -2357,28 +2557,35 @@ def api_validate():
         # Get search session ID if provided (for multiple search tabs)
         search_session_id = data.get("search_session_id", "default")
         
-        # Clear any previous product type for this search session to ensure independent searches
+        # Clear ANY previous product type data for this search session to ensure independent searches
         session_key = f'product_type_{search_session_id}'
         if session_key in session:
+            logging.info(f"[VALIDATE] Session {search_session_id}: Clearing previous product type: {session[session_key]}")
             del session[session_key]
         
-        # Store original user input for logging
-        session['log_user_query'] = user_input
+        # Also clear any workflow state for fresh start
+        step_key = f'current_step_{search_session_id}'
+        intent_key = f'current_intent_{search_session_id}'
+        if step_key in session:
+            del session[step_key]
+        if intent_key in session:
+            del session[intent_key]
+        
+        # Store original user input for logging (session-isolated)
+        session[f'log_user_query_{search_session_id}'] = user_input
 
         initial_schema = load_requirements_schema()
+        
+        # Add session context to LLM validation to prevent cross-contamination
+        session_isolated_input = f"[Session: {search_session_id}] - This is a fresh, independent validation request. User input: {user_input}"
+        
         temp_validation_result = components['validation_chain'].invoke({
-            "user_input": user_input,
+            "user_input": session_isolated_input,
             "schema": json.dumps(initial_schema, indent=2),
             "format_instructions": components['validation_format_instructions']
         })
         detected_type = temp_validation_result.get('product_type', 'UnknownProduct')
         
-        # Debug logging for search independence
-        logging.info(f"[VALIDATION] Search Session ID: {search_session_id}")
-        logging.info(f"[VALIDATION] User Input: {user_input}")
-        logging.info(f"[VALIDATION] Detected Product Type: {detected_type}")
-        logging.info(f"[VALIDATION] Previous session keys: {[k for k in session.keys() if 'product_type' in k]}")
-
         specific_schema = load_requirements_schema(detected_type)
         if not specific_schema:
             global current_operation_progress
@@ -2391,8 +2598,11 @@ def api_validate():
                 # Clear progress tracker when done
                 current_operation_progress = None
 
+        # Add session context to detailed validation as well
+        session_isolated_input = f"[Session: {search_session_id}] - This is a fresh, independent validation request. User input: {user_input}"
+        
         validation_result = components['validation_chain'].invoke({
-            "user_input": user_input,
+            "user_input": session_isolated_input,
             "schema": json.dumps(specific_schema, indent=2),
             "format_instructions": components['validation_format_instructions']
         })
@@ -2454,7 +2664,7 @@ Your response must:
 3. Tell the user some important details are still missing.
 4. List the missing fields as simple key names only: **{missing_fields}**, separated by commas.
 5. Explain that results may only be approximate without them.
-6. Ask if they’d like to continue anyway."""
+6. Ask if they like to continue anyway."""
                 )
             else:
                 alert_prompt = ChatPromptTemplate.from_template(
@@ -2463,7 +2673,7 @@ Write a short, clear response (1–2 sentences):
 1. Tell the user there are still some missing specifications.
 2. List the missing fields as simple key names only: **{missing_fields}**, separated by commas.
 3. Explain that the search can continue, but results may only be approximate.
-4. Ask if they’d like to proceed."""
+4. Ask if they like to proceed."""
                 )
 
             alert_chain = alert_prompt | components['llm'] | StrOutputParser()
@@ -2478,10 +2688,8 @@ Write a short, clear response (1–2 sentences):
                 "missingFields": missing_mandatory_fields
             }
 
-        # Store product_type in session for later use in advanced parameters (with search session ID)
+        # Store product_type in session for later use in advanced parameters (session-isolated)
         session[f'product_type_{search_session_id}'] = response_data["productType"]
-        # Also store in default location for backward compatibility
-        session['product_type'] = response_data["productType"]
 
         return jsonify(response_data), 200
 
@@ -2626,28 +2834,29 @@ def api_structure_requirements():
 @login_required
 def api_advanced_parameters():
     """
-    Discovers advanced parameters from top vendors for a product type
+    Discovers latest advanced specifications with series numbers from top vendors for a product type
     """
     try:
         data = request.get_json(force=True)
         product_type = data.get("product_type", "").strip()
+        search_session_id = data.get("search_session_id", "default")
         
         if not product_type:
             return jsonify({"error": "Missing 'product_type' parameter"}), 400
 
-        # Store for logging
-        session['log_user_query'] = f"Advanced parameters for {product_type}"
+        # Store for logging (session-isolated)
+        session[f'log_user_query_{search_session_id}'] = f"Latest advanced specifications for {product_type}"
         
-        # Discover advanced parameters
-        logging.info(f"Starting advanced parameters discovery for: {product_type}")
+        # Discover advanced specifications with series numbers
+        logging.info(f"Starting latest advanced specifications discovery for: {product_type}")
         result = discover_advanced_parameters(product_type)
         
         # Log detailed information about filtering
-        unique_count = len(result.get('unique_parameters', []))
-        filtered_count = result.get('existing_parameters_filtered', 0)
+        unique_count = len(result.get('unique_specifications', result.get('unique_parameters', [])))
+        filtered_count = result.get('existing_specifications_filtered', result.get('existing_parameters_filtered', 0))
         total_found = unique_count + filtered_count
         
-        logging.info(f"Advanced parameters discovery complete: {total_found} total parameters found, {filtered_count} filtered out (already in schema), {unique_count} new parameters returned")
+        logging.info(f"Advanced specifications discovery complete: {total_found} total specifications found, {filtered_count} filtered out (already in schema), {unique_count} new specifications returned")
         
         # Store result for logging
         session['log_system_response'] = result
@@ -2655,19 +2864,19 @@ def api_advanced_parameters():
         # Convert to camelCase for frontend
         camel_case_result = convert_keys_to_camel_case(result)
         
-        logging.info(f"Advanced parameters discovery complete: {len(result.get('unique_parameters', []))} new parameters found (filtered out {result.get('existing_parameters_filtered', 0)} existing parameters)")
+        logging.info(f"Advanced specifications discovery complete: {len(result.get('unique_specifications', result.get('unique_parameters', [])))} new specifications found (filtered out {result.get('existing_specifications_filtered', result.get('existing_parameters_filtered', 0))} existing specifications)")
         
         return jsonify(camel_case_result), 200
 
     except Exception as e:
-        logging.exception("Advanced parameters discovery failed.")
+        logging.exception("Advanced specifications discovery failed.")
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/add_advanced_parameters", methods=["POST"])
 @login_required
 def api_add_advanced_parameters():
     """
-    Processes user input for advanced parameters selection
+    Processes user input for latest advanced specifications selection with series numbers
     """
     if not components:
         return jsonify({"error": "Backend is not ready. LangChain failed."}), 503
@@ -2683,32 +2892,32 @@ def api_add_advanced_parameters():
         if not user_input:
             return jsonify({"error": "Missing user_input"}), 400
 
-        # Use LLM to extract selected parameters from user input
+        # Use LLM to extract selected specifications from user input
         prompt = ChatPromptTemplate.from_template("""
-You are an expert assistant helping users select advanced parameters for industrial equipment.
+You are an expert assistant helping users select latest advanced specifications with series numbers for industrial equipment.
 
 Product Type: {product_type}
-Available Parameters: {available_parameters}
+Available Specifications: {available_parameters}
 User Input: "{user_input}"
 
-Extract the parameters the user wants to add from their input. The user might:
-1. Select specific parameters by name
-2. Say "all" or "everything" to select all parameters
-3. Select categories or groups of parameters
-4. Provide specific values for parameters
+Extract the specifications the user wants to add from their input. The user might:
+1. Select specific specifications by name
+2. Say "all" or "everything" to select all specifications
+3. Select categories or groups of specifications
+4. Provide specific values for specifications
 
 Return a JSON object with:
 {{
-    "selected_parameters": {{"parameter_name": "user_specified_value_or_empty_string"}},
+    "selected_parameters": {{"specification_name": "user_specified_value_or_empty_string"}},
     "explanation": "Brief explanation of what was selected"
 }}
 
-If the user didn't specify values, use empty strings for the parameter values.
-Only include parameters that are in the available_parameters list.
+If the user didn't specify values, use empty strings for the specification values.
+Only include specifications that are in the available specifications list.
 
 Examples:
 - "I want response_time and accuracy" → {{"response_time": "", "accuracy": ""}}
-- "Add all parameters" → Include all available parameters with empty values
+- "Add all specifications" → Include all available specifications with empty values
 - "Set accuracy to 0.1% and response_time to 1ms" → {{"accuracy": "0.1%", "response_time": "1ms"}}
 """)
 
@@ -2723,7 +2932,7 @@ Examples:
             # Parse the LLM response
             result = json.loads(llm_response)
             selected_parameters = result.get("selected_parameters", {})
-            explanation = result.get("explanation", "Parameters selected successfully.")
+            explanation = result.get("explanation", "Latest specifications selected successfully.")
 
         except (json.JSONDecodeError, Exception) as e:
             logging.warning(f"LLM parsing failed, using fallback: {e}")
@@ -2736,9 +2945,9 @@ Examples:
                 for param in available_parameters:
                     param_key = param.get('key', param) if isinstance(param, dict) else param
                     selected_parameters[param_key] = ""
-                explanation = "All available parameters have been selected."
+                explanation = "All available latest specifications have been selected."
             else:
-                # Look for parameter names in user input
+                # Look for specification names in user input
                 for param in available_parameters:
                     # Handle both dict format (new) and string format (old)
                     if isinstance(param, dict):
@@ -2750,14 +2959,14 @@ Examples:
                         if param.lower() in user_lower or param.replace('_', ' ').lower() in user_lower:
                             selected_parameters[param] = ""
                 
-                explanation = f"Selected {len(selected_parameters)} parameters based on your input."
+                explanation = f"Selected {len(selected_parameters)} latest specifications based on your input."
 
         # Generate friendly response
         if selected_parameters:
             param_list = ", ".join([param.replace('_', ' ').title() for param in selected_parameters.keys()])
-            friendly_response = f"Great! I've added these advanced parameters: {param_list}. Would you like to add any more advanced parameters?"
+            friendly_response = f"Great! I've added these latest advanced specifications: {param_list}. Would you like to add any more advanced specifications?"
         else:
-            friendly_response = "I didn't find any matching parameters in your input. Could you please specify which parameters you'd like to add?"
+            friendly_response = "I didn't find any matching specifications in your input. Could you please specify which latest specifications you'd like to add?"
 
         response_data = {
             "selectedParameters": convert_keys_to_camel_case(selected_parameters),
@@ -2769,7 +2978,7 @@ Examples:
         return jsonify(response_data), 200
 
     except Exception as e:
-        logging.exception("Advanced parameters addition failed.")
+        logging.exception("Latest advanced specifications addition failed.")
         return jsonify({"error": str(e)}), 500
 
 @app.route("/analyze", methods=["POST"])
@@ -3317,17 +3526,28 @@ def enhance_submodel_mapping_endpoint():
         return jsonify({"error": "Failed to enhance submodel mapping"}), 500
     
 
-def create_db():
-    with app.app_context():
-        db.create_all()
-        if not User.query.filter_by(role='admin').first():
-            hashed_pw = hash_password("Daman@123")
-            admin = User(username="Daman", email="reddydaman04@gmail.com", password_hash=hashed_pw, status='active', role='admin')
-            db.session.add(admin)
-            db.session.commit()
-            print("Admin user created with username 'Daman' and password 'Daman@123'.")
+@app.cli.command("init-db")
+def init_db_command():
+    """Creates the database tables and the default admin user."""
+    db.create_all()
+    if not User.query.filter_by(role='admin').first():
+        hashed_pw = hash_password("Daman@123")  # Use an environment variable for this password in a real app
+        admin = User(
+            username="Daman",
+            email="reddydaman04@gmail.com",
+            password_hash=hashed_pw,
+            status='active',
+            role='admin'
+        )
+        db.session.add(admin)
+        db.session.commit()
+        print("Admin user created with username 'Daman'.")
+    else:
+        print("Admin user already exists.")
+    print("Database initialized.")
 if __name__ == "__main__":
     create_db()
     import os
+    port = int(os.environ.get("PORT", 5000))
 
-    app.run(debug=True, host="0.0.0.0", port=5000, threaded=True, use_reloader=False)
+    app.run(debug=True, host="0.0.0.0", port=port, threaded=True, use_reloader=False)

@@ -58,11 +58,12 @@ Return ONLY a JSON array of vendor names: ["ABB", "Emerson", "Siemens"]
             return []
 
     def _query_vendor_parameters(self, vendor: str, product_type: str) -> List[str]:
-        """Query LLM for latest parameters from a vendor"""
+        """Query LLM for latest specifications with series numbers from a vendor"""
         prompt = ChatPromptTemplate.from_template("""
-List 6 LATEST advanced parameters for {vendor}'s {product_type} (past 6 months).
-Focus on: IoT, Industry 4.0, AI, protocols, cybersecurity, cloud.
-Return JSON array in snake_case: ["opc_ua_server", "mqtt_protocol"]
+List 10 LATEST advanced specifications for {vendor}'s {product_type} (past 6 months).
+Focus on: IoT, Industry 4.0, AI, protocols, cybersecurity, cloud connectivity, series numbers.
+Include specific series numbers and model specifications.
+Return JSON array in snake_case: ["series_3000_opc_ua", "model_x200_mqtt_protocol", "gen4_ai_diagnostics"]
 """)
         try:
             response = (prompt | self.llm | StrOutputParser()).invoke({"vendor": vendor, "product_type": product_type})
@@ -71,12 +72,13 @@ Return JSON array in snake_case: ["opc_ua_server", "mqtt_protocol"]
         except:
             return []
 
-    def get_generic_parameters(self, product_type: str) -> List[str]:
-        """Get generic advanced parameters for product type"""
+    def get_generic_specifications(self, product_type: str) -> List[str]:
+        """Get generic advanced specifications with series numbers for product type"""
         prompt = ChatPromptTemplate.from_template("""
-List 15 latest advanced parameters for {product_type} (past 6 months).
-Focus on: IoT, Industry 4.0, AI, protocols, cybersecurity, cloud.
-Return JSON array in snake_case.
+List 15 latest advanced specifications for {product_type} (past 6 months).
+Focus on: IoT, Industry 4.0, AI, protocols, cybersecurity, cloud, series numbers, model specifications.
+Include specific series numbers and generation information.
+Return JSON array in snake_case: ["series_5000_hart_protocol", "gen3_wireless_diagnostics", "model_pro_cybersecurity"]
 """)
         try:
             response = (prompt | self.llm | StrOutputParser()).invoke({"product_type": product_type})
@@ -102,9 +104,9 @@ def get_existing_parameters(product_type: str) -> set:
     except:
         return set()
 
-def convert_parameters_to_human_readable(params: List[str]) -> Dict[str, str]:
-    """Convert multiple parameters to human-readable format using LLM (batch processing)"""
-    if not params:
+def convert_specifications_to_human_readable(specs: List[str]) -> Dict[str, str]:
+    """Convert multiple specifications to human-readable format using LLM (batch processing)"""
+    if not specs:
         return {}
     
     try:
@@ -115,17 +117,19 @@ def convert_parameters_to_human_readable(params: List[str]) -> Dict[str, str]:
         )
         
         prompt = ChatPromptTemplate.from_template("""
-Convert to human-readable. Capitalize acronyms (OPC UA, MQTT, IoT, AI, HART, IEC).
-Parameters: {params}
-Return JSON: {{"key": "Name"}}
+Convert specifications to human-readable format. Capitalize acronyms (OPC UA, MQTT, IoT, AI, HART, IEC).
+Include series numbers and model information prominently.
+Specifications: {specs}
+Return JSON: {{"key": "Human Readable Name with Series"}}
+Example: "series_3000_opc_ua" -> "Series 3000 OPC UA Server"
 """)
         
-        response = (prompt | llm | StrOutputParser()).invoke({"params": json.dumps(params[:30])})
+        response = (prompt | llm | StrOutputParser()).invoke({"specs": json.dumps(specs[:30])})
         result = json.loads(response.strip().replace('```json', '').replace('```', ''))
         return result if isinstance(result, dict) else {}
     except Exception as e:
         logging.warning(f"Batch conversion failed: {e}")
-        return {p: p.replace('_', ' ').title() for p in params}
+        return {p: p.replace('_', ' ').title() for p in specs}
 
 def discover_advanced_parameters(product_type: str) -> Dict[str, Any]:
     """Discover latest advanced parameters for product type"""
@@ -169,44 +173,46 @@ def discover_advanced_parameters(product_type: str) -> Dict[str, Any]:
         existing_norm = {p.lower().replace('_', '') for p in existing}
         new_params = [p for norm, p in normalized_map.items() if norm not in existing_norm][:15]
         
-        # Batch convert only unique new parameters (faster)
-        logging.info(f"Converting {len(new_params)} parameters to human-readable...")
-        human_readable_map = convert_parameters_to_human_readable(new_params)
+        # Batch convert only unique new specifications (faster)
+        logging.info(f"Converting {len(new_params)} specifications to human-readable...")
+        human_readable_map = convert_specifications_to_human_readable(new_params)
         
-        # Add human-readable names to vendor data (only for displayed params)
+        # Add human-readable names to vendor data (only for displayed specs)
         for vd in vendor_data:
-            vd["parameters"] = [
+            vd["specifications"] = [
                 {"key": p, "name": human_readable_map.get(p, p.replace('_', ' ').title())}
                 for p in vd["parameters"][:6]  # Limit to 6 per vendor
             ]
+            # Remove old "parameters" key
+            vd.pop("parameters", None)
         
-        # Create parameters with human-readable names
-        unique_parameters_with_names = [
-            {"key": param, "name": human_readable_map.get(param, param.replace('_', ' ').title())}
-            for param in new_params
+        # Create specifications with human-readable names
+        unique_specifications_with_names = [
+            {"key": spec, "name": human_readable_map.get(spec, spec.replace('_', ' ').title())}
+            for spec in new_params
         ]
         
         return {
             "product_type": product_type,
-            "vendor_parameters": vendor_data,
-            "unique_parameters": unique_parameters_with_names,
+            "vendor_specifications": vendor_data,
+            "unique_specifications": unique_specifications_with_names,
             "total_vendors_searched": len(vendor_data),
-            "total_unique_parameters": len(new_params),
-            "existing_parameters_filtered": len(all_params) - len(new_params)
+            "total_unique_specifications": len(new_params),
+            "existing_specifications_filtered": len(all_params) - len(new_params)
         }
     except Exception as e:
         logging.error(f"Discovery failed: {e}")
         discovery = AdvancedParametersDiscovery()
-        generic_params = discovery.get_generic_parameters(product_type)
+        generic_specs = discovery.get_generic_specifications(product_type)
         
-        # Batch convert fallback parameters
-        human_readable_map = convert_parameters_to_human_readable(generic_params)
+        # Batch convert fallback specifications
+        human_readable_map = convert_specifications_to_human_readable(generic_specs)
         
         return {
             "product_type": product_type,
-            "unique_parameters": [
+            "unique_specifications": [
                 {"key": p, "name": human_readable_map.get(p, p.replace('_', ' ').title())}
-                for p in generic_params
+                for p in generic_specs
             ],
             "fallback": True
         }
