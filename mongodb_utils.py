@@ -24,6 +24,7 @@ class MongoDBFileManager:
         self.conn = get_mongodb_connection()
         self.gridfs = self.conn['gridfs']
         self.collections = self.conn['collections']
+        self.db = self.conn['database']  # Add database property for direct access
     
     # ==================== UPLOAD OPERATIONS ====================
     

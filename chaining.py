@@ -3,12 +3,19 @@
 import json
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from langchain_openai import ChatOpenAI
 from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
 from langchain.memory import ConversationBufferWindowMemory
-from langchain_core.runnables import RunnablePassthrough
-from models import  VendorAnalysis, OverallRanking, RequirementValidation
-from prompts import validation_prompt, requirements_prompt, vendor_prompt, ranking_prompt, additional_requirements_prompt
+from langchain_core.runnables import RunnableLambda, RunnablePassthrough
+from models import VendorAnalysis, OverallRanking, RequirementValidation
+from prompts import (
+    validation_prompt,
+    requirements_prompt,
+    vendor_prompt,
+    ranking_prompt,
+    additional_requirements_prompt,
+)
 from loading import load_requirements_schema, load_products_runnable
 from dotenv import load_dotenv
 
@@ -148,6 +155,150 @@ def to_dict_if_pydantic(obj):
         return obj.dict()
     return obj
 
+
+def _prepare_vendor_payloads(products_json_str, pdf_content_json_str):
+    """Split combined vendor data into per-vendor payloads."""
+    try:
+        products = json.loads(products_json_str) if products_json_str else []
+    except (json.JSONDecodeError, TypeError):
+        logging.warning("Failed to parse products_json; defaulting to empty list.")
+        products = []
+
+    try:
+        pdf_content = json.loads(pdf_content_json_str) if pdf_content_json_str else {}
+    except (json.JSONDecodeError, TypeError):
+        logging.warning("Failed to parse pdf_content_json; defaulting to empty dict.")
+        pdf_content = {}
+
+    vendor_payloads = {}
+
+    # First, seed payloads from PDF content so only vendors with PDFs are considered
+    for vendor_name, text in pdf_content.items():
+        vendor_payloads[vendor_name] = {"products": [], "pdf_text": text}
+
+    # Then, attach products to the corresponding PDF vendors (matching by exact vendor key)
+    for product in products:
+        if not isinstance(product, dict):
+            continue
+        vendor_name = product.get("vendor") or product.get("vendor_name") or "Unknown Vendor"
+        if vendor_name in vendor_payloads:
+            vendor_payloads[vendor_name]["products"].append(product)
+
+    # Final filtering: keep only vendors that actually have non-empty PDF text
+    vendor_payloads = {
+        vendor: data
+        for vendor, data in vendor_payloads.items()
+        if data.get("pdf_text") and str(data["pdf_text"]).strip()
+    }
+
+    return vendor_payloads
+
+
+def _invoke_vendor_chain_for_payload(
+    vendor_chain,
+    format_instructions,
+    structured_requirements,
+    vendor_name,
+    vendor_data,
+):
+    """Invoke vendor chain for a single vendor."""
+    pdf_text = vendor_data.get("pdf_text")
+    pdf_payload = json.dumps({vendor_name: pdf_text}, ensure_ascii=False) if pdf_text else json.dumps({})
+    products_payload = json.dumps(vendor_data.get("products", []), ensure_ascii=False)
+
+    return vendor_chain.invoke(
+        {
+            "structured_requirements": structured_requirements,
+            "products_json": products_payload,
+            "pdf_content_json": pdf_payload,
+            "format_instructions": format_instructions,
+        }
+    )
+
+
+def _run_parallel_vendor_analysis(
+    structured_requirements,
+    products_json_str,
+    pdf_content_json_str,
+    vendor_chain,
+    format_instructions,
+):
+    """Fan out vendor analysis so each vendor hits the LLM independently."""
+    payloads = _prepare_vendor_payloads(products_json_str, pdf_content_json_str)
+
+    # Debug logging to inspect how many vendors and which vendors are analyzed
+    if not payloads:
+        logging.warning("[VENDOR_ANALYSIS] No vendor payloads available for analysis.")
+        return {"vendor_matches": [], "vendor_run_details": []}
+
+    logging.info("[VENDOR_ANALYSIS] Preparing analysis for vendors: %s", list(payloads.keys()))
+
+    max_workers_env = os.getenv("VENDOR_ANALYSIS_MAX_WORKERS")
+    try:
+        max_workers = int(max_workers_env) if max_workers_env else 5
+    except ValueError:
+        max_workers = 5
+
+    max_workers = max(1, min(len(payloads), max_workers))
+
+    logging.info(
+        "[VENDOR_ANALYSIS] Using max_workers=%s for %s vendors",
+        max_workers,
+        len(payloads),
+    )
+
+    vendor_matches = []
+    run_details = []
+
+    def _worker(vendor, data):
+        result_dict = None
+        error = None
+        try:
+            logging.info("[VENDOR_ANALYSIS] START vendor=%s", vendor)
+            result = _invoke_vendor_chain_for_payload(
+                vendor_chain,
+                format_instructions,
+                structured_requirements,
+                vendor,
+                data,
+            )
+            result_dict = to_dict_if_pydantic(result)
+        except Exception as exc:
+            logging.error(f"Vendor analysis failed for {vendor}: {exc}")
+            error = str(exc)
+        finally:
+            logging.info("[VENDOR_ANALYSIS] END   vendor=%s error=%s", vendor, error)
+        return vendor, result_dict, error
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_map = {
+            executor.submit(_worker, vendor, data): vendor for vendor, data in payloads.items()
+        }
+        for future in as_completed(future_map):
+            vendor = future_map[future]
+            vendor_result = None
+            error = None
+            try:
+                vendor, vendor_result, error = future.result()
+            except Exception as exc:  # pragma: no cover
+                error = str(exc)
+                logging.error(f"Unexpected failure joining future for {vendor}: {exc}")
+
+            if vendor_result and isinstance(vendor_result.get("vendor_matches"), list):
+                for match in vendor_result["vendor_matches"]:
+                    vendor_matches.append(to_dict_if_pydantic(match))
+                run_details.append({"vendor": vendor, "status": "success"})
+            else:
+                entry = {
+                    "vendor": vendor,
+                    "status": "failed" if error else "empty",
+                }
+                if error:
+                    entry["error"] = error
+                run_details.append(entry)
+
+    return {"vendor_matches": vendor_matches, "vendor_run_details": run_details}
+
 # chaining.py
 # ... (add this to your imports)
 from loading import load_pdf_content_runnable
@@ -159,6 +310,17 @@ def create_analysis_chain(components, vendors_base_path=None):
     product_loader = load_products_runnable()  # No path needed - uses MongoDB
     # --- Load PDFs from MongoDB ---
     pdf_loader = load_pdf_content_runnable()  # No path needed - uses MongoDB
+    
+    def attach_parallel_vendor_analysis(input_dict):
+        enriched = dict(input_dict)
+        enriched["vendor_analysis"] = _run_parallel_vendor_analysis(
+            structured_requirements=enriched.get("structured_requirements"),
+            products_json_str=enriched.get("products_json"),
+            pdf_content_json_str=enriched.get("pdf_content_json"),
+            vendor_chain=components['vendor_chain'],
+            format_instructions=components['vendor_format_instructions']
+        )
+        return enriched
     
     analysis_chain = (
         RunnablePassthrough.assign(
@@ -174,17 +336,9 @@ def create_analysis_chain(components, vendors_base_path=None):
         | product_loader.with_config(run_name="ProductDataLoading")
         # --- NEW: Add the PDF loading step to the chain ---
         | pdf_loader.with_config(run_name="LocalPDFLoading")
+        | RunnableLambda(attach_parallel_vendor_analysis).with_config(run_name="ParallelVendorAnalysis")
         | RunnablePassthrough.assign(
-            # MODIFIED: Pass the new pdf_content_json to the vendor chain
-            vendor_analysis=lambda x: components['vendor_chain'].invoke({
-                "structured_requirements": x["structured_requirements"],
-                "products_json": x["products_json"],
-                "pdf_content_json": x["pdf_content_json"], # Pass the new PDF content
-                "format_instructions": components['vendor_format_instructions']
-            })
-        ).with_config(run_name="VendorAnalysis")
-        | RunnablePassthrough.assign(
-            overall_ranking=lambda x: get_final_ranking(to_dict_if_pydantic(x["vendor_analysis"]))
+            overall_ranking=lambda x: get_final_ranking(to_dict_if_pydantic(x.get("vendor_analysis", {})))
         ).with_config(run_name="FinalRanking")
     )
     

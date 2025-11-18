@@ -109,6 +109,10 @@ class Collections:
     SPECS = "specs"                          # specs/ folder → product type schemas
     VENDORS = "vendors"                      # vendors/ folder → vendor data
     DOCUMENT_METADATA = "document_metadata"  # documents/ folder → PDF metadata
+    ADVANCED_PARAMETERS = "advanced_parameters"  # Cached advanced parameters
+    
+    # Project management
+    PROJECTS = "projects"                    # User projects collection
     
     # GridFS and other collections
     FILES = "files"                          # GridFS files collection
@@ -125,6 +129,10 @@ def get_mongodb_connection():
             'specs': mongodb_manager.get_collection(Collections.SPECS),
             'vendors': mongodb_manager.get_collection(Collections.VENDORS),
             'document_metadata': mongodb_manager.get_collection(Collections.DOCUMENT_METADATA),
+            'advanced_parameters': mongodb_manager.get_collection(Collections.ADVANCED_PARAMETERS),
+            
+            # Project management
+            'projects': mongodb_manager.get_collection(Collections.PROJECTS),
             
             # Legacy collection
             'documents': mongodb_manager.get_collection(Collections.DOCUMENTS),
@@ -163,6 +171,26 @@ def ensure_indexes():
             ("metadata.vendor_name", 1),
             ("metadata.file_type", 1)
         ])
+        
+        # Projects collection indexes
+        collections['projects'].create_index([
+            ("user_id", 1),
+            ("project_status", 1),
+            ("updated_at", -1)
+        ])
+        collections['projects'].create_index([
+            ("user_id", 1),
+            ("project_name", 1)
+        ])
+
+        # Advanced parameters cache indexes
+        collections['advanced_parameters'].create_index([
+            ("product_type", 1)
+        ], unique=True)
+        collections['advanced_parameters'].create_index(
+            "created_at",
+            expireAfterSeconds=60 * 60 * 24 * 30  # ~30 days
+        )
         
         logger.info("MongoDB indexes created successfully")
         

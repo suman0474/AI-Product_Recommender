@@ -249,24 +249,3 @@ def standardize_ranking_result(ranking_result: Dict[str, Any]) -> Dict[str, Any]
     
     return result
 
-if __name__ == "__main__":
-    # Test the LLM standardizer
-    print("🤖 Testing LLM Standardization...")
-    
-    test_data = {
-        "vendor": "abb ltd",
-        "product_type": "pressure measurement device",
-        "model_family": "266GST",
-        "specifications": {
-            "operating temp": "-40 to 85°C",
-            "pressure range": "0-100 bar",
-            "signal output": "4-20mA"
-        }
-    }
-    
-    standardizer = get_llm_standardizer()
-    result = standardizer.standardize(test_data, "Industrial pressure measurement")
-    
-    print(f"Original: {test_data}")
-    print(f"Standardized: {result}")
-    print(f"Confidence: {result.confidence}")

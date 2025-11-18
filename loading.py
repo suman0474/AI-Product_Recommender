@@ -117,6 +117,11 @@ class SimpleCache:
 
 # Global cache instance
 search_cache = SimpleCache(default_ttl=3600)  # 1 hour cache
+# Cache for generated requirement schemas (longer TTL)
+schema_cache = SimpleCache(default_ttl=60 * 60 * 24)  # 24 hours
+
+# Locks to prevent concurrent builds for the same product_type
+schema_build_locks = {}
 
 class ProgressTracker:
     """Track progress of long-running operations"""
@@ -1148,6 +1153,11 @@ def process_pdfs_from_urls(product_type: str, vendor_data: List[Dict[str, Any]])
 def build_requirements_schema_from_web(product_type: str) -> Dict[str, Any]:
     """Build requirements schema from web with parallel processing and progress tracking"""
     logger.info(f"[BUILD] Building requirements schema from web for '{product_type}'")
+    # If another thread/process has recently built this schema, return cached copy
+    cached = schema_cache.get(product_type)
+    if cached:
+        logger.info(f"[BUILD] Returning cached schema for '{product_type}' (cache hit)")
+        return cached
     
     # Step 1: Discover vendors
     progress = ProgressTracker(4, f"Schema Discovery for {product_type}")
@@ -1252,6 +1262,11 @@ def build_requirements_schema_from_web(product_type: str) -> Dict[str, Any]:
     }
     
     logger.info(f"[BUILD] Schema building completed for '{product_type}': {len(successful_vendors)}/{len(vendors)} vendors successful")
+    # Cache the generated schema/result to avoid rebuilding frequently
+    try:
+        schema_cache.set(product_type, result)
+    except Exception:
+        pass
     return result
 
 # ----------------- Load Requirements (Removed - Now using MongoDB version below) -----------------
@@ -1512,17 +1527,59 @@ def load_requirements_schema(product_type: str = None) -> Dict[str, Any]:
             }
         
         print(f"[SCHEMA] Loading requirements schema for '{product_type}' from MongoDB")
-        
+
+        # First check in-memory cache to avoid repeated DB/LLM calls
+        cached = schema_cache.get(product_type)
+        if cached:
+            print(f"[SCHEMA] Using cached schema for '{product_type}'")
+            return cached
+
         # Try to load from MongoDB first
         schema = get_schema_from_mongodb(product_type)
-        
+
         if schema and schema.get("mandatory_requirements") and schema.get("optional_requirements"):
             print(f"[SCHEMA] Successfully loaded schema from MongoDB for '{product_type}'")
+            # cache it
+            try:
+                schema_cache.set(product_type, schema)
+            except Exception:
+                pass
             return schema
-        else:
-            print(f"[SCHEMA] No schema found in MongoDB for '{product_type}', building from web...")
-            # Fallback to building from web and storing in MongoDB
-            return build_requirements_schema_from_web(product_type)
+
+        print(f"[SCHEMA] No schema found in MongoDB for '{product_type}', attempting to build from web...")
+        # Prevent concurrent builds for the same product_type
+        lock = schema_build_locks.setdefault(product_type, threading.Lock())
+        acquired = lock.acquire(blocking=False)
+        if not acquired:
+            # Another thread is building it; wait for it to finish (with timeout)
+            print(f"[SCHEMA] Wait: another build in progress for '{product_type}', waiting for completion")
+            got = lock.acquire(timeout=120)
+            if not got:
+                # Timeout - fall back to empty schema to avoid hanging
+                print(f"[SCHEMA] Timeout waiting for schema build for '{product_type}', returning empty schema")
+                return {"product_type": product_type, "mandatory_requirements": {}, "optional_requirements": {}}
+            else:
+                lock.release()
+                # Check cache again
+                cached_after = schema_cache.get(product_type)
+                if cached_after:
+                    print(f"[SCHEMA] Build completed by other thread; using cached schema for '{product_type}'")
+                    return cached_after
+                else:
+                    return {"product_type": product_type, "mandatory_requirements": {}, "optional_requirements": {}}
+        try:
+            # Only the thread that acquired the lock will reach here
+            built = build_requirements_schema_from_web(product_type)
+            try:
+                schema_cache.set(product_type, built)
+            except Exception:
+                pass
+            return built
+        finally:
+            try:
+                lock.release()
+            except Exception:
+                pass
             
     except Exception as e:
         print(f"[ERROR] Failed to load schema for '{product_type or 'Generic'}': {e}")

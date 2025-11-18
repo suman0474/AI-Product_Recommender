@@ -1,6 +1,5 @@
 import asyncio
 from datetime import datetime
-from unittest import result
 from flask import Flask, request, jsonify, session, send_file
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
@@ -10,11 +9,10 @@ import re
 import os
 import urllib.parse
 from werkzeug.utils import secure_filename
-import tempfile
 import requests
 from io import BytesIO
 from serpapi import GoogleSearch
-import redis
+import threading
 
 from functools import wraps
 from dotenv import load_dotenv
@@ -26,6 +24,9 @@ from googleapiclient.discovery import build
 from auth_models import db, User, Log
 from auth_utils import hash_password, check_password
 
+# --- MongoDB Project Management ---
+from mongo_project_manager import mongo_project_manager
+
 # --- LLM CHAINING IMPORTS ---
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
@@ -35,12 +36,18 @@ from loading import load_requirements_schema, build_requirements_schema_from_web
 from flask import Flask, session
 from flask_session import Session
 
-# Import advanced parameters functionality
+# Import latest advanced specifications functionality
 from advanced_parameters import discover_advanced_parameters
 
 # Import MongoDB utilities
 from mongodb_utils import get_schema_from_mongodb, get_json_from_mongodb, MongoDBFileManager, mongodb_file_manager
 from mongodb_config import get_mongodb_connection
+from mongodb_projects import (
+    save_project_to_mongodb,
+    get_user_projects_from_mongodb,
+    get_project_details_from_mongodb,
+    delete_project_from_mongodb
+)
 
 # Load environment variables
 load_dotenv()
@@ -50,92 +57,39 @@ load_dotenv()
 # =========================================================================
 app = Flask(__name__, static_folder="static")
 
-# ----------------------------
-# 1) Base secret + session defaults (use env vars; no hard-coded secrets)
-# ----------------------------
-app.secret_key = os.getenv("SECRET_KEY", "fallback-secret-key-for-development")
+# Manual CORS handling
 
-# Detect production environment (Railway or FLASK_ENV=production)
-IS_PRODUCTION = (
-    os.getenv("FLASK_ENV") == "production"
-    or bool(os.getenv("RAILWAY_ENVIRONMENT"))
-    or os.getenv("ENV") == "production"
-)
-
-# Default sensible session config
-app.config["SESSION_PERMANENT"] = False
-
-# Session storage: use Redis in production (Railway), filesystem in development
-if IS_PRODUCTION:
-    app.config["SESSION_TYPE"] = "redis"
-    app.config["SESSION_PERMANENT"] = True  # sessions can expire per your session settings
-    redis_url = os.getenv("REDIS_URL")
-    if redis_url:
-        try:
-            app.config["SESSION_REDIS"] = redis.from_url(redis_url)
-        except Exception as e:
-            logging.warning(f"Failed to parse REDIS_URL or connect to Redis: {e}")
-    else:
-        logging.warning("REDIS_URL not found in environment; sessions may not be persistent in production.")
-else:
-    # development
-    app.config["SESSION_TYPE"] = "filesystem"
-    app.config["SESSION_PERMANENT"] = False
-
-# ----------------------------
-# 2) Cookie flags (critical for cross-site auth)
-# ----------------------------
-# In production we must set SameSite=None and Secure=True so cookies are sent from en-genie -> railway
-if IS_PRODUCTION:
-    app.config["SESSION_COOKIE_SAMESITE"] = "None"
-    app.config["SESSION_COOKIE_SECURE"] = True
-    app.config["SESSION_COOKIE_HTTPONLY"] = True
-else:
-    # Local dev: Lax or None depending on your dev flow; Lax is safer for local debugging
-    app.config["SESSION_COOKIE_SAMESITE"] = os.getenv("DEV_SESSION_COOKIE_SAMESITE", "Lax")
-    app.config["SESSION_COOKIE_SECURE"] = False
-    app.config["SESSION_COOKIE_HTTPONLY"] = True
-
-# Optional: expose a readable setting for debugging
-logging.info(f"IS_PRODUCTION={IS_PRODUCTION}, SESSION_COOKIE_SAMESITE={app.config.get('SESSION_COOKIE_SAMESITE')}")
-
-# ----------------------------
-# 3) Initialize server-side session support
-# ----------------------------
-Session(app)
-
-# ----------------------------
-# 4) Manual CORS handling (after session config)
-# ----------------------------
+# A list of allowed origins for CORS
 allowed_origins = [
-    "https://en-genie.vercel.app",  # Your production frontend
-    "http://localhost:8080",        # Add your specific local dev port if needed
+    "https://ai-product-recommender-ui.vercel.app",  # Your production frontend
+    "http://localhost:8080",                         # Add your specific local dev port
     "http://localhost:5173",
     "http://localhost:3000"
 ]
 
-# Make sure supports_credentials=True so cookies are allowed in cross-origin requests
-CORS(
-    app,
-    origins=allowed_origins,
-    supports_credentials=True,
-    allow_headers=["Content-Type", "Authorization"],
-    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    expose_headers=["Content-Type", "Authorization"]
-)
 
+# Replace your old CORS line with this one
+CORS(app, origins=allowed_origins, supports_credentials=True)
+logging.basicConfig(level=logging.INFO)
 logging.basicConfig(level=logging.INFO)
 
-# --- DYNAMIC DATABASE CONFIGURATION (unchanged from your code) ---
-database_url = os.getenv('DATABASE_URL')
-if database_url:
-    app.config['SQLALCHEMY_DATABASE_URI'] = database_url.replace("mysql://", "mysql+pymysql://")
+if os.getenv('FLASK_ENV') == 'production' or os.getenv('RAILWAY_ENVIRONMENT'):
+    # Production session settings
+    app.config["SESSION_PERMANENT"] = True
+    app.config["SESSION_TYPE"] = "filesystem"
+    app.config["SESSION_FILE_DIR"] = "/tmp/flask_session"
+    app.config["SESSION_COOKIE_SECURE"] = True
+    app.config["SESSION_COOKIE_HTTPONLY"] = True
+    app.config["SESSION_COOKIE_SAMESITE"] = "None"
 else:
-    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///users.db'
+    # Development session settings
+    app.config["SESSION_PERMANENT"] = False
+    app.config["SESSION_TYPE"] = "filesystem" 
 
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///users.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-
-# initialize db
+app.secret_key = os.getenv('SECRET_KEY', 'fallback-secret-key-for-development')
+Session(app)
 db.init_app(app)
 
 # =========================================================================
@@ -316,24 +270,19 @@ def api_intent():
     # --- Handle skip for missing mandatory fields ---
     # Accept both legacy and frontend step names when user wants to skip missing mandatory fields
     if current_step in ("awaitMandatory", "awaitMissingInfo") and user_input.lower() in ["yes", "skip", "y"]:
-        session[f'current_step_{search_session_id}'] = "awaitOptional"
+        session[f'current_step_{search_session_id}'] = "awaitAdditionalAndLatestSpecs"
         response = {
             "intent": "workflow",
-            "nextStep": "awaitOptional",
+            "nextStep": "awaitAdditionalAndLatestSpecs",
             "resumeWorkflow": True,
-            "message": "Skipping missing mandatory fields. Please provide optional requirements if any."
+            "message": "Skipping missing mandatory fields. Additional and latest specifications are available."
         }
         return jsonify(response), 200
     
-    # --- Handle transition from advanced specifications to summary ---
-    if current_step == "awaitAdvanced" and user_input.lower() in ["no", "n", "skip", "done"]:
-        session[f'current_step_{search_session_id}'] = "showSummary"
-        response = {
-            "intent": "workflow",
-            "nextStep": "showSummary",
-            "resumeWorkflow": True
-        }
-        return jsonify(response), 200
+    # NOTE: Removed automatic transition from awaitAdvanced -> showSummary here
+    # so that 'no' replies at the advanced-parameters prompt are handled
+    # by the sales-agent (`/api/sales-agent`) logic which implements retry
+    # and explicit YES/NO branching for advanced parameters.
     
     # Check for greeting patterns (only standalone greetings)
     greeting_patterns = ['hi', 'hello', 'hey', 'good morning', 'good afternoon', 'good evening']
@@ -345,15 +294,41 @@ def api_intent():
     
     # Check for product requirements patterns
     product_indicators = [
-        'pressure transmitter', 'temperature transmitter', 'temperature transmitter', 'flow meter',
-        'need', 'looking for', 'want', 'require', 'specification', 'specs', 'mbar', 'bar', 'psi',
-        'celsius', 'fahrenheit', 'voltage', 'current', 'output', 'range', 'accuracy', 'sensor'
+        'valve', 'pump', 'motor', 'sensor', 'controller', 'actuator', 'positioner',
+        'transmitter', 'gauge', 'meter', 'switch', 'relay', 'transformer',
+        'ansi', 'asme', 'din', 'iso', 'api', 'nema', 'iec',  # Standards
+        'stainless steel', 'carbon steel', 'bronze', 'cast iron', 'alloy',  # Materials
+        'flanged', 'threaded', 'welded', 'socket', 'butt weld',  # Connections
+        'pneumatic', 'electric', 'hydraulic', 'manual',  # Actuator types
+        'pressure rating', 'temperature rating', 'flow rate', 'cv', 'kv',  # Specs
+        'npt', 'bsp', 'rf', 'rtj',  # Connection types
+        'psi', 'bar', 'mpa', 'kpa', 'gpm', 'lpm',  # Units
+        'inch', 'mm', 'dn', 'nps',  # Sizes
+        'globe', 'ball', 'butterfly', 'gate', 'check', 'needle',  # Valve types
+        'centrifugal', 'positive displacement', 'diaphragm', 'peristaltic',  # Pump types
+        'explosion proof', 'hazardous area', 'atex', 'iecex',  # Safety
+        'foundation fieldbus', 'hart', 'profibus', 'modbus',  # Communication protocols
+        '316ss', '304ss', '316l', '304l',  # Material codes
+        'class', 'schedule', 'rating',  # Ratings
+        'turndown', 'rangeability', 'accuracy',  # Performance specs
     ]
-    is_product_requirement = any(indicator in user_input.lower() for indicator in product_indicators) and len(user_input.split()) > 2
+
+    lowered = user_input.lower()
+    # Count how many technical indicators are present — if multiple technical tokens exist, treat as requirements
+    tech_count = sum(1 for indicator in product_indicators if indicator in lowered)
+
+    # Also flag as product requirements when there are explicit units/percentages or model-like tokens
+    technical_pattern = bool(
+        re.search(r"\b\d+\s?(inches|inch|mm|cm|m|%|percent|psi|bar|mbar)\b", lowered)
+        or re.search(r"\b(ansi|ss|316)\b", lowered)
+        or re.search(r"\b(series|model|gen|generation)\b", lowered)
+    )
+
+    is_product_requirement = (tech_count >= 2) or (technical_pattern and len(lowered.split()) > 2)
 
     # === Enhanced Prompt for Workflow-Aware Classification ===
     prompt = f"""
-You are a smart assistant that classifies user input for a step-based product recommendation workflow.
+You are Engenie - an smart assistant that classifies user input for a step-based product recommendation workflow.
 
 Current workflow context:
 - Current step: {current_step or "None"}
@@ -363,7 +338,7 @@ User message: "{user_input}"
 
 Return ONLY a JSON object with these keys:
 1. "intent": one of ["greeting", "knowledgeQuestion", "productRequirements", "workflow", "chitchat", "other"]
-2. "nextStep": one of ["greeting", "initialInput", "awaitOptional", "awaitAdvanced", "showSummary", "finalAnalysis", null]
+2. "nextStep": one of ["greeting", "initialInput", "awaitAdditionalAndLatestSpecs", "awaitAdvancedSpecs", "showSummary", "finalAnalysis", null]
 3. "resumeWorkflow": true/false (whether to resume current workflow after handling this input)
 
 Classification Rules:
@@ -379,13 +354,14 @@ Priority: Product requirements should take precedence over greetings if technica
 Next Step Logic:
 - After greeting: "initialInput" (ask for product type)
 - After product requirements: "initialInput" (validate requirements)  
-- After optional requirements: "awaitAdvanced" (ask for latest advanced specifications)
-- After latest advanced specifications: "showSummary" (show final summary)
+- After missing info handling: "awaitAdditionalAndLatestSpecs" (ask about additional and latest specs)
+- After additional specs: "awaitAdvancedSpecs" (ask for advanced parameters)
+- After advanced specs: "showSummary" (show final summary)
 - During workflow: determine based on current step progression
 - Knowledge questions: maintain current step for resume
 
 Workflow Steps:
-greeting → initialInput → awaitOptional → awaitAdvanced → showSummary → finalAnalysis
+greeting → initialInput → awaitMissingInfo → awaitAdditionalAndLatestSpecs → awaitAdvancedSpecs → showSummary → finalAnalysis
 
 Respond ONLY with valid JSON.
 """
@@ -409,6 +385,18 @@ Respond ONLY with valid JSON.
                 result_json = {"intent": "greeting", "nextStep": "greeting", "resumeWorkflow": False}
             else:
                 result_json = {"intent": "other", "nextStep": None, "resumeWorkflow": False}
+
+        # Heuristic override: if local technical heuristics flagged this as product requirements,
+        # override LLM result to avoid greeting or misclassification.
+        try:
+            if is_product_requirement and result_json.get('intent') != 'productRequirements':
+                logging.info("[INTENT_OVERRIDE] Local heuristics detected product requirements (tech_count=%s). Overriding LLM intent %s -> productRequirements", tech_count if 'tech_count' in locals() else 'N/A', result_json.get('intent'))
+                result_json['intent'] = 'productRequirements'
+                result_json['nextStep'] = 'initialInput'
+                result_json['resumeWorkflow'] = False
+        except Exception:
+            # Non-fatal - continue with whatever classification we have
+            pass
 
         # Update session based on classification
         if result_json.get("intent") == "greeting":
@@ -455,7 +443,12 @@ def api_sales_agent():
         return jsonify({"error": "LLM component is not ready."}), 503
 
     try:
+        # NOTE: request.get_json(force=True) is used for debugging/non-standard headers
         data = request.get_json(force=True)
+        # Debug log incoming product_type information to trace saving issues (sales agent)
+        incoming_pt = data.get('product_type') if isinstance(data, dict) else None
+        incoming_detected = data.get('detected_product_type') if isinstance(data, dict) else None
+        logging.info(f"[SALES_AGENT_INCOMING] Incoming product_type='{incoming_pt}' detected_product_type='{incoming_detected}' project_name='{data.get('project_name') if isinstance(data, dict) else None}'")
         step = data.get("step")
         data_context = data.get("dataContext", {})
         user_message = data.get("userMessage", "")
@@ -471,20 +464,71 @@ def api_sales_agent():
         current_step = session.get(current_step_key)
         current_intent = session.get(current_intent_key)
         
+        # --- Helper function for formatting advanced parameters ---
+        def format_available_parameters(params):
+            """
+            Return parameter keys one by one, each on a separate line.
+            Each item in `params` can be:
+            - A dict with 'key' field: {"key": "parameter_key_name", ...}
+            - A string: "parameter_key_name"
+            Replaces underscores with spaces and formats for display.
+            """
+            formatted = []
+            for param in params:
+                # Extract the key from dict or use string directly
+                if isinstance(param, dict):
+                    # Priority: 'key' field > 'name' field > first key in dict
+                    name = param.get('key') or param.get('name') or (list(param.keys())[0] if param else '')
+                else:
+                    # Parameter keys are typically strings like "parameter_key_name"
+                    name = str(param).strip()
+
+                # Replace underscores with spaces
+                name = name.replace('_', ' ')
+                # Remove any parenthetical or bracketed content: ( ... ), [ ... ], { ... }
+                name = re.sub(r"\s*[\(\[\{].*?[\)\]\}]", "", name)
+                # Normalize spacing (remove extra spaces)
+                name = " ".join(name.split())
+                # Title case for display (first letter of each word capitalized)
+                name = name.title()
+
+                formatted.append(name)
+            return "\n".join(formatted)
+
+        # Treat short affirmative/negative replies (e.g., 'yes', 'no') as
+        # workflow input regardless of the classifier. The frontend's
+        # intent classifier can sometimes label brief confirmations as
+        # knowledge questions; we prefer to route them into the sales-agent
+        # workflow so steps like awaitAdditionalAndLatestSpecs and
+        # awaitAdvancedSpecs behave deterministically.
+        try:
+            short_yesno_re = re.compile(r"^\s*(?:yes|y|yeah|yep|sure|ok|okay|no|n|nope|skip)\b[\.\!\?\s]*$", re.IGNORECASE)
+        except Exception:
+            short_yesno_re = None
+
+        if isinstance(user_message, str) and short_yesno_re and short_yesno_re.match(user_message):
+            matched = short_yesno_re.match(user_message).group(0).strip()
+            if intent == 'knowledgeQuestion':
+                logging.info(f"[SALES_AGENT] Overriding intent 'knowledgeQuestion' for short reply: '{user_message}' (matched='{matched}')")
+            intent = 'workflow'
+            logging.info(f"[SALES_AGENT] Routed short reply to workflow branch: '{user_message}' (matched='{matched}', step={step})")
+
         # Handle knowledge questions - answer and resume workflow
         if intent == "knowledgeQuestion":
             # Determine context-aware response based on current workflow step
             if step == "awaitMissingInfo":
                 context_hint = "Once you have the information you need, please provide the missing details so we can continue with your product selection or Would you like to continue anyway?"
-            elif step == "awaitOptional":
-                context_hint = "Now, let's continue - do you have any additional requirements to add?"
+            elif step == "awaitAdditionalAndLatestSpecs":
+                context_hint = "Now, let's continue - would you like to add additional and latest specifications?"
+            elif step == "awaitAdvancedSpecs":
+                context_hint = "Now, let's continue with advanced specifications."
             elif step == "showSummary":
                 context_hint = "Now, let's proceed with your product analysis."
             else:
                 context_hint = "Now, let's continue with your product selection."
             
             prompt_template = f"""
-You are an expert industrial sales consultant. The user asked a knowledge question: "{user_message}"
+You are Engenie - an expert industrial sales consultant. The user asked a knowledge question: "{user_message}"
 
 Provide a clear, professional answer about industrial products, processes, or terminology.
 Keep your response informative but concise (2-3 sentences max).
@@ -496,7 +540,7 @@ Focus on being helpful while maintaining the conversation flow.
             # Build and execute LLM chain
             full_prompt = ChatPromptTemplate.from_template(prompt_template)
             response_chain = full_prompt | components['llm'] | StrOutputParser()
-            llm_response = response_chain.invoke({"user_input": user_message})
+            llm_response = response_chain.invoke({"user_input": user_message, "prompt": prompt_template})
             
             # Return response without changing workflow step - use the step sent by frontend
             return jsonify({
@@ -510,267 +554,437 @@ Focus on being helpful while maintaining the conversation flow.
         # --- Original Prompt Selection Based on Step ---
         if step == 'initialInput':
             product_type = data_context.get('productType', 'a product')
+            # If frontend indicated this request should save immediately (e.g., initial full-spec submit),
+            # bypass the greeting prompt and persist the detected product type in session.
+            save_flag = False
+            if isinstance(data, dict):
+                # Accept both `saveImmediately` boolean and `action: 'save'` patterns
+                save_flag = bool(data.get('saveImmediately')) or data.get('action') == 'save'
+            if save_flag:
+                session[f'product_type_{search_session_id}'] = product_type
+                session[f'current_step_{search_session_id}'] = 'initialInput'
+                session.modified = True
+                # Return quick confirmation to frontend so it can proceed without receiving the greeting prompt
+                return jsonify({
+                    "content": f"Saved product type: {product_type}",
+                    "nextStep": "awaitAdditionalAndLatestSpecs"
+                }), 200
             
-
             
             prompt_template = f"""
-[Session: {search_session_id}] - You are a helpful sales agent in a fresh conversation. The user shared their requirements, and you identified the product type as '{product_type}'.
+[Session: {search_session_id}] - You are Engenie - a helpful sales agent in a fresh conversation. The user shared their requirements, and you identified the product type as '{product_type}'.
 Your response must:
 1. Start positively (e.g., "Great choice!" or similar).
 2. Confirm the identified product type in a friendly way.
-3. Ask if they have any other requirements.
+3. Ask: "Additional and latest specifications are available. Would you like to add them?"
 
 Important: This is an independent conversation session. Do not reference any previous interactions.
 """
-            next_step = "awaitOptional"
+            next_step = "awaitAdditionalAndLatestSpecs"
             
-        elif step == 'awaitOptional':
-            # Check if user wants to proceed to latest advanced specifications
+        elif step == 'awaitAdditionalAndLatestSpecs':
+            # Handle the combined "Additional and Latest Specs" step
             user_lower = user_message.lower().strip()
             
-            # If user says no to optional requirements, automatically move to advanced specifications
-            if user_lower in ['no', 'n', 'none', 'skip', 'done', 'proceed', 'ready']:
-                product_type = data_context.get('productType', session.get(f'product_type_{search_session_id}', 'this product'))
-                prompt_template = f"""
-You are a helpful sales agent. The user indicated they're done with optional requirements.
-Respond with: "Perfect! Would you like to add latest advanced specifications with series numbers to enhance your selection for {product_type}?. I will get the specifications for you."
-"""
-                next_step = "awaitAdvanced"
-            else:
-                # User provided additional requirements - check if they seem ready for advanced specifications
-                # Use LLM to decide if enough requirements have been gathered
-                context_prompt = f"""
-Analyze this user input in the context of product requirements gathering: "{user_message}"
-
-The user has been adding optional requirements. Based on their input, should we:
-1. Continue collecting more optional requirements (respond with "CONTINUE")
-2. Move to latest advanced specifications discovery with series numbers (respond with "ADVANCED")
-
-Consider factors like:
-- If the user seems satisfied with their current requirements
-- If they're asking to proceed or finish
-- If they've provided substantial additional details
-
-Respond with only "CONTINUE" or "ADVANCED".
-"""
-                
-                # Get LLM decision
-                components_dict = setup_langchain_components()
-                llm = components_dict['llm']
-                output_parser = StrOutputParser()
-                prompt = ChatPromptTemplate.from_template(context_prompt)
-                chain = prompt | llm | output_parser
-                decision = chain.invoke({}).strip().upper()
-                
-                if decision == "ADVANCED":
-                    product_type = data_context.get('productType', session.get(f'product_type_{search_session_id}', 'this product'))
-                    prompt_template = f"""
-You are a helpful sales agent. The user provided additional requirements and seems ready to proceed.
-Acknowledge their input and say: "Great! Now would you like to add latest advanced specifications with series numbers to enhance your selection for {product_type}?. I will get the specifications for you."
-"""
-                    next_step = "awaitAdvanced"
-                else:
+            # Define yes/no keywords
+            affirmative_keywords = ['yes', 'y', 'yeah', 'yep', 'sure', 'ok', 'okay']
+            negative_keywords = ['no', 'n', 'nope', 'skip']
+            
+            # Check if we're waiting for yes/no or collecting specs input
+            # Track state in session to know if we've asked the question
+            asking_state_key = f'awaiting_additional_specs_yesno_{search_session_id}'
+            is_awaiting_yesno = session.get(asking_state_key, True)
+            
+            # Check if user response is valid yes/no
+            is_yes = any(keyword in user_lower for keyword in affirmative_keywords)
+            is_no = any(keyword in user_lower for keyword in negative_keywords)
+            
+            if is_awaiting_yesno:
+                # First interaction - asking yes/no question
+                if is_no:
+                    # User says NO -> skip directly to showSummary
+                    session[asking_state_key] = False
+                    # Use LLM to produce the fixed summary-intro sentence
                     prompt_template = """
-You are a helpful sales agent. The user has provided additional information or requirements.
-Acknowledge what they've shared and ask if there's anything else they'd like to add before moving forward.
-Keep it friendly and concise.
+You are Engenie - a helpful sales agent.
+
+The user said NO to adding additional or latest specifications.
+
+Respond with EXACTLY this single sentence and nothing else:
+
+"It sounds like you're ready to move forward. Here's a quick summary of what you have provided:"
 """
-                    next_step = "awaitOptional"  # Stay in same step to allow more additions
+                    next_step = "showSummary"
+                elif is_yes:
+                    # User says YES -> ask them to enter their additional/latest specifications
+                    session[asking_state_key] = False  # Now we're collecting input
+                    # Use LLM to remind them of the latest advanced specifications, then ask for input
+                    available_parameters = data_context.get('availableParameters', [])
+                    if available_parameters:
+                        params_display = format_available_parameters(available_parameters)
+                        prompt_template = f"""
+You are Engenie - a helpful sales assistant. The user said YES to adding additional/latest specifications.
+
+You have the following latest advanced specifications available:
+
+{params_display}
+
+Respond with a short message that:
+1. Starts with "Great!" or similar.
+2. Briefly reminds the user of these latest advanced specifications.
+3. Asks them to enter their additional or latest specifications.
+
+Keep it concise and friendly.
+"""
+                    # else:
+                    #     prompt_template = "Great! Please enter your additional or latest specifications."
+
+                    next_step = "awaitAdditionalAndLatestSpecs"  # Stay in step to collect input
+                else:
+                    # Invalid response - ask for yes/no
+                    llm_response = "Please respond with yes or no. Additional and latest specifications are available. Would you like to add them?"
+                    prompt_template = ""
+                    next_step = "awaitAdditionalAndLatestSpecs"  # Stay in step until valid answer
+            else:
+                # We're collecting the actual specifications input
+                # User has provided their additional/latest specs - process and move to advanced parameters
+                product_type = data_context.get('productType') or session.get(f'product_type_{search_session_id}')
+                
+                # Process the additional requirements using additional_requirements endpoint logic
+                # Store the user input for processing - frontend will call /additional_requirements to extract and merge
+                session[f'additional_specs_input_{search_session_id}'] = user_message
+                session[asking_state_key] = True  # Reset for next time
+                
+                prompt_template = f"""
+You are Engenie - a helpful sales agent. The user provided additional and latest specifications.
+Acknowledge their input briefly and say: "Thank you! Now let me discover the latest advanced parameters for {product_type}."
+"""
+                next_step = "awaitAdvancedSpecs"
         
-        elif step == 'awaitAdvanced':
+        elif step == 'awaitAdvancedSpecs':
             # Handle advanced parameters step
             user_lower = user_message.lower().strip()
-            
+
             # Get context data (session-isolated)
             product_type = data_context.get('productType') or session.get(f'product_type_{search_session_id}')
+            # NOTE: available_parameters is expected to be a list of strings or dicts
             available_parameters = data_context.get('availableParameters', [])
             selected_parameters = data_context.get('selectedParameters', {})
             total_selected = data_context.get('totalSelected', 0)
             
+            # Define trigger keywords
+            display_keywords = ['show', 'display', 'list', 'see', 'view', 'what are', 'remind']
+            affirmative_keywords = ['yes', 'y', 'yeah', 'yep', 'sure', 'proceed', 'continue', 'ok', 'okay', 'go ahead']
+            negative_keywords = ['no', 'n', 'skip', 'none', 'not needed', 'done', 'not interested']
+
             # Debug logging
-            logging.info(f"awaitAdvanced - product_type: {product_type}")
-            logging.info(f"awaitAdvanced - available_parameters: {available_parameters}")
-            logging.info(f"awaitAdvanced - user_message: {user_message}")
+            logging.info(f"awaitAdvancedSpecs - product_type: {product_type}")
+            logging.info(f"awaitAdvancedSpecs - available_parameters count: {len(available_parameters)}")
+            logging.info(f"awaitAdvancedSpecs - user_message: {user_message}")
             
             # Check if this is first time (no parameters discovered yet)
             if not available_parameters or len(available_parameters) == 0:
-                # First time in awaitAdvanced - discover and show parameters
-                logging.info(f"Discovering parameters for product_type: {product_type}")
-                try:
-                    if product_type:
-                        # Discover advanced parameters
-                        parameters_result = discover_advanced_parameters(product_type)
-                        discovered_params = parameters_result.get('unique_parameters', [])[:15]
-                        filtered_count = parameters_result.get('existing_parameters_filtered', 0)
-                        
-                        logging.info(f"Discovered {len(discovered_params)} new parameters: {discovered_params}")
-                        if filtered_count > 0:
-                            logging.info(f"Filtered out {filtered_count} parameters that were already in mandatory/optional requirements")
-                        
-                        # Store discovered parameters in session for future use
-                        data_context['availableParameters'] = discovered_params
-                        session['data'] = data_context
-                        session.modified = True
-                        
-                        # Check if no new parameters were found
-                        if len(discovered_params) == 0:
-                            # When count is 0, ask if they want to proceed to summary only
-                            if filtered_count > 0:
-                                filter_info = f" All {filtered_count} potential advanced parameters were already covered in your mandatory/optional requirements."
-                            else:
-                                filter_info = " No new advanced parameters were found for this product type."
-                            
-                            prompt_template = f"""
-You are a helpful sales agent. No new advanced parameters were discovered.
-Respond with: "I couldn't find any new advanced parameters for your {product_type}.{filter_info}
+                
+                # --- Handling retry/skip when discovery yielded 0 results or after an error ---
+                parameter_error = data_context.get('parameterError', False)
+                no_params_found = data_context.get('no_params_found', False)
+                
+                if parameter_error and user_lower in affirmative_keywords:
+                    # User confirms they want to skip after an error
+                    prompt_template = "You are Engenie - a helpful sales agent. Acknowledge skipping and move to summary."
+                    next_step = "showSummary"
+                elif parameter_error and user_lower in negative_keywords:
+                    # User wants to retry (or says 'no' to skipping) - fall through to discovery
+                    prompt_template = "" # Clears the error state prompt
+                    pass
+                elif user_lower in affirmative_keywords or user_lower == "":
+                    # User agreed to proceed with discovery (or sent empty message) - run discovery
+                    prompt_template = "" # Clears any prior prompt
+                    pass
+                elif user_lower in negative_keywords:
+                    # The LLM previously returned zero parameters and user answered 'no' to
+                    # "Shall I proceed to the summary?" — user chose NOT to proceed, so retry discovery.
+                    prompt_template = "" # Clears any prior prompt
+                    pass
+                else:
+                    # Default action for unexpected input when no params are known
+                    prompt_template = "I'm not sure how to proceed. Would you like me to try discovering the parameters, or shall we skip to the summary?"
+                    next_step = "awaitAdvancedSpecs"
+                    
+                # --- Initial Discovery Block (Runs on first entry or retry) ---
+                # Only run discovery if no specific prompt_template has been set above
+                if not prompt_template.strip() and 'llm_response' not in locals():
+                    logging.info(f"Attempting discovery for product_type: {product_type}")
+                    try:
+                        if product_type:
+                            # Discover advanced parameters (works for both MongoDB cache and LLM discovery)
+                            parameters_result = discover_advanced_parameters(product_type)
+                            # Handle both 'unique_parameters' and 'unique_specifications' keys (MongoDB uses 'unique_specifications')
+                            discovered_params = parameters_result.get('unique_parameters') or parameters_result.get('unique_specifications', [])
+                            discovered_params = discovered_params[:15] if discovered_params else []
+                            filtered_count = parameters_result.get('existing_parameters_filtered', 0) or parameters_result.get('existing_specifications_filtered', 0)
 
-Shall I proceed to the summary?"
-"""
+                            # Store discovered parameters in session for future use
+                            data_context['availableParameters'] = discovered_params
+                            # Track whether discovery returned zero parameters
+                            data_context['no_params_found'] = len(discovered_params) == 0
+                            session['data'] = data_context
+                            session.modified = True
+
+                            if len(discovered_params) == 0:
+                                # CASE 2 — No advanced parameters found: ask if user wants to proceed to summary
+                                filter_info = (
+                                    f" All {filtered_count} potential advanced parameters were already covered in your mandatory/optional requirements."
+                                    if filtered_count > 0
+                                    else " No new advanced parameters were found for this product type."
+                                )
+
+                                # Direct deterministic response (no extra LLM prompting)
+                                llm_response = (
+                                    f"No advanced parameters were found.{filter_info}\n\n"
+                                    "No advanced parameters were found. Do you want to proceed to summary?"
+                                )
+                                prompt_template = ""
+                            else:
+                                # CASE 1 — Advanced parameters found: show list and ask if user wants to add them
+                                params_display = format_available_parameters(discovered_params)
+
+                                # Direct deterministic response listing parameters
+                                llm_response = (
+                                    "These advanced parameters were identified:\n\n"
+                                    f"{params_display}\n\n"
+                                    "Do you want to add these advanced parameters?"
+                                )
+                                # Set prompt_template to empty so LLM is not called
+                                prompt_template = ""
                         else:
-                            # Format parameters for display when count > 0
-                            params_list = []
-                            for i, param in enumerate(discovered_params, 1):
-                                # Handle both dict format (new) and string format (old)
-                                if isinstance(param, dict):
-                                    formatted_param = param.get('name', param.get('key', '').replace('_', ' ').title())
-                                else:
-                                    formatted_param = param.replace('_', ' ').title()
-                                params_list.append(f"{i}. **{formatted_param}**")
-                            
-                            params_display = "\n".join(params_list)
-                            
-                            # Create message with filtering information
-                            if filtered_count > 0:
-                                filter_info = f" (found {len(discovered_params) + filtered_count} total, filtered out {filtered_count} already specified)"
-                            else:
-                                filter_info = ""
-                            
-                            prompt_template = f"""
-You are a helpful sales agent. The user is ready for advanced parameters.
-Respond with: "Great! I discovered **{len(discovered_params)} new advanced parameters**:
+                            # No product type found
+                            data_context['parameterError'] = True
+                            session['data'] = data_context
+                            session.modified = True
+                            prompt_template = "I'm having trouble accessing advanced parameters because the product type isn't clear. Would you like to skip this step?"
 
-{params_display}
-
-**Would you like to add advanced parameters?**
-"
-"""
-                    else:
-                        # Mark as error case for later handling
+                    except Exception as e:
+                        # General error case
+                        logging.error(f"Error during parameter discovery: {e}", exc_info=True)
                         data_context['parameterError'] = True
                         session['data'] = data_context
                         session.modified = True
-                        
-                        prompt_template = """
-You are a helpful sales agent. There was an issue discovering advanced parameters.
-Respond with: "I'm having trouble accessing advanced parameters. Would you like to skip this step?"
-"""
-                except Exception as e:
-                    # Mark as error case for later handling
-                    data_context['parameterError'] = True
-                    session['data'] = data_context
-                    session.modified = True
-                    
-                    prompt_template = """
-You are a helpful sales agent. There was an error discovering advanced parameters.
-Respond with: "I encountered an issue discovering advanced parameters. Would you like to skip this step?"
-"""
-                next_step = "awaitAdvanced"
+                        prompt_template = "I encountered an issue discovering advanced parameters. Would you like to skip this step?"
+                
+                # Now interpret user reply when no available_parameters exist (only if we didn't run discovery or discovery yielded 0)
+                if data_context.get('no_params_found', False) or parameter_error:
+                    # CASE 2 — Follow-up after "No advanced parameters were found. Do you want to proceed to summary?"
+                    if user_lower in affirmative_keywords:
+                        # User said YES -> go directly to summary
+                        llm_response = "Okay, I'll proceed to the summary without advanced parameters."
+                        prompt_template = ""
+                        next_step = "showSummary"
+                    elif user_lower in negative_keywords:
+                        # User said NO -> retry discovery (loop will run discovery again)
+                        data_context['parameterError'] = False
+                        data_context['no_params_found'] = False  # Force a retry
+                        session['data'] = data_context
+                        session.modified = True
+                        llm_response = "No problem, I'll try discovering advanced parameters again."
+                        prompt_template = ""
+                        next_step = "awaitAdvancedSpecs"
+                    elif parameter_error and not user_message.strip():
+                        # Empty message while in error state - stay and prompt again
+                        prompt_template = "I encountered an issue discovering advanced parameters. Would you like to skip this step?"
+                        next_step = "awaitAdvancedSpecs"
+                    elif not user_message.strip():
+                        # Empty message while in no_params_found state - repeat the question
+                        llm_response = "No advanced parameters were found. Do you want to proceed to summary?"
+                        prompt_template = ""
+                        next_step = "awaitAdvancedSpecs"
+                    else:
+                        # If user gave something else, ask the clarifying question again
+                        llm_response = "Please answer with yes or no. Do you want to proceed to summary without advanced parameters?"
+                        prompt_template = ""
+                        next_step = "awaitAdvancedSpecs"
+                else:
+                    # Default: stay in awaitAdvancedSpecs and attempt discovery based on affirmative/empty
+                    next_step = "awaitAdvancedSpecs"
             else:
-                # Parameters already discovered - handle user response
+                # --- Parameters already discovered - handle user response ---
                 parameter_error = data_context.get('parameterError', False)
                 
-                # If there was an error and user says yes to skip
-                if parameter_error and user_lower in ['yes', 'y', 'yeah', 'yep', 'sure', 'ok', 'okay']:
-                    prompt_template = """
-You are a helpful sales agent. The user chose to skip advanced parameters.
-Respond with: "No problem! Let me proceed to the summary of your requirements."
-"""
-                    next_step = "showSummary"
-                # If user says no to adding parameters (normal flow)
-                elif user_lower in ['no', 'n', 'skip', 'none', 'not needed', 'done']:
-                    prompt_template = """
-You are a helpful sales agent. The user chose to skip advanced parameters.
-Respond with: "No problem! Let me proceed to the summary of your requirements."
-"""
-                    next_step = "showSummary"
-                # If user says yes to adding parameters (normal flow)
-                elif user_lower in ['yes', 'y', 'yeah', 'yep', 'sure'] and not parameter_error:
-                    prompt_template = """
-You are a helpful sales agent. The user wants to add advanced parameters.
-Respond with: "Great! Please tell me which parameters you'd like to add. You can specify by name or say 'all' to add all of them."
-"""
-                    next_step = "awaitAdvanced"
-                # User provided parameter selections
-                elif total_selected > 0:
-                    # Parameters were selected
-                    selected_names = [param.replace('_', ' ').title() for param in selected_parameters.keys()]
-                    selected_display = ", ".join(selected_names)
-                    
+                wants_display = any(keyword in user_lower for keyword in display_keywords)
+                user_affirmed = any(keyword in user_lower for keyword in affirmative_keywords)
+                user_denied = any(keyword in user_lower for keyword in negative_keywords)
+
+                # CASE 1: User says 'yes' to adding parameters - show keys and ask them to provide values
+                # Check this FIRST before CASE 2, so "yes" doesn't get caught by the display condition
+                if user_affirmed:
+                    # CASE 1 — User said YES: use LLM to ask for values, listing the parameters
+                    params_display = format_available_parameters(available_parameters)
                     prompt_template = f"""
-You are a helpful sales agent. The user selected advanced parameters.
+You are Engenie - a helpful sales agent.
+
+The user said YES to adding advanced parameters. You have the following advanced parameters available:
+
+{params_display}
+
+Respond with a concise message that:
+1. Starts with "Great!" or similar.
+2. Asks the user to enter the values for the advanced parameters they'd like to add.
+3. Reminds them of the available parameters.
+
+Keep it short and friendly.
+"""
+                    next_step = "awaitAdvancedSpecs"  # Stay in step to collect values
+                    
+                # CASE 2: User says 'no' to adding parameters (normal flow)
+                elif user_denied:
+                    # User explicitly declined adding advanced parameters -> go directly to SUMMARY
+                    # Use the same summary-intro sentence as in awaitAdditionalAndLatestSpecs
+                    prompt_template = """
+You are Engenie - a helpful sales agent.
+
+The user said NO to adding advanced parameters.
+
+Respond with EXACTLY this single sentence and nothing else:
+
+"It sounds like you're ready to move forward. Here's a quick summary of what you have provided:"
+"""
+                    next_step = "showSummary"
+                    
+                # CASE 3: Force the list to display if the user explicitly asks to see it, or empty message
+                elif wants_display or (not user_message.strip() and not total_selected > 0):
+                    params_display = format_available_parameters(available_parameters)
+
+                    # Use LLM to present the list and ask if they want to add them
+                    prompt_template = f"""
+You are Engenie - a helpful sales agent.
+
+You need to show the user the advanced parameters that were identified and ask if they want to add them.
+
+These additional advanced parameters were identified:
+
+{params_display}
+
+Respond with a short message that:
+1. Shows these parameters in a readable way.
+2. Asks: "Would you like to add them?" (or very close wording).
+
+Keep it concise and friendly.
+"""
+                    next_step = "awaitAdvancedSpecs"
+                    
+                # CASE 4: User provided parameter selections/values
+                elif total_selected > 0 or user_message.strip():
+                    # User provided values for parameters
+                    selected_names = [param.replace('_', ' ').title() for param in selected_parameters.keys()] if selected_parameters else []
+                    if selected_names:
+                        selected_display = ", ".join(selected_names)
+                        prompt_template = f"""
+You are Engenie - a helpful sales agent. The user provided advanced parameter values.
 Respond with: "**Added Advanced Parameters:** {selected_display}
 
-Would you like to add more parameters, or shall I proceed to the summary?"
+Proceeding to the summary now."
 """
-                    next_step = "awaitAdvanced"
+                    else:
+                        prompt_template = "Thank you for providing the advanced specifications. Proceeding to the summary now."
+                    next_step = "showSummary"
+                    
+                # CASE 5: No parameters matched or user provided other input (Default fallback)
                 else:
-                    # No parameters matched or user provided other input
-                    prompt_template = """
-You are a helpful sales agent. The user's parameter selection didn't match any available options.
-Respond with: "I didn't find any matching parameters. Could you please specify which parameters you'd like to add, or say 'no' to skip?"
-"""
-                    next_step = "awaitAdvanced"
+                    prompt_template = "Please respond with yes or no. These additional advanced parameters were identified. Would you like to add them?"
+                    next_step = "awaitAdvancedSpecs"
             
         elif step == 'confirmAfterMissingInfo':
+            # Discover advanced parameters to show in the response
+            product_type = data_context.get('productType') or session.get(f'product_type_{search_session_id}')
+            
+            # Initial prompt is set as a fallback
             prompt_template = """
-You are a helpful sales assistant. The user just provided the last piece of required information.
+You are Engenie - a helpful sales assistant. The user just provided the last piece of required information.
 
-In a single, encouraging sentence, ask if they have any other optional details or preferences to add before you finalize things.
+In a single, encouraging sentence, ask if they have any other additional specs or latest advanced specs preferences to add before you finalize things.
+
+Make it friendly and encouraging. Example: "Perfect! Before we finalize, would you like to add any additional or latest advanced specifications to enhance your selection?"
 """
-            next_step = "awaitOptional"
+            
+            if product_type:
+                try:
+                    # Discover advanced parameters
+                    parameters_result = discover_advanced_parameters(product_type)
+                    discovered_params = parameters_result.get('unique_parameters', []) or parameters_result.get('unique_specifications', [])
+                    discovered_params = discovered_params[:15] if discovered_params else []
+                    
+                    if len(discovered_params) > 0:
+                        # Format parameters for display
+                        params_display = format_available_parameters(discovered_params)
+                        
+                        # Store discovered parameters in session for later use
+                        data_context['availableParameters'] = discovered_params
+                        session['data'] = data_context
+                        session.modified = True
+
+                        # Use LLM with a strict prompt so it returns the exact desired message
+                        prompt_template = f"""
+You are Engenie - a helpful sales assistant. The user has provided all required information and you have discovered additional latest advanced specifications.
+
+Respond with EXACTLY the following message and nothing else:
+
+Fantastic! Before we finalize, do you have any other additional specs or latest advanced specifications preferences:
+
+ these are the latest advanced specifications:
+{params_display}
+
+Would you like to add them?
+"""
+                    # Else: prompt_template remains the one set before the try block
+                except Exception as e:
+                    logging.error(f"Error discovering parameters in confirmAfterMissingInfo: {e}", exc_info=True)
+                    # Fallback prompt is already set
+            
+            next_step = "awaitAdditionalAndLatestSpecs"
             
         elif step == 'showSummary':
             # Check if user is confirming to proceed with analysis
             user_lower = user_message.lower().strip()
             if user_lower in ['yes', 'y', 'proceed', 'continue', 'run', 'analyze', 'ok', 'okay']:
                 prompt_template = """
-You are a helpful sales agent. The user confirmed they want to proceed with the analysis.
+You are Engenie - a helpful sales agent. The user confirmed they want to proceed with the analysis.
 Respond with: "Excellent! Starting the product analysis now..."
 """
                 next_step = "finalAnalysis"
             else:
-                # First time showing summary or user asking for clarification
+                # First time showing summary - trigger summary generation
+                # The frontend will call handleShowSummaryAndProceed which generates the summary
                 prompt_template = """
-You are a helpful and friendly sales agent.
+You are Engenie - a helpful and friendly sales agent.
 Your response must ONLY be:
 "It sounds like you're ready to move forward. Here's a quick summary of what you have provided:"
 Do NOT add any summary details, bullet points, or extra text. Just return this exact friendly sentence.
 """
-                next_step = "finalAnalysis"
+                next_step = "showSummary"  # Stay in showSummary to trigger summary display
             
         elif step == 'finalAnalysis':
             ranked_products = data_context.get('analysisResult', {}).get('overallRanking', {}).get('rankedProducts', [])
-            matching_products = [p for p in ranked_products if p.get('requirementsMatch') is True]
+            # NOTE: Logic to determine 'matching_products' based on 'requirementsMatch' is in the original code.
+            # Assuming 'requirementsMatch' is a boolean key in each product dict.
+            matching_products = [p for p in ranked_products if p.get('requirementsMatch') is True] 
             count = len(matching_products)
             prompt_template = f"""
-You are a helpful sales agent. The analysis is done and {count} products were found.
-Tell the user the number of products and let them know they can check the right panel for details.
-Keep it clear and professional.
+You are Engenie – a helpful sales agent. I have completed the analysis and found {count} product(s). Inform the user about the number of products and let them know they can check the right panel for details. Keep the tone clear and professional.
 """
             next_step = None  # End of workflow
             
         elif step == 'analysisError':
-            prompt_template = "You are a helpful sales agent. An error happened during the analysis. Apologize and politely ask the user to type 'rerun' to try again."
+            prompt_template = "You are Engenie - a helpful sales agent. An error happened during the analysis. Apologize and politely ask the user to type 'rerun' to try again."
             next_step = "showSummary"  # Allow retry from summary
             
         elif step == 'default':
-            prompt_template = "You are a helpful sales agent. Reply to the user's message in a simple, friendly way and keep the conversation moving forward."
+            prompt_template = "You are Engenie - a helpful sales agent. Reply to the user's message in a simple, friendly way and keep the conversation moving forward."
             next_step = current_step or None
             
         # === NEW WORKFLOW STEPS (Added for enhanced functionality) ===
         elif step == 'greeting':
             prompt_template = f"""
-[Session: {search_session_id}] - You are a friendly and professional industrial sales consultant starting a fresh conversation.
+[Session: {search_session_id}] - You are Engenie - a friendly and professional industrial sales consultant starting a fresh conversation.
 Greet the user warmly and ask them what type of industrial product they are looking for.
 Mention that you can help them find the right solution from various manufacturers.
 Keep it concise and welcoming.
@@ -782,17 +996,19 @@ Important: This is the start of a new, independent conversation session.
         else:
             # Default fallback for unrecognized steps
             prompt_template = f"""
-You are a helpful sales agent. Reply to the user's message: "{user_message}" in a simple, friendly way and keep the conversation moving forward.
+You are Engenie - an helpful sales agent. Reply to the user's message: "{user_message}" in a simple, friendly way and keep the conversation moving forward.
 """
             next_step = current_step or "greeting"
 
         # --- Build Chain and Generate Response ---
+        # Initialize llm_response if not already set (for direct responses without LLM)
+        if 'llm_response' not in locals():
+            llm_response = ""
+            
         if prompt_template.strip():
             full_prompt = ChatPromptTemplate.from_template(prompt_template)
             response_chain = full_prompt | components['llm'] | StrOutputParser()
-            llm_response = response_chain.invoke({"user_input": user_message})
-        else:
-            llm_response = ""
+            llm_response = response_chain.invoke({"user_input": user_message, "product_type": data_context.get('productType'), "count": count if 'count' in locals() else 0, "params_display": params_display if 'params_display' in locals() else 'No parameters.', "prompt": prompt_template})
 
         # Update session with new step (session-isolated)
         if next_step:
@@ -811,11 +1027,14 @@ You are a helpful sales agent. Reply to the user's message: "{user_message}" in 
 
     except Exception as e:
         logging.exception("Sales agent response generation failed.")
+        # Retrieve current step for fallback, defaulting to 'initialInput' if not found
+        fallback_step = session.get(f'current_step_{search_session_id}', 'initialInput')
         return jsonify({
             "error": "Failed to generate response: " + str(e),
             "content": "I apologize, but I'm having technical difficulties. Please try again.",
-            "nextStep": session.get('current_step')
+            "nextStep": fallback_step
         }), 500
+
 
 # =========================================================================
 # === NEW FEEDBACK ENDPOINT ===
@@ -880,19 +1099,19 @@ def handle_feedback():
         # --- LLM RESPONSE GENERATION ---
         if feedback_type == 'positive':
             prompt_template = """
-You are a helpful assistant. The user provided positive feedback on the recent analysis.
+You are Engenie - an helpful assistant. The user provided positive feedback on the recent analysis.
 If they left a comment, it is: '{comment}'.
 Please respond warmly and thank them for their time and input. Keep the response to a single, friendly sentence.
 """
         elif feedback_type == 'negative':
             prompt_template = """
-You are a helpful assistant. The user provided negative feedback on the recent analysis.
+You are Engenie - an helpful assistant. The user provided negative feedback on the recent analysis.
 If they left a comment, it is: '{comment}'.
 Respond with empathy. Acknowledge their feedback, apologize for the inconvenience, and state that their input is valuable and will be used to make improvements. Keep it to one or two professional sentences.
 """
         else:  # This handles the case where only a comment is provided
             prompt_template = """
-You are a helpful assistant. The user provided the following feedback on the analysis: '{comment}'.
+You are Engenie - an helpful assistant. The user provided the following feedback on the analysis: '{comment}'.
 Acknowledge their comment and thank them for taking the time to provide their input.
 """
 
@@ -930,33 +1149,39 @@ def identify_instruments():
 
         # Create the prompt for instrument identification
         prompt_template = """
-You are an expert in Industrial Process Control Systems. Analyze the following requirements and identify the Bill of Materials (instruments) needed.
+
+You are Engenie - an expert assistant in Industrial Process Control Systems. Analyze the given requirements and identify the Bill of Materials (instruments) needed.
 
 Requirements:
 {requirements}
 
 Instructions:
-1. Identify all instruments required for the given Industrial Process Control System Problem Statement
-2. For each instrument, provide:
+1. Extract a unique, descriptive project name (1-2 words) from the requirements that best represents the objective of the industrial system or process described. This should be concise and professional.
+2. Identify all instruments required for the given Industrial Process Control System Problem Statement 
+3. For each instrument, provide:
    - Category (e.g., Pressure Transmitter, Temperature Transmitter, Flow Meter, etc.)
    - Product Name (generic name based on the requirements)
+   - Quantity
    - Specifications (extract from requirements or infer based on industry standards)
    - Sample Input(must include all specification details exactly as listed in the specifications field (no field should be missing)).
    - Ensure every parameter appears explicitly in the sample input text.
-3. Mark inferred requirements explicitly with [INFERRED] tag
-
+4. Mark inferred requirements explicitly with [INFERRED] tag
+ 
 Additionally, identify any accessories, consumables, or ancillary items required to support the instruments (for example: impulse lines, mounting brackets, isolation valves, manifolds, cable/connector types, junction boxes, power supplies, or calibration kits). For accessories, provide:
     - Category (e.g., Impulse Line, Isolation Valve, Mounting Bracket, Junction Box)
     - Accessory Name (generic)
+    - Quantity
     - Specifications (size, material, pressure rating, connector type, etc.)
     - Sample Input(must also include every specification field listed.)
-
+ 
 Return ONLY a valid JSON object with this structure:
 {{
+  "project_name": "<unique project name describing the system>",
   "instruments": [
     {{
       "category": "<category>",
       "product_name": "<product name>",
+      "quantity": "quantity",
       "specifications": {{
         "<spec_field>": "<spec_value>",
         "<spec_field>": "<spec_value>",
@@ -969,6 +1194,7 @@ Return ONLY a valid JSON object with this structure:
         {{
             "category": "<accessory category>",
             "accessory_name": "<accessory name>",
+            "quantity": "<quantity>",
             "specifications": {{
                 "<spec_field>": "<spec_value>"
             }},
@@ -977,8 +1203,9 @@ Return ONLY a valid JSON object with this structure:
     ],
   "summary": "Brief summary of identified instruments"
 }}
-
+ 
 Respond ONLY with valid JSON, no additional text.
+Validate the outputs and adherence to the output structure.
 """
 
         # Build and execute LLM chain with session isolation
@@ -1595,21 +1822,36 @@ Domains:
         vendor_clean = vendor_name.lower().replace(' ', '').replace('&', '').replace('+', '')
         return [f"{vendor_clean}.com", f"{vendor_clean}.de", f"{vendor_clean}group.com"]
 
-def fetch_images_google_cse_sync(vendor_name: str, product_name: str = None):
+def fetch_images_google_cse_sync(vendor_name: str, product_name: str = None, manufacturer_domains: list = None, model_family: str = None, product_type: str = None):
     """
     Synchronous version: Google Custom Search API for images from manufacturer domains
+    
+    Args:
+        vendor_name: Name of the vendor/manufacturer
+        product_name: (Optional) Specific product name/model
+        manufacturer_domains: (Optional) List of manufacturer domains to search within
+        model_family: (Optional) Model family/series to include in search
+        product_type: (Optional) Type of product to help refine search
     """
     if not GOOGLE_API_KEY or not GOOGLE_CX:
         logging.warning("Google CSE credentials not available for image search")
         return []
     
     try:
-        query = f"{vendor_name}"
-        if product_name:
+        # Build the search query in format <vendor_name><modelfamily><product type>
+        query = vendor_name
+        if model_family:
+            query += f" {model_family}"  # Add space for better tokenization
+        if product_type:
+            query += f" {product_type}"  # Add space for better tokenization
+            
+        # Also include product_name if provided, but don't include it in the main query structure
+        if product_name and product_name.lower() not in query.lower():
             query += f" {product_name}"
         
-        # Build site restriction for manufacturer domains using LLM
-        manufacturer_domains = get_manufacturer_domains_from_llm(vendor_name)
+        # Build site restriction for manufacturer domains using LLM (or reuse if provided)
+        if manufacturer_domains is None:
+            manufacturer_domains = get_manufacturer_domains_from_llm(vendor_name)
         domain_filter = " OR ".join([f"site:{domain}" for domain in manufacturer_domains])
         search_query = f"{query} ({domain_filter}) filetype:jpg OR filetype:png"
         
@@ -1642,22 +1884,49 @@ def fetch_images_google_cse_sync(vendor_name: str, product_name: str = None):
         logging.warning(f"Google CSE image search failed for {vendor_name}: {e}")
         return []
 
-def fetch_images_serpapi_sync(vendor_name: str, product_name: str = None):
+def fetch_images_serpapi_sync(vendor_name: str, product_name: str = None, model_family: str = None, product_type: str = None):
     """
     Synchronous version: SerpAPI fallback for Google Images
+    
+    Args:
+        vendor_name: Name of the vendor/manufacturer
+        product_name: (Optional) Specific product name/model
+        model_family: (Optional) Model family/series to include in search
+        product_type: (Optional) Type of product to help refine search
     """
     if not SERPAPI_KEY:
         logging.warning("SerpAPI key not available for image search")
         return []
     
     try:
-        query = f"{vendor_name}"
-        if product_name:
-            query += f" {product_name}"
-        query += " industrial product"
-        
+        # Build the base query in format <vendor_name> <model_family?> <product_type?>
+        base_query = vendor_name
+        if model_family:
+            base_query += f" {model_family}"
+        if product_type:
+            base_query += f" {product_type}"
+
+        # Also include product_name if provided and not already present
+        if product_name and product_name.lower() not in base_query.lower():
+            base_query += f" {product_name}"
+
+        # Add helpful positive/negative tokens used previously
+        base_query += " product OR datasheet OR specification -used -refurbished -ebay -amazon -alibaba -walmart -etsy -pinterest -youtube -video -pdf -doc -xls -ppt -docx -xlsx -pptx"
+
+        # Build manufacturer domain filter using LLM domains when available
+        try:
+            manufacturer_domains = get_manufacturer_domains_from_llm(vendor_name)
+        except Exception:
+            manufacturer_domains = []
+
+        domain_filter = " OR ".join([f"site:{domain}" for domain in manufacturer_domains]) if manufacturer_domains else ""
+        if domain_filter:
+            search_query = f"{base_query} ({domain_filter}) filetype:jpg OR filetype:png"
+        else:
+            search_query = f"{base_query} filetype:jpg OR filetype:png"
+
         search = GoogleSearch({
-            "q": query,
+            "q": search_query,
             "engine": "google_images",
             "api_key": SERPAPI_KEY,
             "num": 8,
@@ -1685,23 +1954,47 @@ def fetch_images_serpapi_sync(vendor_name: str, product_name: str = None):
         logging.warning(f"SerpAPI image search failed for {vendor_name}: {e}")
         return []
 
-def fetch_images_serper_sync(vendor_name: str, product_name: str = None):
+def fetch_images_serper_sync(vendor_name: str, product_name: str = None, model_family: str = None, product_type: str = None):
     """
     Synchronous version: Serper.dev fallback for images
+    
+    Args:
+        vendor_name: Name of the vendor/manufacturer
+        product_name: (Optional) Specific product name/model
+        model_family: (Optional) Model family/series to include in search
+        product_type: (Optional) Type of product to help refine search
     """
     if not SERPER_API_KEY_IMAGES:
         logging.warning("Serper API key not available for image search")
         return []
     
     try:
-        query = f"{vendor_name}"
-        if product_name:
-            query += f" {product_name}"
-        query += " industrial equipment"
-        
+        # Build the base query in format <vendor_name> <model_family?> <product_type?>
+        base_query = vendor_name
+        if model_family:
+            base_query += f" {model_family}"
+        if product_type:
+            base_query += f" {product_type}"
+
+        if product_name and product_name.lower() not in base_query.lower():
+            base_query += f" {product_name}"
+
+        base_query += " product OR datasheet OR specification -used -refurbished -ebay -amazon -alibaba -walmart -etsy -pinterest -youtube -video -pdf -doc -xls -ppt -docx -xlsx -pptx"
+
+        try:
+            manufacturer_domains = get_manufacturer_domains_from_llm(vendor_name)
+        except Exception:
+            manufacturer_domains = []
+
+        domain_filter = " OR ".join([f"site:{domain}" for domain in manufacturer_domains]) if manufacturer_domains else ""
+        if domain_filter:
+            search_query = f"{base_query} ({domain_filter}) filetype:jpg OR filetype:png"
+        else:
+            search_query = f"{base_query} filetype:jpg OR filetype:png"
+
         url = "https://google.serper.dev/images"
         payload = {
-            "q": query,
+            "q": search_query,
             "num": 8
         }
         headers = {
@@ -1732,29 +2025,52 @@ def fetch_images_serper_sync(vendor_name: str, product_name: str = None):
         logging.warning(f"Serper image search failed for {vendor_name}: {e}")
         return []
 
-def fetch_product_images_with_fallback_sync(vendor_name: str, product_name: str = None):
+def fetch_product_images_with_fallback_sync(vendor_name: str, product_name: str = None, manufacturer_domains: list = None, model_family: str = None, product_type: str = None):
     """
     Synchronous 3-level image search fallback system
     1. Google Custom Search API (manufacturer domains)
     2. SerpAPI Google Images
     3. Serper.dev images
+    
+    Args:
+        vendor_name: Name of the vendor/manufacturer
+        product_name: (Optional) Specific product name/model
+        manufacturer_domains: (Optional) List of manufacturer domains to search within
+        model_family: (Optional) Model family/series to include in search
+        product_type: (Optional) Type of product to help refine search
     """
-    logging.info(f"Starting image search for vendor: {vendor_name}, product: {product_name}")
+    logging.info(f"Starting image search for vendor: {vendor_name}, product: {product_name}, model family: {model_family}, type: {product_type}")
     
     # Step 1: Try Google Custom Search API
-    images = fetch_images_google_cse_sync(vendor_name, product_name)
+    images = fetch_images_google_cse_sync(
+        vendor_name=vendor_name,
+        product_name=product_name,
+        manufacturer_domains=manufacturer_domains,
+        model_family=model_family,
+        product_type=product_type
+    )
     if images:
         logging.info(f"Using Google CSE images for {vendor_name}")
         return images, "google_cse"
     
     # Step 2: Try SerpAPI
-    images = fetch_images_serpapi_sync(vendor_name, product_name)
+    images = fetch_images_serpapi_sync(
+        vendor_name=vendor_name,
+        product_name=product_name,
+        model_family=model_family,
+        product_type=product_type
+    )
     if images:
         logging.info(f"Using SerpAPI images for {vendor_name}")
         return images, "serpapi"
     
     # Step 3: Try Serper.dev
-    images = fetch_images_serper_sync(vendor_name, product_name)
+    images = fetch_images_serper_sync(
+        vendor_name=vendor_name,
+        product_name=product_name,
+        model_family=model_family,
+        product_type=product_type
+    )
     if images:
         logging.info(f"Using Serper images for {vendor_name}")
         return images, "serper"
@@ -1763,7 +2079,7 @@ def fetch_product_images_with_fallback_sync(vendor_name: str, product_name: str 
     logging.warning(f"All image search APIs failed for {vendor_name}")
     return [], "none"
 
-def fetch_vendor_logo_sync(vendor_name: str):
+def fetch_vendor_logo_sync(vendor_name: str, manufacturer_domains: list = None):
     """
     Specialized function to fetch vendor logo
     """
@@ -1781,8 +2097,9 @@ def fetch_vendor_logo_sync(vendor_name: str):
         try:
             # Use Google CSE first for official logos
             if GOOGLE_API_KEY and GOOGLE_CX:
-                # Build site restriction for manufacturer domains using LLM
-                manufacturer_domains = get_manufacturer_domains_from_llm(vendor_name)
+                # Build site restriction for manufacturer domains using LLM (or reuse if provided)
+                if manufacturer_domains is None:
+                    manufacturer_domains = get_manufacturer_domains_from_llm(vendor_name)
                 domain_filter = " OR ".join([f"site:{domain}" for domain in manufacturer_domains])
                 search_query = f"{query} ({domain_filter}) filetype:jpg OR filetype:png OR filetype:svg"
                 
@@ -1894,13 +2211,24 @@ async def fetch_images_serpapi(vendor_name: str, product_name: str = None):
         return []
     
     try:
-        query = f"{vendor_name}"
+        base_query = vendor_name
         if product_name:
-            query += f" {product_name}"
-        query += " industrial product"
-        
+            base_query += f" {product_name}"
+        base_query += " product OR datasheet OR specification -used -refurbished -ebay -amazon -alibaba -walmart -etsy -pinterest -youtube -video -pdf -doc -xls -ppt -docx -xlsx -pptx"
+
+        try:
+            manufacturer_domains = get_manufacturer_domains_from_llm(vendor_name)
+        except Exception:
+            manufacturer_domains = []
+
+        domain_filter = " OR ".join([f"site:{domain}" for domain in manufacturer_domains]) if manufacturer_domains else ""
+        if domain_filter:
+            search_query = f"{base_query} ({domain_filter}) filetype:jpg OR filetype:png"
+        else:
+            search_query = f"{base_query} filetype:jpg OR filetype:png"
+
         search = GoogleSearch({
-            "q": query,
+            "q": search_query,
             "engine": "google_images",
             "api_key": SERPAPI_KEY,
             "num": 8,
@@ -1937,14 +2265,25 @@ async def fetch_images_serper(vendor_name: str, product_name: str = None):
         return []
     
     try:
-        query = f"{vendor_name}"
+        base_query = vendor_name
         if product_name:
-            query += f" {product_name}"
-        query += " industrial equipment"
-        
+            base_query += f" {product_name}"
+        base_query += " product OR datasheet OR specification -used -refurbished -ebay -amazon -alibaba -walmart -etsy -pinterest -youtube -video -pdf -doc -xls -ppt -docx -xlsx -pptx"
+
+        try:
+            manufacturer_domains = get_manufacturer_domains_from_llm(vendor_name)
+        except Exception:
+            manufacturer_domains = []
+
+        domain_filter = " OR ".join([f"site:{domain}" for domain in manufacturer_domains]) if manufacturer_domains else ""
+        if domain_filter:
+            search_query = f"{base_query} ({domain_filter}) filetype:jpg OR filetype:png"
+        else:
+            search_query = f"{base_query} filetype:jpg OR filetype:png"
+
         url = "https://google.serper.dev/images"
         payload = {
-            "q": query,
+            "q": search_query,
             "num": 8
         }
         headers = {
@@ -2089,64 +2428,115 @@ def get_analysis_product_images():
     """
     try:
         data = request.get_json()
-        
+
         vendor = data.get("vendor", "")
         product_type = data.get("product_type", "")
         product_name = data.get("product_name", "")
         model_families = data.get("model_families", [])
-        
+
         if not vendor:
             return jsonify({"error": "Vendor name is required"}), 400
-            
+
+        analysis_result = session.get("log_system_response", {}) or {}
+        vendor_analysis = analysis_result.get("vendor_analysis") or {}
+        vendor_matches = vendor_analysis.get("vendor_matches") or []
+
+        is_requirements_match = False
+        for match in vendor_matches:
+            try:
+                match_vendor = match.get("vendor")
+                match_name = match.get("product_name")
+                match_requirements = match.get("requirements_match", False)
+            except AttributeError:
+                continue
+
+            if match_requirements and match_vendor == vendor and match_name == product_name:
+                is_requirements_match = True
+                break
+
+        if not is_requirements_match:
+            logging.info(
+                "Skipping image search for %s %s %s because requirements_match is False or not found",
+                vendor,
+                product_type,
+                product_name,
+            )
+            # Return a consistent shape even when skipping, so frontend can safely read fields
+            return jsonify({
+                "vendor": vendor,
+                "product_type": product_type,
+                "product_name": product_name,
+                "model_families": model_families,
+                "top_image": None,
+                "vendor_logo": None,
+                "all_images": [],
+                "images": [],
+                "image": None,
+                "total_found": 0,
+                "unique_count": 0,
+                "best_count": 0,
+                "search_summary": {
+                    "searches_performed": 0,
+                    "search_types": [],
+                    "sources_used": []
+                }
+            }), 200
+
         logging.info(f"Fetching images for analysis result: {vendor} {product_type} {product_name}")
-        
+
+        # Generate manufacturer domains once per request for this vendor
+        manufacturer_domains = get_manufacturer_domains_from_llm(vendor)
+
         # Search for images with different combinations
         all_images = []
         search_combinations = []
-        
-        # 1. Most specific: vendor + product_name + model_family
-        for model_family in model_families[:3]:  # Limit to first 3 model families
-            search_query = f"{vendor} {product_name} {model_family}"
+
+        # Prefer model family for search if available (e.g., STD800 instead of submodel STD830)
+        primary_family = None
+        if isinstance(model_families, list) and model_families:
+            primary_family = str(model_families[0]).strip()
+
+        # Build a base name for search: model family if present, otherwise product_name
+        # Example: "STD800" instead of "STD830 Pressure Transmitter"
+        base_name_for_search = primary_family or product_name
+
+        # 1. Most specific: vendor + base_name_for_search + product_type
+        if base_name_for_search and product_type:
+            search_query = f"{vendor} {base_name_for_search} {product_type}"
             search_combinations.append({
                 "query": search_query,
-                "type": "specific_model",
+                "type": "family_with_type",
                 "priority": 1
             })
-        
-        # 2. Medium specific: vendor + product_name + product_type
-        if product_name and product_type:
-            search_query = f"{vendor} {product_name} {product_type}"
+
+        # 2. Medium specific: vendor + base_name_for_search
+        if base_name_for_search:
+            search_query = f"{vendor} {base_name_for_search}"
             search_combinations.append({
                 "query": search_query,
-                "type": "product_with_type",
+                "type": "family_or_name",
                 "priority": 2
             })
-        
-        # 3. General: vendor + product_name
-        if product_name:
-            search_query = f"{vendor} {product_name}"
-            search_combinations.append({
-                "query": search_query,
-                "type": "product_general",
-                "priority": 3
-            })
-        
-        # 4. Fallback: vendor + product_type
+
+        # 3. General: vendor + product_type
         if product_type:
             search_query = f"{vendor} {product_type}"
             search_combinations.append({
                 "query": search_query,
                 "type": "type_general",
-                "priority": 4
+                "priority": 3
             })
         
         # Execute searches and collect results
         for search_info in search_combinations:
             try:
                 # Use the search query as product_name parameter
+                # Prefer model family name when available — pass only the base name
+                search_param = base_name_for_search if base_name_for_search else product_name
                 images, source_used = fetch_product_images_with_fallback_sync(
                     vendor_name=vendor,
-                    product_name=search_info["query"].replace(vendor, "").strip()
+                    product_name=search_param,
+                    manufacturer_domains=manufacturer_domains,
                 )
                 
                 # Add metadata to images
@@ -2184,8 +2574,6 @@ def get_analysis_product_images():
             
             # Domain quality (official domains get higher score)
             domain = img.get("domain", "").lower()
-            # Get manufacturer domains for this vendor using LLM
-            manufacturer_domains = get_manufacturer_domains_from_llm(vendor)
             if any(mfg_domain in domain for mfg_domain in manufacturer_domains):
                 score += 15
             
@@ -2217,7 +2605,7 @@ def get_analysis_product_images():
         # Get vendor logo using specialized logo search
         vendor_logo = None
         try:
-            vendor_logo = fetch_vendor_logo_sync(vendor)
+            vendor_logo = fetch_vendor_logo_sync(vendor, manufacturer_domains=manufacturer_domains)
         except Exception as e:
             logging.warning(f"Failed to fetch vendor logo for {vendor}: {e}")
         
@@ -2230,6 +2618,9 @@ def get_analysis_product_images():
             "top_image": top_image,  # Single best image for main display
             "vendor_logo": vendor_logo,  # Vendor logo
             "all_images": best_images,  # All images for "view more"
+            # Compatibility fields: many frontends expect `images` or `image`
+            "images": best_images,
+            "image": top_image,
             "total_found": len(all_images),
             "unique_count": len(unique_images),
             "best_count": len(best_images),
@@ -2557,19 +2948,25 @@ def api_validate():
         # Get search session ID if provided (for multiple search tabs)
         search_session_id = data.get("search_session_id", "default")
         
-        # Clear ANY previous product type data for this search session to ensure independent searches
+        # By default preserve any previously-detected product type and workflow state for this
+        # search session. Only clear them when the client explicitly requests a reset
+        # (for example when initializing a brand-new independent search tab).
         session_key = f'product_type_{search_session_id}'
-        if session_key in session:
-            logging.info(f"[VALIDATE] Session {search_session_id}: Clearing previous product type: {session[session_key]}")
-            del session[session_key]
-        
-        # Also clear any workflow state for fresh start
         step_key = f'current_step_{search_session_id}'
         intent_key = f'current_intent_{search_session_id}'
-        if step_key in session:
-            del session[step_key]
-        if intent_key in session:
-            del session[intent_key]
+
+        if data.get('reset', False):
+            if session_key in session:
+                logging.info(f"[VALIDATE] Session {search_session_id}: Clearing previous product type due to reset request: {session[session_key]}")
+                del session[session_key]
+            if step_key in session:
+                logging.info(f"[VALIDATE] Session {search_session_id}: Clearing step state due to reset request: {session[step_key]}")
+                del session[step_key]
+            if intent_key in session:
+                logging.info(f"[VALIDATE] Session {search_session_id}: Clearing intent state due to reset request: {session[intent_key]}")
+                del session[intent_key]
+        else:
+            logging.info(f"[VALIDATE] Session {search_session_id}: Preserving existing product_type and workflow state if present.")
         
         # Store original user input for logging (session-isolated)
         session[f'log_user_query_{search_session_id}'] = user_input
@@ -2657,7 +3054,7 @@ def api_validate():
 
             if not is_repeat:
                 alert_prompt = ChatPromptTemplate.from_template(
-                    """You are a helpful sales agent. The user shared their requirements, and you identified the product type as '{product_type}'.
+                    """You are Engenie - an helpful sales agent. The user shared their requirements, and you identified the product type as '{product_type}'.
 Your response must:
 1. Start positively (e.g., "Great choice!" or similar).
 2. Confirm the identified product type in a friendly way.
@@ -2668,7 +3065,7 @@ Your response must:
                 )
             else:
                 alert_prompt = ChatPromptTemplate.from_template(
-                    """You are a helpful sales assistant.
+                    """You are Engenie - a helpful sales assistant.
 Write a short, clear response (1–2 sentences):
 1. Tell the user there are still some missing specifications.
 2. List the missing fields as simple key names only: **{missing_fields}**, separated by commas.
@@ -2894,7 +3291,7 @@ def api_add_advanced_parameters():
 
         # Use LLM to extract selected specifications from user input
         prompt = ChatPromptTemplate.from_template("""
-You are an expert assistant helping users select latest advanced specifications with series numbers for industrial equipment.
+You are Engenie - an expert assistant helping users select latest advanced specifications with series numbers for industrial equipment.
 
 Product Type: {product_type}
 Available Specifications: {available_parameters}
@@ -2961,12 +3358,36 @@ Examples:
                 
                 explanation = f"Selected {len(selected_parameters)} latest specifications based on your input."
 
+        def wants_parameter_display(text: str) -> bool:
+            lowered = text.lower()
+            display_keywords = ["show", "display", "list", "see", "view", "what are"]
+            spec_keywords = ["spec", "parameter", "latest"]
+            return any(keyword in lowered for keyword in display_keywords) and any(
+                key in lowered for key in spec_keywords
+            )
+
+        normalized_input = user_input.strip().lower()
+        
         # Generate friendly response
         if selected_parameters:
             param_list = ", ".join([param.replace('_', ' ').title() for param in selected_parameters.keys()])
             friendly_response = f"Great! I've added these latest advanced specifications: {param_list}. Would you like to add any more advanced specifications?"
         else:
-            friendly_response = "I didn't find any matching specifications in your input. Could you please specify which latest specifications you'd like to add?"
+            if wants_parameter_display(normalized_input) and available_parameters:
+                formatted_available = ", ".join(
+                    [
+                        (param.get("name") or param.get("key", "")).strip()
+                        if isinstance(param, dict)
+                        else str(param)
+                        for param in available_parameters
+                    ]
+                )
+                friendly_response = (
+                    "Here are the latest advanced specifications you can add: "
+                    f"{formatted_available}. Let me know the names you want to include or say 'no' to skip."
+                )
+            else:
+                friendly_response = "I didn't find any matching specifications in your input. Could you please specify which latest specifications you'd like to add?"
 
         response_data = {
             "selectedParameters": convert_keys_to_camel_case(selected_parameters),
@@ -3526,28 +3947,254 @@ def enhance_submodel_mapping_endpoint():
         return jsonify({"error": "Failed to enhance submodel mapping"}), 500
     
 
-@app.cli.command("init-db")
-def init_db_command():
-    """Creates the database tables and the default admin user."""
-    db.create_all()
-    if not User.query.filter_by(role='admin').first():
-        hashed_pw = hash_password("Daman@123")  # Use an environment variable for this password in a real app
-        admin = User(
-            username="Daman",
-            email="reddydaman04@gmail.com",
-            password_hash=hashed_pw,
-            status='active',
-            role='admin'
-        )
-        db.session.add(admin)
-        db.session.commit()
-        print("Admin user created with username 'Daman'.")
-    else:
-        print("Admin user already exists.")
-    print("Database initialized.")
+# =========================================================================
+# === PROJECT MANAGEMENT ENDPOINTS ===
+# =========================================================================
+
+@app.route("/api/projects/save", methods=["POST"])
+@login_required
+def save_project():
+    """
+    Save or update a project with all current state data using MongoDB
+    """
+    try:
+        data = request.get_json(force=True)
+        # Debug log incoming product_type information to trace saving issues (project save)
+        try:
+            incoming_pt = data.get('product_type') if isinstance(data, dict) else None
+            incoming_detected = data.get('detected_product_type') if isinstance(data, dict) else None
+            logging.info(f"[SAVE_PROJECT] Incoming product_type='{incoming_pt}' detected_product_type='{incoming_detected}' project_name='{data.get('project_name') if isinstance(data, dict) else None}' user_id={session.get('user_id')}")
+        except Exception:
+            logging.exception("Failed to log incoming project save payload")
+        
+        # Get current user ID
+        user_id = str(session['user_id'])
+        
+        # Extract project data
+        project_id = data.get("project_id")  # If updating existing project
+        project_name = data.get("project_name", "").strip()
+        
+        if not project_name:
+            return jsonify({"error": "Project name is required"}), 400
+        
+        if not data.get("initial_requirements", "").strip():
+            return jsonify({"error": "Initial requirements are required"}), 400
+        
+        # Save project to MongoDB using project manager
+        # If the frontend provided a displayed_media_map, persist those images into GridFS
+        try:
+            displayed_media = data.get('displayed_media_map', {}) if isinstance(data, dict) else {}
+            if displayed_media:
+                from mongodb_utils import upload_to_mongodb
+                # For each displayed media entry, fetch the URL and store bytes in GridFS
+                for key, entry in displayed_media.items():
+                    try:
+                        top = entry.get('top_image') if isinstance(entry, dict) else None
+                        vlogo = entry.get('vendor_logo') if isinstance(entry, dict) else None
+
+                        def process_media(obj, subtype):
+                            if not obj:
+                                return None
+                            url = obj.get('url') if isinstance(obj, dict) else (obj if isinstance(obj, str) else None)
+                            if not url:
+                                return None
+                            # If url already references our API, skip re-upload
+                            if url.startswith('/api/projects/file/'):
+                                return url
+                            # If it's a data URL, decode
+                            if url.startswith('data:'):
+                                import base64, re
+                                m = re.match(r'data:(.*?);base64,(.*)', url)
+                                if m:
+                                    content_type = m.group(1)
+                                    b = base64.b64decode(m.group(2))
+                                    metadata = {'collection_type': 'documents', 'original_url': '', 'content_type': content_type}
+                                    fid = upload_to_mongodb(b, metadata)
+                                    return f"/api/projects/file/{fid}"
+                                return None
+                            # Otherwise attempt to download the URL
+                            try:
+                                resp = requests.get(url, timeout=8)
+                                resp.raise_for_status()
+                                content_type = resp.headers.get('Content-Type', 'application/octet-stream')
+                                b = resp.content
+                                metadata = {'collection_type': 'documents', 'original_url': url, 'content_type': content_type}
+                                fid = upload_to_mongodb(b, metadata)
+                                return f"/api/projects/file/{fid}"
+                            except Exception as e:
+                                logging.warning(f"Failed to fetch/displayed media URL {url}: {e}")
+                                return None
+
+                        new_top = process_media(top, 'top_image')
+                        new_logo = process_media(vlogo, 'vendor_logo')
+
+                        # Inject back into data so that stored project contains references to GridFS-served URLs
+                        if new_top or new_logo:
+                            # attempt to find product entries in data and replace matching keys
+                            # The frontend sends a map keyed by `${vendor}-${productName}`; we'll store this map as `embedded_media`
+                            if 'embedded_media' not in data:
+                                data['embedded_media'] = {}
+                            data['embedded_media'][key] = {}
+                            if new_top:
+                                data['embedded_media'][key]['top_image'] = {'url': new_top}
+                            if new_logo:
+                                data['embedded_media'][key]['vendor_logo'] = {'url': new_logo}
+                    except Exception as e:
+                        logging.warning(f"Error processing displayed_media_map entry {key}: {e}")
+        except Exception as e:
+            logging.warning(f"Failed to persist displayed_media_map: {e}")
+
+        saved_project = mongo_project_manager.save_project(user_id, data)
+        
+        # Return the saved project data
+        return jsonify({
+            "message": "Project saved successfully",
+            "project": saved_project
+        }), 200
+        
+    except ValueError as e:
+        logging.warning(f"Project save validation error: {e}")
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        logging.exception("Project save failed.")
+        return jsonify({"error": "Failed to save project: " + str(e)}), 500
+
+
+@app.route("/api/projects/preview-save", methods=["POST"])
+@login_required
+def preview_save_project():
+    """
+    Debug helper: compute resolved product_type (prefers detected_product_type)
+    and return it without saving. Useful for quick verification.
+    """
+    try:
+        data = request.get_json(force=True)
+        project_name = (data.get('project_name') or '').strip()
+        detected = data.get('detected_product_type')
+        incoming = (data.get('product_type') or '').strip()
+
+        if detected:
+            resolved = detected.strip()
+        else:
+            if incoming and project_name and incoming.lower() == project_name.lower():
+                resolved = ''
+            else:
+                resolved = incoming
+
+        return jsonify({
+            'resolved_product_type': resolved,
+            'detected_product_type': detected,
+            'incoming_product_type': incoming,
+            'project_name': project_name
+        }), 200
+    except Exception as e:
+        logging.exception('Preview save failed')
+        return jsonify({'error': str(e)}), 500
+
+@app.route("/api/projects", methods=["GET"])
+@login_required
+def get_user_projects():
+    """
+    Get all projects for the current user from MongoDB
+    """
+    try:
+        user_id = str(session['user_id'])
+        
+        # Get all active projects for the user from MongoDB
+        projects = mongo_project_manager.get_user_projects(user_id)
+        
+        return standardized_jsonify({
+            "projects": projects,
+            "total_count": len(projects)
+        }, 200)
+        
+    except Exception as e:
+        logging.exception("Failed to retrieve user projects.")
+        return jsonify({"error": "Failed to retrieve projects: " + str(e)}), 500
+
+@app.route("/api/projects/<project_id>", methods=["GET"])
+@login_required
+def get_project_details(project_id):
+    """
+    Get full project details for loading from MongoDB
+    """
+    try:
+        user_id = str(session['user_id'])
+        
+        # Get project details from MongoDB
+        project_details = mongo_project_manager.get_project_details(project_id, user_id)
+        
+        return standardized_jsonify({"project": project_details}, 200)
+        
+    except ValueError as e:
+        logging.warning(f"Project access denied: {e}")
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        logging.exception(f"Failed to retrieve project {project_id}.")
+        return jsonify({"error": "Failed to retrieve project: " + str(e)}), 500
+
+
+@app.route('/api/projects/file/<file_id>', methods=['GET'])
+@login_required
+def serve_project_file(file_id):
+    """
+    Serve a file stored in GridFS by its file ID.
+    Returns raw bytes with appropriate content-type if available.
+    """
+    try:
+        from bson import ObjectId
+        from mongodb_utils import mongodb_file_manager
+
+        try:
+            oid = ObjectId(file_id)
+        except Exception:
+            return jsonify({'error': 'Invalid file id'}), 400
+
+        grid_file = mongodb_file_manager.gridfs.get(oid)
+        data = grid_file.read()
+        content_type = grid_file.content_type if hasattr(grid_file, 'content_type') else grid_file.metadata.get('content_type') if getattr(grid_file, 'metadata', None) else 'application/octet-stream'
+
+        return (data, 200, {
+            'Content-Type': content_type,
+            'Content-Length': str(len(data)),
+            'Cache-Control': 'public, max-age=31536000'
+        })
+    except Exception as e:
+        logging.exception('Failed to serve project file')
+        return jsonify({'error': str(e)}), 500
+
+@app.route("/api/projects/<project_id>", methods=["DELETE"])
+@login_required
+def delete_project(project_id):
+    """
+    Delete a project (soft delete by changing status to archived) in MongoDB
+    """
+    try:
+        user_id = str(session['user_id'])
+        
+        # Delete project from MongoDB
+        mongo_project_manager.delete_project(project_id, user_id)
+        
+        return standardized_jsonify({"message": "Project deleted successfully"}, 200)
+        
+    except ValueError as e:
+        logging.warning(f"Project delete access denied: {e}")
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        logging.exception(f"Failed to delete project {project_id}.")
+        return jsonify({"error": "Failed to delete project: " + str(e)}), 500
+
+def create_db():
+    with app.app_context():
+        db.create_all()
+        if not User.query.filter_by(role='admin').first():
+            hashed_pw = hash_password("Daman@123")
+            admin = User(username="Daman", email="reddydaman04@gmail.com", password_hash=hashed_pw, status='active', role='admin')
+            db.session.add(admin)
+            db.session.commit()
+            print("Admin user created with username 'Daman' and password 'Daman@123'.")
 if __name__ == "__main__":
     create_db()
     import os
-    port = int(os.environ.get("PORT", 5000))
 
-    app.run(debug=True, host="0.0.0.0", port=port, threaded=True, use_reloader=False)
+    app.run(debug=True, host="0.0.0.0", port=5000, threaded=True, use_reloader=False)
