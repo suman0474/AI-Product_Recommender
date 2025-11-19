@@ -1072,22 +1072,45 @@ def handle_feedback():
         
         username = current_user.username
 
-        # 4. Create the new Log object based on the updated schema
-        new_log = Log(
-            user_name=username,
-            user_query=user_query,
-            system_response=json.dumps(system_response),
-            feedback=feedback_log_entry
-        )
+        # 4. Persist feedback to MongoDB only (do not store in SQL)
+        try:
+            project_id_for_feedback = session.get('current_project_id') or data.get('projectId')
 
-        # 5. Add to the session and commit to the database
-        db.session.add(new_log)
-        db.session.commit()
+            feedback_entry = {
+                'timestamp': datetime.utcnow(),
+                'user_id': str(session.get('user_id')) if session.get('user_id') else None,
+                'user_name': username,
+                'feedback_type': feedback_type,
+                'comment': comment,
+                'user_query': user_query,
+                'system_response': system_response
+            }
 
-        # 6. Log to console *after* successful commit to confirm it's saved
-        logging.info(f"Successfully saved log entry with ID: {new_log.id} for user: '{username}' to the database.")
-        
-        # 7. Clean up the session
+            from mongo_project_manager import mongo_project_manager
+            # If we have a project id, append to that project's feedback_entries array
+            if project_id_for_feedback:
+                try:
+                    mongo_project_manager.append_feedback_to_project(project_id_for_feedback, str(session.get('user_id')), feedback_entry)
+                    logging.info(f"Appended feedback to MongoDB project {project_id_for_feedback}")
+                except Exception as me:
+                    logging.warning(f"Failed to append feedback to MongoDB project {project_id_for_feedback}: {me}")
+                    # On failure to append to project, fall back to inserting into a top-level feedback collection
+                    try:
+                        mongo_project_manager.file_manager.db['feedback'].insert_one({**feedback_entry, 'project_id': project_id_for_feedback})
+                    except Exception as e:
+                        logging.error(f"Failed to save feedback to feedback collection: {e}")
+            else:
+                # No project id: save feedback as standalone document for later linking
+                try:
+                    mongo_project_manager.file_manager.db['feedback'].insert_one({**feedback_entry, 'project_id': None})
+                    logging.info("Saved feedback to MongoDB 'feedback' collection (no project id)")
+                except Exception as e:
+                    logging.error(f"Failed to save feedback to MongoDB feedback collection: {e}")
+
+        except Exception as e:
+            logging.exception(f"Failed to persist feedback to MongoDB: {e}")
+
+        # Clean up the session logging keys
         session.pop('log_user_query', None)
         session.pop('log_system_response', None)
         
@@ -1122,8 +1145,7 @@ Acknowledge their comment and thank them for taking the time to provide their in
         return jsonify({"response": llm_response}), 200
 
     except Exception as e:
-        logging.exception("Feedback handling or database logging failed.")
-        db.session.rollback() # Important: Roll back the transaction if an error occurs
+        logging.exception("Feedback handling or MongoDB storage failed.")
         return jsonify({"error": "Failed to process feedback: " + str(e)}), 500
 
 # =========================================================================
@@ -1845,9 +1867,8 @@ def fetch_images_google_cse_sync(vendor_name: str, product_name: str = None, man
         if product_type:
             query += f" {product_type}"  # Add space for better tokenization
             
-        # Also include product_name if provided, but don't include it in the main query structure
-        if product_name and product_name.lower() not in query.lower():
-            query += f" {product_name}"
+        # We intentionally do NOT include raw product_name in the search query
+        # to focus searches on model_family and product_type only.
         
         # Build site restriction for manufacturer domains using LLM (or reuse if provided)
         if manufacturer_domains is None:
@@ -1906,9 +1927,7 @@ def fetch_images_serpapi_sync(vendor_name: str, product_name: str = None, model_
         if product_type:
             base_query += f" {product_type}"
 
-        # Also include product_name if provided and not already present
-        if product_name and product_name.lower() not in base_query.lower():
-            base_query += f" {product_name}"
+        # Do not include raw product_name here — rely on model_family/product_type
 
         # Add helpful positive/negative tokens used previously
         base_query += " product OR datasheet OR specification -used -refurbished -ebay -amazon -alibaba -walmart -etsy -pinterest -youtube -video -pdf -doc -xls -ppt -docx -xlsx -pptx"
@@ -1976,8 +1995,7 @@ def fetch_images_serper_sync(vendor_name: str, product_name: str = None, model_f
         if product_type:
             base_query += f" {product_type}"
 
-        if product_name and product_name.lower() not in base_query.lower():
-            base_query += f" {product_name}"
+        # Do not include raw product_name here — rely on model_family/product_type
 
         base_query += " product OR datasheet OR specification -used -refurbished -ebay -amazon -alibaba -walmart -etsy -pinterest -youtube -video -pdf -doc -xls -ppt -docx -xlsx -pptx"
 
@@ -2155,7 +2173,7 @@ def fetch_vendor_logo_sync(vendor_name: str, manufacturer_domains: list = None):
     
     return None
 
-async def fetch_images_google_cse(vendor_name: str, product_name: str = None):
+async def fetch_images_google_cse(vendor_name: str, model_family: str = None, product_type: str = None):
     """
     Step 1: Google Custom Search API for images from manufacturer domains
     """
@@ -2165,8 +2183,10 @@ async def fetch_images_google_cse(vendor_name: str, product_name: str = None):
     
     try:
         query = f"{vendor_name}"
-        if product_name:
-            query += f" {product_name}"
+        if model_family:
+            query += f" {model_family}"
+        if product_type:
+            query += f" {product_type}"
         
         # Build site restriction for manufacturer domains using LLM
         manufacturer_domains = get_manufacturer_domains_from_llm(vendor_name)
@@ -2202,7 +2222,7 @@ async def fetch_images_google_cse(vendor_name: str, product_name: str = None):
         logging.warning(f"Google CSE image search failed for {vendor_name}: {e}")
         return []
 
-async def fetch_images_serpapi(vendor_name: str, product_name: str = None):
+async def fetch_images_serpapi(vendor_name: str, model_family: str = None, product_type: str = None):
     """
     Step 2: SerpAPI fallback for Google Images
     """
@@ -2212,8 +2232,10 @@ async def fetch_images_serpapi(vendor_name: str, product_name: str = None):
     
     try:
         base_query = vendor_name
-        if product_name:
-            base_query += f" {product_name}"
+        if model_family:
+            base_query += f" {model_family}"
+        if product_type:
+            base_query += f" {product_type}"
         base_query += " product OR datasheet OR specification -used -refurbished -ebay -amazon -alibaba -walmart -etsy -pinterest -youtube -video -pdf -doc -xls -ppt -docx -xlsx -pptx"
 
         try:
@@ -2256,7 +2278,7 @@ async def fetch_images_serpapi(vendor_name: str, product_name: str = None):
         logging.warning(f"SerpAPI image search failed for {vendor_name}: {e}")
         return []
 
-async def fetch_images_serper(vendor_name: str, product_name: str = None):
+async def fetch_images_serper(vendor_name: str, model_family: str = None, product_type: str = None):
     """
     Step 3: Serper.dev fallback for images
     """
@@ -2266,8 +2288,10 @@ async def fetch_images_serper(vendor_name: str, product_name: str = None):
     
     try:
         base_query = vendor_name
-        if product_name:
-            base_query += f" {product_name}"
+        if model_family:
+            base_query += f" {model_family}"
+        if product_type:
+            base_query += f" {product_type}"
         base_query += " product OR datasheet OR specification -used -refurbished -ebay -amazon -alibaba -walmart -etsy -pinterest -youtube -video -pdf -doc -xls -ppt -docx -xlsx -pptx"
 
         try:
@@ -2323,20 +2347,20 @@ async def fetch_product_images_with_fallback(vendor_name: str, product_name: str
     """
     logging.info(f"Starting image search for vendor: {vendor_name}, product: {product_name}")
     
-    # Step 1: Try Google Custom Search API
-    images = await fetch_images_google_cse(vendor_name, product_name)
+    # Step 1: Try Google Custom Search API (pass model_family/product_type, avoid raw product_name)
+    images = await fetch_images_google_cse(vendor_name, model_family if model_family else None)
     if images:
         logging.info(f"Using Google CSE images for {vendor_name}")
         return images, "google_cse"
     
     # Step 2: Try SerpAPI
-    images = await fetch_images_serpapi(vendor_name, product_name)
+    images = await fetch_images_serpapi(vendor_name, model_family if model_family else None)
     if images:
         logging.info(f"Using SerpAPI images for {vendor_name}")
         return images, "serpapi"
     
     # Step 3: Try Serper.dev
-    images = await fetch_images_serper(vendor_name, product_name)
+    images = await fetch_images_serper(vendor_name, model_family if model_family else None)
     if images:
         logging.info(f"Using Serper images for {vendor_name}")
         return images, "serper"
@@ -2356,8 +2380,22 @@ def test_image_search():
     product_name = request.args.get("product", "")
     
     try:
-        # Use synchronous version for reliability
-        images, source_used = fetch_product_images_with_fallback_sync(vendor_name, product_name)
+        # Use synchronous version for reliability; pass model_family instead of product_name
+        model_family = None
+        # If user provided product as a family list or string, prefer it
+        if product_name and ',' in product_name:
+            # accept '3051C,3051S' style input from quick tests
+            model_family = product_name.split(',')[0].strip()
+        elif product_name:
+            model_family = product_name.strip()
+
+        images, source_used = fetch_product_images_with_fallback_sync(
+            vendor_name,
+            product_name=None,
+            manufacturer_domains=None,
+            model_family=model_family,
+            product_type=None
+        )
         
         # Also test domain generation
         generated_domains = get_manufacturer_domains_from_llm(vendor_name)
@@ -2530,13 +2568,13 @@ def get_analysis_product_images():
         # Execute searches and collect results
         for search_info in search_combinations:
             try:
-                # Use the search query as product_name parameter
-                # Prefer model family name when available — pass only the base name
-                search_param = base_name_for_search if base_name_for_search else product_name
+                # Pass model_family and product_type to the fetcher and avoid using raw product_name
                 images, source_used = fetch_product_images_with_fallback_sync(
                     vendor_name=vendor,
-                    product_name=search_param,
+                    product_name=None,
                     manufacturer_domains=manufacturer_domains,
+                    model_family=base_name_for_search if base_name_for_search else None,
+                    product_type=product_type if product_type else None,
                 )
                 
                 # Add metadata to images
@@ -4044,7 +4082,22 @@ def save_project():
         except Exception as e:
             logging.warning(f"Failed to persist displayed_media_map: {e}")
 
+        # Ensure pricing and feedback are passed through from frontend payload
+        # If frontend uses `pricing` or `feedback_entries` include them in the saved document
+        try:
+            # If frontend supplied feedback, normalize to `feedback_entries`
+            if 'feedback' in data and 'feedback_entries' not in data:
+                data['feedback_entries'] = data.get('feedback')
+        except Exception:
+            logging.warning('Failed to normalize incoming feedback payload')
+
         saved_project = mongo_project_manager.save_project(user_id, data)
+
+        # Store the saved project id in the session so future feedback posts can attach to it
+        try:
+            session['current_project_id'] = saved_project.get('project_id')
+        except Exception:
+            logging.warning('Failed to set current_project_id in session')
         
         # Return the saved project data
         return jsonify({

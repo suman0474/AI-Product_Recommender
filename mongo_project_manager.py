@@ -72,11 +72,15 @@ class MongoProjectManager:
                 'project_description': project_data.get('project_description', ''),
                 'initial_requirements': project_data.get('initial_requirements', ''),
                 'product_type': product_type,
+                # Pricing stored as structured data (dict) so it can be returned without extra parsing
+                'pricing': project_data.get('pricing', {}),
                 'identified_instruments': self._serialize_project_data(project_data.get('identified_instruments')),
                 'identified_accessories': self._serialize_project_data(project_data.get('identified_accessories')),
                 'search_tabs': self._serialize_project_data(project_data.get('search_tabs')),
                 'conversation_histories': self._serialize_project_data(project_data.get('conversation_histories')),
                 'collected_data': self._serialize_project_data(project_data.get('collected_data')),
+                # Feedback entries stored as array of subdocuments for easy appends
+                'feedback_entries': project_data.get('feedback_entries', project_data.get('feedback', [])),
                 'current_step': project_data.get('current_step', ''),
                 'active_tab': project_data.get('active_tab', ''),
                 'analysis_results': self._serialize_project_data(project_data.get('analysis_results')),
@@ -148,6 +152,8 @@ class MongoProjectManager:
                 'project_name': project_doc['project_name'],
                 'project_description': project_doc['project_description'],
                 'product_type': project_doc.get('product_type', ''),
+                'pricing': project_doc.get('pricing', {}),
+                'feedback_entries': project_doc.get('feedback_entries', []),
                 'created_at': project_doc.get('created_at', current_time).isoformat(),
                 'updated_at': project_doc['updated_at'].isoformat(),
                 'project_status': project_doc['project_status']
@@ -262,6 +268,8 @@ class MongoProjectManager:
                 'search_tabs': self._deserialize_project_data(project.get('search_tabs')) or [],
                 'conversation_histories': self._deserialize_project_data(project.get('conversation_histories')) or {},
                 'collected_data': self._deserialize_project_data(project.get('collected_data')) or {},
+                'pricing': project.get('pricing') or {},
+                'feedback_entries': project.get('feedback_entries') or [],
                 'current_step': project.get('current_step', ''),
                 'active_tab': project.get('active_tab', ''),
                 'analysis_results': self._deserialize_project_data(project.get('analysis_results')) or {},
@@ -279,6 +287,29 @@ class MongoProjectManager:
             
         except Exception as e:
             self.logger.error(f"Failed to get project {project_id} for user {user_id}: {e}")
+            raise
+
+    def append_feedback_to_project(self, project_id: str, user_id: str, feedback_entry: Dict[str, Any]) -> bool:
+        """
+        Append a feedback entry to a project's `feedback_entries` array.
+        """
+        try:
+            object_id = ObjectId(project_id)
+            update_result = self.file_manager.db[self.collection_name].update_one(
+                {'_id': object_id, 'user_id': str(user_id)},
+                {
+                    '$push': {'feedback_entries': feedback_entry},
+                    '$set': {'updated_at': datetime.utcnow()}
+                }
+            )
+
+            if update_result.matched_count == 0:
+                raise ValueError('Project not found or access denied')
+
+            self.logger.info(f"Appended feedback to project {project_id} for user {user_id}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to append feedback to project {project_id}: {e}")
             raise
     
     def delete_project(self, project_id: str, user_id: str) -> bool:
