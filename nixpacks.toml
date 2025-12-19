@@ -1,9 +1,0 @@
-[phases.setup]
-aptPkgs = ["tesseract-ocr", "tesseract-ocr-eng", "libtesseract-dev"]
-
-[phases.install]
-cmds = ["pip install -r requirements.txt"]
-
-[start]
-cmd = "gunicorn --config gunicorn.conf.py --bind 0.0.0.0:$PORT main:app"
-

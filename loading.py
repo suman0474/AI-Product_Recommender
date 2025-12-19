@@ -288,10 +288,26 @@ Example for vendor "Emerson" and product type "Pressure Transmitter":
         try:
             print("[DISCOVER] Generating schema from vendor data using LLM")
             schema = create_schema_from_vendor_data(product_type, vendors_with_families, llm)
-            schema_path = _save_schema_to_specs(product_type, schema)
-            print(f"[DISCOVER] Schema saved to: {schema_path}")
+            
+            # Validate schema before saving
+            if schema and isinstance(schema, dict):
+                if schema.get("mandatory_requirements") or schema.get("optional_requirements"):
+                    schema_path = _save_schema_to_specs(product_type, schema)
+                    print(f"[DISCOVER] Schema saved to MongoDB: {schema_path}")
+                    
+                    # Also cache it immediately
+                    try:
+                        schema_cache.set(product_type, schema)
+                        print(f"[DISCOVER] Schema cached in memory for '{product_type}'")
+                    except Exception as cache_error:
+                        print(f"[WARN] Failed to cache schema: {cache_error}")
+                else:
+                    print(f"[WARN] Generated schema is empty for '{product_type}', not saving")
+            else:
+                print(f"[WARN] Generated schema is invalid for '{product_type}'")
         except Exception as e:
-            print(f"[WARN] Failed to generate schema: {e}")
+            print(f"[ERROR] Failed to generate/save schema for '{product_type}': {e}")
+            logger.error(f"Schema generation failed: {e}", exc_info=True)
 
     return vendors_with_families
 
@@ -819,6 +835,12 @@ Create a comprehensive technical specification schema following these classifica
 - MANDATORY: Core functional parameters needed to select/specify the product (accuracy, measurement range, output signals, power requirements, process connections, etc.)
 - OPTIONAL: Enhancement features, advanced options, accessories, special configurations, diagnostics, etc.
 
+**CRITICAL LIMITS:**
+- Maximum 15 specifications in mandatory_requirements (focus on most critical)
+- Maximum 20 specifications in optional_requirements (focus on most common)
+- If you identify more, prioritize the most important and commonly specified parameters
+- Avoid redundant or rarely-used specifications
+
 Structure the output as a hierarchical JSON with exactly these two top-level keys:
 - "mandatory_requirements"
 - "optional_requirements"
@@ -1262,14 +1284,37 @@ def build_requirements_schema_from_web(product_type: str) -> Dict[str, Any]:
     }
     
     logger.info(f"[BUILD] Schema building completed for '{product_type}': {len(successful_vendors)}/{len(vendors)} vendors successful")
-    # Cache the generated schema/result to avoid rebuilding frequently
+    
+    # CRITICAL FIX: Load the schema that was saved during discover_top_vendors and return it
+    # The schema was already saved to MongoDB in discover_top_vendors() at line 291
+    # We need to retrieve it and return it in the proper format
     try:
-        schema_cache.set(product_type, result)
-    except Exception:
-        pass
-    return result
+        final_schema = get_schema_from_mongodb(product_type)
+        if final_schema and final_schema.get("mandatory_requirements"):
+            logger.info(f"[BUILD] Retrieved saved schema from MongoDB for '{product_type}'")
+            # Cache the proper schema format
+            schema_cache.set(product_type, final_schema)
+            return final_schema
+        else:
+            logger.warning(f"[BUILD] Schema was not found in MongoDB after automation for '{product_type}', returning empty schema")
+            # Return empty but valid schema structure
+            empty_schema = {
+                "product_type": product_type,
+                "mandatory_requirements": {},
+                "optional_requirements": {}
+            }
+            schema_cache.set(product_type, empty_schema)
+            return empty_schema
+    except Exception as e:
+        logger.error(f"[BUILD] Failed to retrieve schema from MongoDB: {e}")
+        # Fallback: return empty schema
+        empty_schema = {
+            "product_type": product_type,
+            "mandatory_requirements": {},
+            "optional_requirements": {}
+        }
+        return empty_schema
 
-# ----------------- Load Requirements (Removed - Now using MongoDB version below) -----------------
 
 # ----------------- Load Products Runnable (MongoDB Version) -----------------
 def load_products_runnable(vendors_base_path: str = None):
@@ -1286,6 +1331,20 @@ def load_products_runnable(vendors_base_path: str = None):
         
         print(f"[PRODUCTS] Detected: '{detected_product_type}'")
         print(f"[PRODUCTS] Will search categories: {search_categories}")
+        
+        # DEBUG: Log what's actually in the database
+        try:
+            vendors_collection = mongodb_file_manager.collections.get('vendors')
+            if vendors_collection:
+                all_types = vendors_collection.distinct('product_type')
+                print(f"[DEBUG] Total unique product_types in DB: {len(all_types)}")
+                print(f"[DEBUG] Sample product_types in DB: {all_types[:10]}")
+                
+                # Check if any match our search
+                matching_types = [pt for pt in all_types if any(cat.lower() in pt.lower() for cat in search_categories)]
+                print(f"[DEBUG] Product types that might match our search: {matching_types[:10]}")
+        except Exception as e:
+            print(f"[DEBUG] Could not check DB contents: {e}")
         
         try:
             # Query MongoDB vendors collection directly for vendor JSONs
@@ -1306,6 +1365,21 @@ def load_products_runnable(vendors_base_path: str = None):
                 }
                 
                 print(f"[PRODUCTS] Querying vendors collection with: {query}")
+                
+                # DEBUG: Check query results before iterating
+                query_count = vendors_collection.count_documents(query)
+                print(f"[DEBUG] Query matched {query_count} documents")
+                
+                if query_count == 0:
+                    print(f"[DEBUG] ⚠️ ZERO DOCUMENTS MATCHED!")
+                    print(f"[DEBUG] Search categories: {search_categories}")
+                    print(f"[DEBUG] Query: {query}")
+                    
+                    # Try to find similar product types
+                    all_types = vendors_collection.distinct('product_type')
+                    similar = [pt for pt in all_types if 'pressure' in pt.lower() or 'transmitter' in pt.lower()]
+                    print(f"[DEBUG] Similar product types in DB: {similar[:10]}")
+                
                 cursor = vendors_collection.find(query)
                 doc_count = 0
                 
@@ -1534,8 +1608,13 @@ def load_requirements_schema(product_type: str = None) -> Dict[str, Any]:
             print(f"[SCHEMA] Using cached schema for '{product_type}'")
             return cached
 
-        # Try to load from MongoDB first
-        schema = get_schema_from_mongodb(product_type)
+        # Try to load from MongoDB first (with timeout protection)
+        try:
+            # Use a shorter timeout for schema loading to fail fast
+            schema = get_schema_from_mongodb(product_type)
+        except Exception as db_error:
+            print(f"[SCHEMA] MongoDB error for '{product_type}': {str(db_error)}")
+            schema = None
 
         if schema and schema.get("mandatory_requirements") and schema.get("optional_requirements"):
             print(f"[SCHEMA] Successfully loaded schema from MongoDB for '{product_type}'")
@@ -1570,6 +1649,22 @@ def load_requirements_schema(product_type: str = None) -> Dict[str, Any]:
         try:
             # Only the thread that acquired the lock will reach here
             built = build_requirements_schema_from_web(product_type)
+            
+            # CRITICAL FIX: Ensure the schema is saved to MongoDB after automation
+            # This is a safety net in case the schema wasn't saved during discover_top_vendors
+            if built and built.get("mandatory_requirements"):
+                try:
+                    # Check if schema exists in MongoDB
+                    existing = get_schema_from_mongodb(product_type)
+                    if not existing or not existing.get("mandatory_requirements"):
+                        # Schema not in MongoDB, save it now
+                        logger.info(f"[SCHEMA] Schema not found in MongoDB after automation, saving now for '{product_type}'")
+                        _save_schema_to_specs(product_type, built)
+                        logger.info(f"[SCHEMA] Successfully saved schema to MongoDB for '{product_type}'")
+                except Exception as save_error:
+                    logger.error(f"[SCHEMA] Failed to save schema to MongoDB after automation: {save_error}")
+            
+            # Cache the schema
             try:
                 schema_cache.set(product_type, built)
             except Exception:

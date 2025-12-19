@@ -13,6 +13,8 @@ import requests
 from io import BytesIO
 from serpapi import GoogleSearch
 import threading
+import csv
+from fuzzywuzzy import fuzz, process
 
 from functools import wraps
 from dotenv import load_dotenv
@@ -62,11 +64,22 @@ app = Flask(__name__, static_folder="static")
 # A list of allowed origins for CORS
 allowed_origins = [
     "https://ai-product-recommender-ui.vercel.app",  # Your production frontend
+    "https://en-genie.vercel.app",                   # Your new frontend domain
     "http://localhost:8080",                         # Add your specific local dev port
     "http://localhost:5173",
     "http://localhost:3000"
 ]
 
+# Dynamically add Vercel preview URLs to allowed_origins
+if os.environ.get("VERCEL") == "1":
+    # Add the production URL
+    prod_url = os.environ.get("VERCEL_URL")
+    if prod_url:
+        allowed_origins.append(f"https://{prod_url}")
+    # Add the preview URL for the current branch
+    branch_url = os.environ.get("VERCEL_BRANCH_URL")
+    if branch_url and branch_url != prod_url:
+        allowed_origins.append(f"https://{branch_url}")
 
 # Replace your old CORS line with this one
 CORS(app, origins=allowed_origins, supports_credentials=True)
@@ -243,12 +256,293 @@ def allowed_file(filename: str):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
+def extract_strategy_from_file(file_bytes: bytes, filename: str, user_id: int) -> dict:
+    """
+    Extract structured strategy data from a file using Gemini 2.5 Flash LLM.
+    
+    Sends the ENTIRE document to the LLM in ONE call for extraction.
+    
+    Args:
+        file_bytes: Raw file content
+        filename: Original filename
+        user_id: User ID for MongoDB storage
+        
+    Returns:
+        dict with success status, extracted data, and document_id if stored
+    """
+    from file_extraction_utils import extract_text_from_file
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    from langchain_core.prompts import ChatPromptTemplate
+    from langchain_core.output_parsers import StrOutputParser
+    
+    def clean_llm_response(response: str) -> str:
+        """Clean markdown code blocks from LLM response"""
+        cleaned = response.strip()
+        if cleaned.startswith("```json"):
+            cleaned = cleaned[7:]
+        elif cleaned.startswith("```"):
+            cleaned = cleaned[3:]
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3]
+        return cleaned.strip()
+    
+    try:
+        logging.info(f"[STRATEGY_EXTRACT] Processing file: {filename} ({len(file_bytes)} bytes)")
+        
+        # Extract text from file
+        extraction_result = extract_text_from_file(file_bytes, filename)
+        
+        if not extraction_result['success']:
+            logging.warning(f"[STRATEGY_EXTRACT] Failed to extract text from {filename}")
+            return {
+                "success": False,
+                "error": f"Could not extract text from {extraction_result['file_type']} file",
+                "file_type": extraction_result['file_type']
+            }
+        
+        extracted_text = extraction_result['extracted_text']
+        logging.info(f"[STRATEGY_EXTRACT] ✓ Extracted {extraction_result['character_count']} characters")
+        
+        # Initialize Gemini 2.5 Flash
+        GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+        
+        if not GOOGLE_API_KEY:
+            logging.error("[STRATEGY_EXTRACT] GOOGLE_API_KEY not configured")
+            return {
+                "success": False,
+                "error": "LLM API key not configured"
+            }
+        
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash",
+            temperature=0.1,
+            google_api_key=GOOGLE_API_KEY,
+        )
+        
+        # Strategy extraction prompt
+        strategy_extraction_prompt = """
+You are an expert at extracting structured procurement strategy data from documents.
+
+Analyze the following document content and extract ALL vendor/supplier strategy information.
+For each vendor entry found, extract the following fields:
+- vendor_name: Name of the vendor/supplier/manufacturer
+- category: Product category (e.g., "Pressure Transmitter", "Flow Meter", "Control Valve", "Temperature Transmitter")
+- subcategory: Specific product type or subcategory within the category
+- stratergy: Procurement strategy (e.g., "Cost optimization", "Life-cycle cost evaluation", "Sustainability and green procurement", "Dual sourcing", "Framework agreement", "Single sourcing", "Quality-focused")
+
+Document Content:
+{document_text}
+
+Extract ALL vendor entries from the document. If a field is not explicitly mentioned, use an empty string.
+
+Return ONLY a valid JSON array of objects with this structure:
+[
+  {{
+    "vendor_name": "<vendor name>",
+    "category": "<product category>",
+    "subcategory": "<product subcategory>",
+    "stratergy": "<procurement strategy>"
+  }},
+  ...
+]
+
+Important:
+1. Include ALL vendor/strategy entries found in the ENTIRE document
+2. If the document contains a table or list of vendors, extract EVERY row/item as a separate entry
+3. If strategy information is not provided for a vendor, leave the "stratergy" field empty
+4. Return ONLY the JSON array, no additional text or explanation
+5. If no valid vendor data can be extracted, return an empty array: []
+"""
+
+        prompt = ChatPromptTemplate.from_template(strategy_extraction_prompt)
+        chain = prompt | llm | StrOutputParser()
+        
+        # Configure limits
+        MAX_SINGLE_CALL_CHARS = 2000000  # 2M chars (~500K tokens) - safe limit for single call
+        CHUNK_SIZE = 100000  # 100K chars per chunk for fallback
+        
+        strategy_data = []
+        
+        # Check if document is small enough for single call
+        if len(extracted_text) <= MAX_SINGLE_CALL_CHARS:
+            # Try sending ENTIRE document in ONE call
+            logging.info(f"[STRATEGY_EXTRACT] Sending ENTIRE document ({len(extracted_text)} chars) to LLM in single call...")
+            
+            try:
+                llm_response = chain.invoke({"document_text": extracted_text})
+                cleaned_response = clean_llm_response(llm_response)
+                strategy_data = json.loads(cleaned_response)
+                
+                if not isinstance(strategy_data, list):
+                    logging.warning(f"[STRATEGY_EXTRACT] LLM returned non-array response: {type(strategy_data)}")
+                    strategy_data = []
+                    
+                logging.info(f"[STRATEGY_EXTRACT] ✓ Single call extracted {len(strategy_data)} strategy entries")
+                
+            except Exception as single_call_error:
+                logging.warning(f"[STRATEGY_EXTRACT] Single call failed, falling back to chunked: {single_call_error}")
+                strategy_data = []  # Will trigger chunked processing below
+        
+        # Fallback to chunked processing for very large files or if single call failed
+        if len(strategy_data) == 0 and len(extracted_text) > 0:
+            logging.info(f"[STRATEGY_EXTRACT] Using chunked processing for large document ({len(extracted_text)} chars)...")
+            
+            # Split text into chunks at line boundaries
+            lines = extracted_text.split('\n')
+            chunks = []
+            current_chunk = []
+            current_size = 0
+            
+            for line in lines:
+                line_size = len(line) + 1
+                if current_size + line_size > CHUNK_SIZE and current_chunk:
+                    chunks.append('\n'.join(current_chunk))
+                    current_chunk = [line]
+                    current_size = line_size
+                else:
+                    current_chunk.append(line)
+                    current_size += line_size
+            if current_chunk:
+                chunks.append('\n'.join(current_chunk))
+            
+            logging.info(f"[STRATEGY_EXTRACT] Split into {len(chunks)} chunks for processing")
+            
+            # Process chunks in parallel using ThreadPoolExecutor
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            
+            def process_chunk(chunk_data):
+                chunk_num, chunk_text = chunk_data
+                try:
+                    response = chain.invoke({"document_text": chunk_text})
+                    cleaned = clean_llm_response(response)
+                    data = json.loads(cleaned)
+                    if isinstance(data, list):
+                        logging.info(f"[STRATEGY_EXTRACT] Chunk {chunk_num} extracted {len(data)} entries")
+                        return data
+                except Exception as e:
+                    logging.warning(f"[STRATEGY_EXTRACT] Chunk {chunk_num} failed: {e}")
+                return []
+            
+            all_entries = []
+            max_workers = min(5, len(chunks))  # Limit parallel workers
+            
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(process_chunk, (i, chunk)): i for i, chunk in enumerate(chunks, 1)}
+                for future in as_completed(futures):
+                    entries = future.result()
+                    all_entries.extend(entries)
+            
+            # Deduplicate entries
+            seen = set()
+            for entry in all_entries:
+                key = (
+                    entry.get('vendor_name', '').lower().strip(),
+                    entry.get('category', '').lower().strip(),
+                    entry.get('subcategory', '').lower().strip()
+                )
+                if key not in seen:
+                    seen.add(key)
+                    strategy_data.append(entry)
+            
+            logging.info(f"[STRATEGY_EXTRACT] ✓ Chunked processing extracted {len(strategy_data)} unique entries")
+
+        logging.info(f"[STRATEGY_EXTRACT] ✓ Total extracted: {len(strategy_data)} strategy entries")
+        
+        # Store in MongoDB if we have data
+        if strategy_data and len(strategy_data) > 0:
+            try:
+                conn = get_mongodb_connection()
+                stratergy_collection = conn['collections']['stratergy']
+                
+                strategy_document = {
+                    "user_id": user_id,
+                    "filename": filename,
+                    "file_type": extraction_result['file_type'],
+                    "data": strategy_data,
+                    "uploaded_at": datetime.utcnow().isoformat(),
+                    "character_count": extraction_result['character_count'],
+                    "entry_count": len(strategy_data)
+                }
+                
+                result = stratergy_collection.insert_one(strategy_document)
+                
+                logging.info(f"[STRATEGY_EXTRACT] ✓ Stored {len(strategy_data)} entries in MongoDB with ID: {result.inserted_id}")
+                
+                return {
+                    "success": True,
+                    "document_id": str(result.inserted_id),
+                    "entry_count": len(strategy_data),
+                    "extracted_data": strategy_data,
+                    "file_type": extraction_result['file_type']
+                }
+                
+            except Exception as e:
+                logging.error(f"[STRATEGY_EXTRACT] MongoDB storage failed: {e}")
+                return {
+                    "success": False,
+                    "error": f"Failed to store strategy data: {str(e)}"
+                }
+        else:
+            logging.warning("[STRATEGY_EXTRACT] No strategy data extracted from document")
+            return {
+                "success": False,
+                "error": "No vendor strategy data could be extracted from the document",
+                "extracted_text_preview": extracted_text[:500] if len(extracted_text) > 500 else extracted_text
+            }
+            
+    except json.JSONDecodeError as e:
+        logging.error(f"[STRATEGY_EXTRACT] Failed to parse LLM response: {e}")
+        return {
+            "success": False,
+            "error": "Failed to parse strategy data from document"
+        }
+    except Exception as e:
+        logging.error(f"[STRATEGY_EXTRACT] Extraction failed: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+def extract_strategy_from_file_background(file_bytes: bytes, filename: str, user_id: int):
+    """
+    Run strategy extraction in background thread.
+    
+    This function spawns a new thread to process the file so it doesn't block
+    the main request/response flow (signup, profile update, etc.)
+    
+    Args:
+        file_bytes: Raw file content
+        filename: Original filename
+        user_id: User ID for MongoDB storage
+    """
+    def background_task():
+        try:
+            logging.info(f"[BACKGROUND] Starting strategy extraction for user {user_id}: {filename}")
+            result = extract_strategy_from_file(file_bytes, filename, user_id)
+            
+            if result.get('success'):
+                logging.info(f"[BACKGROUND] ✓ Successfully extracted {result.get('entry_count', 0)} strategy entries for user {user_id}")
+            else:
+                logging.warning(f"[BACKGROUND] Strategy extraction failed for user {user_id}: {result.get('error')}")
+                
+        except Exception as e:
+            logging.error(f"[BACKGROUND] Error in background strategy extraction for user {user_id}: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    # Start extraction in background thread
+    extraction_thread = threading.Thread(target=background_task, daemon=True)
+    extraction_thread.start()
+    logging.info(f"[BACKGROUND] Started background extraction thread for user {user_id}: {filename}")
+
+
 @app.route("/api/intent", methods=["POST"])
 @login_required
 def api_intent():
     """
     Classifies user intent and determines next workflow step based on input and current session state.
-    Supports step-based workflow with session tracking for continuity.
+    Uses LLM for all classification - no hardcoded keywords.
     """
     if not components or not components.get("llm"):
         return jsonify({"error": "LLM component not ready."}), 503
@@ -267,9 +561,12 @@ def api_intent():
     current_step = session.get(current_step_key, None)
     current_intent = session.get(current_intent_key, None)
     
-    # --- Handle skip for missing mandatory fields ---
-    # Accept both legacy and frontend step names when user wants to skip missing mandatory fields
-    if current_step in ("awaitMandatory", "awaitMissingInfo") and user_input.lower() in ["yes", "skip", "y"]:
+    # Debug logging to track session state
+    logging.info(f"[INTENT] Session state: step={current_step}, intent={current_intent}, user_input='{user_input[:50]}...' if len > 50 else '{user_input}'")
+    
+    # --- Handle YES for missing mandatory fields (proceed to next step) ---
+    if current_step in ("awaitMandatory", "awaitMissingInfo") and user_input.lower().strip() in ["yes", "skip", "y", "proceed", "continue"]:
+        logging.info(f"[INTENT] User said '{user_input}' at {current_step} - skipping to awaitAdditionalAndLatestSpecs")
         session[f'current_step_{search_session_id}'] = "awaitAdditionalAndLatestSpecs"
         response = {
             "intent": "workflow",
@@ -279,56 +576,23 @@ def api_intent():
         }
         return jsonify(response), 200
     
-    # NOTE: Removed automatic transition from awaitAdvanced -> showSummary here
-    # so that 'no' replies at the advanced-parameters prompt are handled
-    # by the sales-agent (`/api/sales-agent`) logic which implements retry
-    # and explicit YES/NO branching for advanced parameters.
-    
-    # Check for greeting patterns (only standalone greetings)
-    greeting_patterns = ['hi', 'hello', 'hey', 'good morning', 'good afternoon', 'good evening']
-    is_greeting = any(user_input.lower().strip() == pattern or user_input.lower().strip() == pattern + '!' for pattern in greeting_patterns)
-    
-    # Check for knowledge questions patterns
-    knowledge_indicators = ['what is', 'what are', 'how does', 'explain', 'tell me about', 'define']
-    is_knowledge_question = any(indicator in user_input.lower() for indicator in knowledge_indicators)
-    
-    # Check for product requirements patterns
-    product_indicators = [
-        'valve', 'pump', 'motor', 'sensor', 'controller', 'actuator', 'positioner',
-        'transmitter', 'gauge', 'meter', 'switch', 'relay', 'transformer',
-        'ansi', 'asme', 'din', 'iso', 'api', 'nema', 'iec',  # Standards
-        'stainless steel', 'carbon steel', 'bronze', 'cast iron', 'alloy',  # Materials
-        'flanged', 'threaded', 'welded', 'socket', 'butt weld',  # Connections
-        'pneumatic', 'electric', 'hydraulic', 'manual',  # Actuator types
-        'pressure rating', 'temperature rating', 'flow rate', 'cv', 'kv',  # Specs
-        'npt', 'bsp', 'rf', 'rtj',  # Connection types
-        'psi', 'bar', 'mpa', 'kpa', 'gpm', 'lpm',  # Units
-        'inch', 'mm', 'dn', 'nps',  # Sizes
-        'globe', 'ball', 'butterfly', 'gate', 'check', 'needle',  # Valve types
-        'centrifugal', 'positive displacement', 'diaphragm', 'peristaltic',  # Pump types
-        'explosion proof', 'hazardous area', 'atex', 'iecex',  # Safety
-        'foundation fieldbus', 'hart', 'profibus', 'modbus',  # Communication protocols
-        '316ss', '304ss', '316l', '304l',  # Material codes
-        'class', 'schedule', 'rating',  # Ratings
-        'turndown', 'rangeability', 'accuracy',  # Performance specs
-    ]
+    # --- Handle NO for missing mandatory fields (stay at step, ask what to add) ---
+    if current_step in ("awaitMandatory", "awaitMissingInfo") and user_input.lower().strip() in ["no", "n", "nope"]:
+        logging.info(f"[INTENT] User said '{user_input}' at {current_step} - staying to collect missing fields")
+        # Stay at the same step - don't change session
+        response = {
+            "intent": "workflow",
+            "nextStep": "awaitMissingInfo",
+            "resumeWorkflow": True,
+            "stayAtStep": True,  # Signal to frontend to ask for missing data
+            "message": "User wants to provide missing fields."
+        }
+        return jsonify(response), 200
 
-    lowered = user_input.lower()
-    # Count how many technical indicators are present — if multiple technical tokens exist, treat as requirements
-    tech_count = sum(1 for indicator in product_indicators if indicator in lowered)
-
-    # Also flag as product requirements when there are explicit units/percentages or model-like tokens
-    technical_pattern = bool(
-        re.search(r"\b\d+\s?(inches|inch|mm|cm|m|%|percent|psi|bar|mbar)\b", lowered)
-        or re.search(r"\b(ansi|ss|316)\b", lowered)
-        or re.search(r"\b(series|model|gen|generation)\b", lowered)
-    )
-
-    is_product_requirement = (tech_count >= 2) or (technical_pattern and len(lowered.split()) > 2)
-
-    # === Enhanced Prompt for Workflow-Aware Classification ===
+    # === LLM-Only Classification Prompt ===
+    # The LLM handles ALL classification - no hardcoded keywords needed
     prompt = f"""
-You are Engenie - an smart assistant that classifies user input for a step-based product recommendation workflow.
+You are Engenie - a smart assistant that classifies user input for a step-based industrial product recommendation workflow.
 
 Current workflow context:
 - Current step: {current_step or "None"}
@@ -341,62 +605,99 @@ Return ONLY a JSON object with these keys:
 2. "nextStep": one of ["greeting", "initialInput", "awaitAdditionalAndLatestSpecs", "awaitAdvancedSpecs", "showSummary", "finalAnalysis", null]
 3. "resumeWorkflow": true/false (whether to resume current workflow after handling this input)
 
-Classification Rules:
-- If user says ONLY greeting words (hi, hello, hey) with no technical content → intent="greeting", nextStep="greeting"
-- If user asks knowledge questions (what is X, explain Y, how does Z work) → intent="knowledgeQuestion", nextStep=null, resumeWorkflow=true
-- If user provides product requirements or specifications (mentions products, technical specs, measurements, needs) → intent="productRequirements", nextStep="initialInput"
-- If currently in workflow and user provides relevant response → intent="workflow", nextStep=<appropriate next step>
-- Casual conversation → intent="chitchat", nextStep=null
-- Everything else → intent="other", nextStep=null
+**Classification Rules (in PRIORITY ORDER - apply first matching rule):**
 
-Priority: Product requirements should take precedence over greetings if technical content is present.
+**PRIORITY 1 - Knowledge Questions (HIGHEST):**
+- If user is ASKING a question (starts with "what", "how", "why", "can you explain", "tell me about", "define", etc.)
+- Intent: "knowledgeQuestion", nextStep: null, resumeWorkflow: true
+- Examples: "what is HART?", "what is the maximum operating temperature?", "how does this work?", "explain differential pressure"
+- Key indicator: User is SEEKING information, not PROVIDING specifications
 
-Next Step Logic:
-- After greeting: "initialInput" (ask for product type)
-- After product requirements: "initialInput" (validate requirements)  
-- After missing info handling: "awaitAdditionalAndLatestSpecs" (ask about additional and latest specs)
-- After additional specs: "awaitAdvancedSpecs" (ask for advanced parameters)
-- After advanced specs: "showSummary" (show final summary)
-- During workflow: determine based on current step progression
-- Knowledge questions: maintain current step for resume
+**PRIORITY 2 - Product Requirements:**
+- If user is PROVIDING/STATING technical specs, product needs, measurements, materials, standards
+- Look for: industrial equipment (transmitter, valve, pump, sensor, meter, gauge, controller, actuator)
+- Look for: specifications (psi, bar, mm, inch, 4-20mA, HART, 316SS, ANSI, ASME, temperature, pressure, flow)
+- Look for: materials (stainless steel, carbon steel, bronze, hastelloy)
+- Look for: standards (ANSI, ASME, DIN, ISO, API, NEMA, IEC, ATEX)
+- Intent: "productRequirements", nextStep: "initialInput"
+- Examples: "I need a pressure transmitter 0-100 psi", "valve with 316SS flanged connection"
+- Note: "I need a pressure transmitter" is productRequirements (STATING need), "what is a pressure transmitter?" is knowledgeQuestion (ASKING)
+
+**PRIORITY 3 - Workflow Continuation:**
+- If user is responding to workflow prompts: yes/no, confirmations, providing additional data when asked
+- Determine nextStep based on current step:
+  - awaitMissingInfo + "yes/skip" → nextStep: "awaitAdditionalAndLatestSpecs"
+  - awaitMissingInfo + provides data → nextStep: "awaitMissingInfo" (stay to validate)
+  - awaitAdditionalAndLatestSpecs + "no" → nextStep: "showSummary"
+  - awaitAdditionalAndLatestSpecs + "yes" or specs → nextStep: "awaitAdvancedSpecs"
+  - awaitAdvancedSpecs + "no/skip" → nextStep: "showSummary"
+  - awaitAdvancedSpecs + selections → nextStep: "awaitAdvancedSpecs" (continue) or "showSummary"
+- Intent: "workflow"
+
+**PRIORITY 4 - Pure Greeting:**
+- ONLY standalone greetings with NO other content: "hi", "hello", "hey", "good morning"
+- Intent: "greeting", nextStep: "greeting"
+
+**PRIORITY 5 - Chitchat:**
+- Casual conversation unrelated to industrial products: "how are you?", "tell me a joke"
+- Intent: "chitchat", nextStep: null
+
+**PRIORITY 6 - Other:**
+- Everything else that doesn't fit above categories
+- Intent: "other", nextStep: null
 
 Workflow Steps:
 greeting → initialInput → awaitMissingInfo → awaitAdditionalAndLatestSpecs → awaitAdvancedSpecs → showSummary → finalAnalysis
 
-Respond ONLY with valid JSON.
+Respond ONLY with valid JSON, no additional text.
 """
 
     try:
-        # Use LLM component for classification
+        # Use LLM for classification
         full_prompt = ChatPromptTemplate.from_template(prompt)
         response_chain = full_prompt | components['llm'] | StrOutputParser()
         llm_response = response_chain.invoke({"user_input": user_input})
 
-        # Parse JSON safely
-        try:
-            result_json = json.loads(llm_response)
-        except json.JSONDecodeError:
-            # Improved fallback logic for classification
-            if is_product_requirement:
-                result_json = {"intent": "productRequirements", "nextStep": "initialInput", "resumeWorkflow": False}
-            elif is_knowledge_question:
-                result_json = {"intent": "knowledgeQuestion", "nextStep": None, "resumeWorkflow": True}
-            elif is_greeting and not current_step:
-                result_json = {"intent": "greeting", "nextStep": "greeting", "resumeWorkflow": False}
-            else:
-                result_json = {"intent": "other", "nextStep": None, "resumeWorkflow": False}
+        # Clean and parse JSON response
+        cleaned_response = llm_response.strip()
+        if cleaned_response.startswith("```json"):
+            cleaned_response = cleaned_response[7:]
+        elif cleaned_response.startswith("```"):
+            cleaned_response = cleaned_response[3:]
+        if cleaned_response.endswith("```"):
+            cleaned_response = cleaned_response[:-3]
+        cleaned_response = cleaned_response.strip()
 
-        # Heuristic override: if local technical heuristics flagged this as product requirements,
-        # override LLM result to avoid greeting or misclassification.
         try:
-            if is_product_requirement and result_json.get('intent') != 'productRequirements':
-                logging.info("[INTENT_OVERRIDE] Local heuristics detected product requirements (tech_count=%s). Overriding LLM intent %s -> productRequirements", tech_count if 'tech_count' in locals() else 'N/A', result_json.get('intent'))
-                result_json['intent'] = 'productRequirements'
-                result_json['nextStep'] = 'initialInput'
-                result_json['resumeWorkflow'] = False
-        except Exception:
-            # Non-fatal - continue with whatever classification we have
-            pass
+            result_json = json.loads(cleaned_response)
+        except json.JSONDecodeError:
+            # Simple fallback if LLM returns invalid JSON
+            logging.warning(f"[INTENT] Failed to parse LLM JSON response: {llm_response[:200]}")
+            result_json = {"intent": "other", "nextStep": None, "resumeWorkflow": False}
+
+        # Validate required fields
+        if "intent" not in result_json:
+            result_json["intent"] = "other"
+        if "nextStep" not in result_json:
+            result_json["nextStep"] = None
+        if "resumeWorkflow" not in result_json:
+            result_json["resumeWorkflow"] = False
+
+        # === SAFETY CHECK: Prevent incorrect workflow regression ===
+        # If user is already in a mid-workflow step, don't go back to initialInput
+        # unless they're explicitly providing NEW product requirements
+        mid_workflow_steps = ["awaitMissingInfo", "awaitAdditionalAndLatestSpecs", "awaitAdvancedSpecs", "showSummary", "finalAnalysis"]
+        
+        if current_step in mid_workflow_steps:
+            if result_json.get("nextStep") == "initialInput" and result_json.get("intent") != "productRequirements":
+                # LLM incorrectly wants to go back to initialInput - keep current step instead
+                logging.warning(f"[INTENT] Prevented workflow regression: LLM wanted initialInput but user is at {current_step}. Keeping current step.")
+                result_json["nextStep"] = current_step
+                result_json["intent"] = "workflow"
+                result_json["resumeWorkflow"] = True
+            elif result_json.get("nextStep") is None and result_json.get("intent") == "workflow":
+                # Workflow intent but no nextStep - stay at current step
+                result_json["nextStep"] = current_step
 
         # Update session based on classification
         if result_json.get("intent") == "greeting":
@@ -412,13 +713,118 @@ Respond ONLY with valid JSON.
         # Don't update session for chitchat or other intents
         
         # Debug logging
-        logging.info(f"Intent classification result: {result_json}")
+        logging.info(f"[INTENT] LLM classification: {result_json}")
 
         return jsonify(result_json), 200
 
     except Exception as e:
         logging.exception("Intent classification failed.")
         return jsonify({"error": str(e), "intent": "other", "nextStep": None, "resumeWorkflow": False}), 500
+
+@app.route("/api/update_profile", methods=["POST"])
+@login_required
+def api_update_profile():
+    """
+    Updates the user's profile (first name, last name, username).
+    """
+    try:
+        # Handle both JSON and Multipart data
+        if request.content_type and request.content_type.startswith('multipart/form-data'):
+            data = request.form
+            file = request.files.get('document')
+        else:
+            data = request.get_json(force=True)
+            file = None
+
+        user_id = session.get('user_id')
+        user = User.query.get(user_id)
+        
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+            
+        first_name = data.get("first_name")
+        last_name = data.get("last_name")
+        username = data.get("username")
+        company_name = data.get("company_name")
+        category = data.get("category")
+        strategy_interest = data.get("strategy")
+        
+        if first_name is not None:
+            user.first_name = first_name.strip()
+        if last_name is not None:
+            user.last_name = last_name.strip()
+            
+        if username is not None:
+            new_username = username.strip()
+            if new_username and new_username != user.username:
+                existing_user = User.query.filter_by(username=new_username).first()
+                if existing_user:
+                    return jsonify({"error": "Username already taken"}), 400
+                user.username = new_username
+
+        if company_name is not None:
+            user.company_name = company_name.strip()
+        if category is not None:
+            user.category = category.strip()
+        if strategy_interest is not None:
+            user.strategy_interest = strategy_interest.strip()
+
+        # Handle File Upload - Store in GridFS AND extract strategy data using LLM IN BACKGROUND
+        file_uploaded = False
+        if file:
+            try:
+                filename = secure_filename(file.filename)
+                file_data = file.read()
+                metadata = {
+                    'filename': filename,
+                    'content_type': file.content_type,
+                    'uploaded_by_username': user.username,
+                    'collection_type': 'strategy_documents'
+                }
+                # Upload to GridFS for raw file storage (immediate)
+                document_file_id = mongodb_file_manager.upload_to_mongodb(file_data, metadata)
+                user.document_file_id = document_file_id
+                logging.info(f"Uploaded profile document for user {user.username}: {document_file_id}")
+                
+                # Extract strategy data using LLM IN BACKGROUND
+                # This runs in a separate thread so user gets immediate response
+                logging.info(f"[UPDATE_PROFILE] Queueing background strategy extraction for user {user.id}: {filename}")
+                extract_strategy_from_file_background(file_data, filename, user_id)
+                file_uploaded = True
+                    
+            except Exception as e:
+                logging.error(f"Failed to upload/process profile document: {e}")
+                # We continue profile update even if file upload/extraction fails
+            
+        db.session.commit()
+        
+        response_data = {
+            "success": True, 
+            "message": "Profile updated successfully" + (". Strategy file processing in background." if file_uploaded else ""),
+            "user": {
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+                "username": user.username,
+                "company_name": user.company_name,
+                "category": user.category,
+                "strategy_interest": user.strategy_interest,
+                "document_file_id": user.document_file_id
+            }
+        }
+        
+        # Indicate if a file is being processed in background
+        if file_uploaded:
+            response_data["strategy_extraction"] = {
+                "status": "processing",
+                "message": "Strategy file is being processed in background. Data will be available shortly."
+            }
+        
+        return jsonify(response_data), 200
+        
+    except Exception as e:
+        logging.exception("Profile update failed.")
+        return jsonify({"error": str(e)}), 500
+
 
 @app.route('/health', methods=['GET'])
 @login_required
@@ -429,6 +835,434 @@ def health_check():
         "workflow_initialized": False,
         "langsmith_enabled": False
     }, 200
+
+# =========================================================================
+# === IMAGE SERVING ENDPOINT ===
+# =========================================================================
+@app.route('/api/images/<file_id>', methods=['GET'])
+# @login_required
+def serve_image(file_id):
+    """
+    Serve images from MongoDB GridFS
+    
+    Args:
+        file_id: GridFS file ID or filename/hash
+    """
+    try:
+        from bson import ObjectId
+        from mongodb_utils import mongodb_file_manager
+        
+        gridfs = mongodb_file_manager.gridfs
+        grid_out = None
+        
+        # Try 1: Treat as ObjectId
+        try:
+            if ObjectId.is_valid(file_id):
+                grid_out = gridfs.get(ObjectId(file_id))
+        except Exception:
+            pass
+            
+        # Try 2: Treat as filename (if not found by ID)
+        if grid_out is None:
+            try:
+                # Search by filename
+                grid_out = gridfs.find_one({"filename": file_id})
+                
+                # If still not found, try searching by original_url or other metadata if it looks like a hash
+                if grid_out is None and len(file_id) == 64:
+                    # Try finding by filename with extension wildcard? No, exact match.
+                    # Maybe the filename has an extension we don't know.
+                    # Try finding any file starting with this hash
+                    import re
+                    grid_out = gridfs.find_one({"filename": {"$regex": f"^{file_id}"}})
+            except Exception as e:
+                logging.warning(f"Failed to find image by filename {file_id}: {e}")
+
+        if grid_out is None:
+            logging.error(f"Image not found in GridFS: {file_id}")
+            return jsonify({"error": "Image not found"}), 404
+        
+        # Read image data
+        image_data = grid_out.read()
+        content_type = grid_out.content_type or 'image/jpeg'
+        
+        # Create response with proper headers
+        response = send_file(
+            BytesIO(image_data),
+            mimetype=content_type,
+            as_attachment=False,
+            download_name=grid_out.filename or f"image.{content_type.split('/')[-1]}"
+        )
+        
+        # Add caching headers (cache for 30 days)
+        response.headers['Cache-Control'] = 'public, max-age=2592000'
+        
+        logging.info(f"Served image from GridFS: {file_id} ({len(image_data)} bytes)")
+        return response
+    except Exception as e:
+        logging.exception(f"Error serving image {file_id}: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+# Fallback route for images requested without /api/images/ prefix
+@app.route('/<string:file_id>', methods=['GET'])
+def serve_image_root(file_id):
+    """
+    Fallback for images requested at root (e.g. legacy or malformed URLs)
+    Only handles long hashes to avoid conflict with other routes
+    """
+    # Only handle if it looks like a hash (64 chars) or ObjectId (24 chars)
+    if len(file_id) in [24, 64] and all(c in '0123456789abcdefABCDEF' for c in file_id):
+        return serve_image(file_id)
+    
+    # Otherwise let it 404 (or be handled by frontend router if applicable)
+    return jsonify({"error": "Not found"}), 404
+
+@app.route('/api/generic_image/<product_type>', methods=['GET'])
+@login_required
+def get_generic_image(product_type):
+    """
+    Fetch generic product type image with MongoDB caching
+    
+    Strategy:
+    1. Check MongoDB cache first
+    2. If not found, search external APIs with "generic <product_type>"
+    3. Cache the result
+    4. Return image URL or GridFS file ID
+    
+    Args:
+        product_type: Product type name (e.g., "Pressure Transmitter")
+    """
+    try:
+        from generic_image_utils import fetch_generic_product_image
+        
+        # Decode URL-encoded product type
+        import urllib.parse
+        decoded_product_type = urllib.parse.unquote(product_type)
+        
+        logging.info(f"[API] ===== Generic Image Request START =====")
+        logging.info(f"[API] Product Type (raw): {product_type}")
+        logging.info(f"[API] Product Type (decoded): {decoded_product_type}")
+        
+        # Fetch image (checks cache first, then external APIs)
+        image_result = fetch_generic_product_image(decoded_product_type)
+        
+        if image_result:
+            logging.info(f"[API] ✓ Image found! Source: {image_result.get('source')}, Cached: {image_result.get('cached')}")
+            logging.info(f"[API] ===== Generic Image Request END (SUCCESS) =====")
+            return jsonify({
+                "success": True,
+                "image": image_result,
+                "product_type": decoded_product_type
+            }), 200
+        else:
+            logging.warning(f"[API] ✗ No image found for: {decoded_product_type}")
+            logging.info(f"[API] ===== Generic Image Request END (NOT FOUND) =====")
+            return jsonify({
+                "success": False,
+                "error": "No image found",
+                "product_type": decoded_product_type
+            }), 404
+            
+    except Exception as e:
+        logging.exception(f"[API] ✗ ERROR fetching generic image for {product_type}: {e}")
+        logging.info(f"[API] ===== Generic Image Request END (ERROR) =====")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "product_type": product_type
+        }), 500
+
+
+# =========================================================================
+# === FILE UPLOAD AND TEXT EXTRACTION ENDPOINT ===
+# =========================================================================
+@app.route('/api/upload-requirements', methods=['POST'])
+@login_required
+def upload_requirements_file():
+    """
+    Upload file (PDF, DOCX, TXT, Images) and extract text as requirements
+    
+    Accepts: multipart/form-data with 'file' field
+    Returns: Extracted text from the file
+    """
+    try:
+        from file_extraction_utils import extract_text_from_file
+        
+        logging.info("[API] ===== File Upload Request START =====")
+        
+        # Check if file is present
+        if 'file' not in request.files:
+            logging.warning("[API] No file provided in request")
+            return jsonify({
+                "success": False,
+                "error": "No file provided"
+            }), 400
+        
+        file = request.files['file']
+        
+        # Check if filename is empty
+        if file.filename == '':
+            logging.warning("[API] Empty filename")
+            return jsonify({
+                "success": False,
+                "error": "No file selected"
+            }), 400
+        
+        # Read file bytes
+        file_bytes = file.read()
+        filename = file.filename
+        
+        logging.info(f"[API] Processing file: {filename} ({len(file_bytes)} bytes)")
+        
+        # Extract text from file
+        extraction_result = extract_text_from_file(file_bytes, filename)
+        
+        if not extraction_result['success']:
+            logging.warning(f"[API] Failed to extract text from {filename}")
+            return jsonify({
+                "success": False,
+                "error": f"Could not extract text from {extraction_result['file_type']} file",
+                "file_type": extraction_result['file_type']
+            }), 400
+        
+        logging.info(f"[API] ✓ Successfully extracted {extraction_result['character_count']} characters from {filename}")
+        logging.info("[API] ===== File Upload Request END (SUCCESS) =====")
+        
+        return jsonify({
+            "success": True,
+            "extracted_text": extraction_result['extracted_text'],
+            "filename": filename,
+            "file_type": extraction_result['file_type'],
+            "character_count": extraction_result['character_count']
+        }), 200
+        
+    except Exception as e:
+        logging.exception(f"[API] ✗ ERROR processing file upload: {e}")
+        logging.info("[API] ===== File Upload Request END (ERROR) =====")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+# =========================================================================
+# === STRATEGY FILE UPLOAD AND LLM EXTRACTION ENDPOINT ===
+# =========================================================================
+@app.route('/api/upload-strategy-file', methods=['POST'])
+@login_required
+def upload_strategy_file():
+    """
+    Upload strategy file (PDF, DOCX, TXT, Images) and extract structured strategy data using Gemini 2.5 Flash.
+    
+    Accepts: multipart/form-data with 'file' field
+    Returns: Extracted strategy data stored in MongoDB
+    
+    The LLM will extract the following fields from the document:
+    - vendor_name: Name of the vendor/supplier
+    - category: Product category (e.g., "Pressure Transmitter", "Flow Meter")
+    - subcategory: Product subcategory or specific product type
+    - stratergy: Procurement strategy (e.g., "Cost optimization", "Dual sourcing")
+    """
+    try:
+        from file_extraction_utils import extract_text_from_file
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        from langchain_core.prompts import ChatPromptTemplate
+        from langchain_core.output_parsers import StrOutputParser
+        
+        logging.info("[STRATEGY_UPLOAD] ===== Strategy File Upload Request START =====")
+        
+        # Check if file is present
+        if 'file' not in request.files:
+            logging.warning("[STRATEGY_UPLOAD] No file provided in request")
+            return jsonify({
+                "success": False,
+                "error": "No file provided"
+            }), 400
+        
+        file = request.files['file']
+        
+        # Check if filename is empty
+        if file.filename == '':
+            logging.warning("[STRATEGY_UPLOAD] Empty filename")
+            return jsonify({
+                "success": False,
+                "error": "No file selected"
+            }), 400
+        
+        # Read file bytes
+        file_bytes = file.read()
+        filename = file.filename
+        
+        logging.info(f"[STRATEGY_UPLOAD] Processing file: {filename} ({len(file_bytes)} bytes)")
+        
+        # Get user ID for storage
+        user_id = session.get('user_id')
+        if not user_id:
+            return jsonify({
+                "success": False,
+                "error": "User not authenticated"
+            }), 401
+        
+        # Extract text from file
+        extraction_result = extract_text_from_file(file_bytes, filename)
+        
+        if not extraction_result['success']:
+            logging.warning(f"[STRATEGY_UPLOAD] Failed to extract text from {filename}")
+            return jsonify({
+                "success": False,
+                "error": f"Could not extract text from {extraction_result['file_type']} file. {extraction_result.get('error', '')}",
+                "file_type": extraction_result['file_type']
+            }), 400
+        
+        extracted_text = extraction_result['extracted_text']
+        logging.info(f"[STRATEGY_UPLOAD] ✓ Extracted {extraction_result['character_count']} characters from {filename}")
+        
+        # Initialize Gemini 2.5 Flash for strategy extraction
+        GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+        
+        if not GOOGLE_API_KEY:
+            logging.error("[STRATEGY_UPLOAD] GOOGLE_API_KEY not configured")
+            return jsonify({
+                "success": False,
+                "error": "LLM API key not configured"
+            }), 500
+        
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash",
+            temperature=0.1,
+            google_api_key=GOOGLE_API_KEY,
+        )
+        
+        # Create the strategy extraction prompt
+        strategy_extraction_prompt = """
+You are an expert at extracting structured procurement strategy data from documents.
+
+Analyze the following document content and extract all vendor/supplier strategy information.
+For each vendor entry found, extract the following fields:
+- vendor_name: Name of the vendor/supplier/manufacturer
+- category: Product category (e.g., "Pressure Transmitter", "Flow Meter", "Control Valve", "Temperature Transmitter")
+- subcategory: Specific product type or subcategory within the category
+- stratergy: Procurement strategy (e.g., "Cost optimization", "Life-cycle cost evaluation", "Sustainability and green procurement", "Dual sourcing", "Framework agreement", "Single sourcing", "Quality-focused")
+
+Document Content:
+{document_text}
+
+Extract ALL vendor entries from the document. If a field is not explicitly mentioned, use an empty string.
+
+Return ONLY a valid JSON array of objects with this structure:
+[
+  {{
+    "vendor_name": "<vendor name>",
+    "category": "<product category>",
+    "subcategory": "<product subcategory>",
+    "stratergy": "<procurement strategy>"
+  }},
+  ...
+]
+
+Important:
+1. Include ALL vendor/strategy entries found in the document
+2. If the document contains a table or list of vendors, extract each row/item as a separate entry
+3. If strategy information is not provided for a vendor, leave the "stratergy" field empty
+4. Return ONLY the JSON array, no additional text or explanation
+5. If no valid vendor data can be extracted, return an empty array: []
+"""
+
+        try:
+            logging.info("[STRATEGY_UPLOAD] Sending to Gemini 2.5 Flash for extraction...")
+            
+            prompt = ChatPromptTemplate.from_template(strategy_extraction_prompt)
+            chain = prompt | llm | StrOutputParser()
+            
+            llm_response = chain.invoke({"document_text": extracted_text[:50000]})  # Limit text length
+            
+            # Clean the LLM response
+            cleaned_response = llm_response.strip()
+            if cleaned_response.startswith("```json"):
+                cleaned_response = cleaned_response[7:]
+            elif cleaned_response.startswith("```"):
+                cleaned_response = cleaned_response[3:]
+            if cleaned_response.endswith("```"):
+                cleaned_response = cleaned_response[:-3]
+            cleaned_response = cleaned_response.strip()
+            
+            # Parse the JSON response
+            strategy_data = json.loads(cleaned_response)
+            
+            if not isinstance(strategy_data, list):
+                logging.warning(f"[STRATEGY_UPLOAD] LLM returned non-array response: {type(strategy_data)}")
+                strategy_data = []
+            
+            logging.info(f"[STRATEGY_UPLOAD] ✓ LLM extracted {len(strategy_data)} strategy entries")
+            
+        except json.JSONDecodeError as e:
+            logging.error(f"[STRATEGY_UPLOAD] Failed to parse LLM response as JSON: {e}")
+            logging.error(f"[STRATEGY_UPLOAD] LLM Response: {llm_response}")
+            return jsonify({
+                "success": False,
+                "error": "Failed to parse strategy data from document. The document format may not be compatible."
+            }), 400
+        except Exception as e:
+            logging.error(f"[STRATEGY_UPLOAD] LLM extraction failed: {e}")
+            return jsonify({
+                "success": False,
+                "error": f"Failed to extract strategy data: {str(e)}"
+            }), 500
+        
+        # Store in MongoDB
+        if strategy_data and len(strategy_data) > 0:
+            try:
+                conn = get_mongodb_connection()
+                stratergy_collection = conn['collections']['stratergy']
+                
+                # Create document with user_id and data
+                strategy_document = {
+                    "user_id": user_id,
+                    "filename": filename,
+                    "file_type": extraction_result['file_type'],
+                    "data": strategy_data,
+                    "uploaded_at": datetime.utcnow().isoformat(),
+                    "character_count": extraction_result['character_count'],
+                    "entry_count": len(strategy_data)
+                }
+                
+                # Insert into MongoDB
+                result = stratergy_collection.insert_one(strategy_document)
+                
+                logging.info(f"[STRATEGY_UPLOAD] ✓ Stored {len(strategy_data)} strategy entries in MongoDB with ID: {result.inserted_id}")
+                
+                return jsonify({
+                    "success": True,
+                    "message": f"Successfully extracted and stored {len(strategy_data)} vendor strategy entries",
+                    "document_id": str(result.inserted_id),
+                    "filename": filename,
+                    "file_type": extraction_result['file_type'],
+                    "entry_count": len(strategy_data),
+                    "extracted_data": strategy_data  # Return extracted data for frontend display
+                }), 200
+                
+            except Exception as e:
+                logging.error(f"[STRATEGY_UPLOAD] MongoDB storage failed: {e}")
+                return jsonify({
+                    "success": False,
+                    "error": f"Failed to store strategy data: {str(e)}"
+                }), 500
+        else:
+            logging.warning("[STRATEGY_UPLOAD] No strategy data extracted from document")
+            return jsonify({
+                "success": False,
+                "error": "No vendor strategy data could be extracted from the document. Please ensure the document contains vendor/supplier information with categories and strategies.",
+                "extracted_text_preview": extracted_text[:500] + "..." if len(extracted_text) > 500 else extracted_text
+            }), 400
+        
+    except Exception as e:
+        logging.exception(f"[STRATEGY_UPLOAD] ✗ ERROR processing strategy file upload: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
 # =========================================================================
 # === CORE LLM-BASED SALES AGENT ENDPOINT ===
 # =========================================================================
@@ -449,6 +1283,10 @@ def api_sales_agent():
         incoming_pt = data.get('product_type') if isinstance(data, dict) else None
         incoming_detected = data.get('detected_product_type') if isinstance(data, dict) else None
         logging.info(f"[SALES_AGENT_INCOMING] Incoming product_type='{incoming_pt}' detected_product_type='{incoming_detected}' project_name='{data.get('project_name') if isinstance(data, dict) else None}'")
+        
+
+        
+        # Continue with normal sales-agent workflow if no CSV vendors
         step = data.get("step")
         data_context = data.get("dataContext", {})
         user_message = data.get("userMessage", "")
@@ -477,22 +1315,25 @@ def api_sales_agent():
             for param in params:
                 # Extract the key from dict or use string directly
                 if isinstance(param, dict):
-                    # Priority: 'key' field > 'name' field > first key in dict
-                    name = param.get('key') or param.get('name') or (list(param.keys())[0] if param else '')
+                    # Priority: prefer human-friendly 'name' field, then 'key',
+                    # then fall back to the first dict key if present.
+                    name = param.get('name') or param.get('key') or (list(param.keys())[0] if param else '')
                 else:
                     # Parameter keys are typically strings like "parameter_key_name"
                     name = str(param).strip()
 
                 # Replace underscores with spaces
                 name = name.replace('_', ' ')
-                # Remove any parenthetical or bracketed content: ( ... ), [ ... ], { ... }
-                name = re.sub(r"\s*[\(\[\{].*?[\)\]\}]", "", name)
+                # Remove any parenthetical or bracketed content by taking text
+                # before the first bracket. Example: "X (Y)" -> "X"
+                name = re.split(r'[\(\[\{]', name, 1)[0].strip()
                 # Normalize spacing (remove extra spaces)
                 name = " ".join(name.split())
                 # Title case for display (first letter of each word capitalized)
                 name = name.title()
 
-                formatted.append(name)
+                # Prefix with a bullet so the list appears as points one per line
+                formatted.append(f"- {name}")
             return "\n".join(formatted)
 
         # Treat short affirmative/negative replies (e.g., 'yes', 'no') as
@@ -515,19 +1356,56 @@ def api_sales_agent():
 
         # Handle knowledge questions - answer and resume workflow
         if intent == "knowledgeQuestion":
-            # Determine context-aware response based on current workflow step
-            if step == "awaitMissingInfo":
-                context_hint = "Once you have the information you need, please provide the missing details so we can continue with your product selection or Would you like to continue anyway?"
-            elif step == "awaitAdditionalAndLatestSpecs":
-                context_hint = "Now, let's continue - would you like to add additional and latest specifications?"
-            elif step == "awaitAdvancedSpecs":
-                context_hint = "Now, let's continue with advanced specifications."
-            elif step == "showSummary":
-                context_hint = "Now, let's proceed with your product analysis."
-            else:
-                context_hint = "Now, let's continue with your product selection."
+            # Define industrial-related keywords to check relevance
+            industrial_keywords = [
+                'transmitter', 'sensor', 'valve', 'pump', 'controller', 'actuator',
+                'gauge', 'meter', 'flow', 'pressure', 'temperature', 'level', 'humidity',
+                'industrial', 'automation', 'process', 'control', 'instrumentation',
+                'plc', 'dcs', 'scada', 'hmi', 'modbus', 'profibus', 'hart', 'fieldbus',
+                'calibration', 'accuracy', 'precision', 'range', 'span', 'output', 'signal',
+                '4-20ma', '4-20 ma', 'voltage', 'current', 'analog', 'digital',
+                'sil', 'safety', 'hazardous', 'explosion', 'atex', 'iecex',
+                'stainless', 'steel', 'material', 'wetted', 'housing', 'enclosure',
+                'ip65', 'ip66', 'ip67', 'nema', 'protection',
+                'emerson', 'honeywell', 'abb', 'siemens', 'yokogawa', 'endress', 'rosemount',
+                'differential', 'absolute', 'gauge', 'capacitive', 'piezoelectric',
+                'thermocouple', 'rtd', 'pt100', 'resistance',
+                'orifice', 'coriolis', 'ultrasonic', 'vortex', 'magnetic', 'turbine',
+                'diaphragm', 'bourdon', 'bellows', 'piston',
+                'pid', 'loop', 'feedback', 'setpoint', 'tuning',
+                'protocol', 'communication', 'wireless', 'ethernet', 'io-link', 'opc',
+                'vendor', 'manufacturer', 'specification', 'datasheet', 'catalog',
+                'installation', 'mounting', 'connection', 'wiring', 'cable',
+                'maintenance', 'troubleshooting', 'diagnostics', 'configuration'
+            ]
             
-            prompt_template = f"""
+            # Check if the question is related to industrial domain
+            user_lower = user_message.lower()
+            is_industrial_related = any(keyword in user_lower for keyword in industrial_keywords)
+            
+            # Determine context-aware response based on current workflow step
+            if step == "greeting":
+                context_hint = "What industrial product are you looking for today?"
+            elif step == "initialInput":
+                context_hint = "Please share your product requirements when you're ready."
+            elif step == "awaitMissingInfo":
+                context_hint = "Now, please provide the missing details so we can continue with your product selection, or shall we proceed with the given details for approximate results?"
+            elif step == "awaitAdditionalAndLatestSpecs":
+                context_hint = "Would you like to add any additional or latest specifications?"
+            elif step == "awaitAdvancedSpecs":
+                context_hint = "Would you like to select any of the advanced parameters?"
+            elif step == "showSummary":
+                context_hint = "Ready to proceed with your product analysis?"
+            elif step == "finalAnalysis":
+                context_hint = "Your analysis is complete. Is there anything else you'd like to know?"
+            elif step == "analysisError":
+                context_hint = "Would you like to retry the analysis?"
+            else:
+                context_hint = "How can I help you with your product selection?"
+            
+            if is_industrial_related:
+                # Industrial-related question - answer it
+                prompt_template = f"""
 You are Engenie - an expert industrial sales consultant. The user asked a knowledge question: "{user_message}"
 
 Provide a clear, professional answer about industrial products, processes, or terminology.
@@ -535,6 +1413,20 @@ Keep your response informative but concise (2-3 sentences max).
 After answering, smoothly transition back with: "{context_hint}"
 
 Focus on being helpful while maintaining the conversation flow.
+"""
+            else:
+                # Non-industrial question - politely decline
+                prompt_template = f"""
+You are Engenie - an industrial product specialist. The user asked: "{user_message}"
+
+This question is not related to industrial products or processes.
+
+Respond politely but briefly:
+1. Say something like: "I appreciate your question, but I specialize in industrial products and processes."
+2. Offer to help with their industrial needs.
+3. Transition back with: "{context_hint}"
+
+Keep it friendly and concise (2 sentences max).
 """
             
             # Build and execute LLM chain
@@ -581,85 +1473,275 @@ Your response must:
 Important: This is an independent conversation session. Do not reference any previous interactions.
 """
             next_step = "awaitAdditionalAndLatestSpecs"
+        
+        elif step == 'initialInputWithSpecs':
+            # All mandatory fields provided - show available specs
+            product_type = data_context.get('productType', 'a product')
+            available_specs = data_context.get('availableSpecs', '')
+            specs_count = data_context.get('specsCount', 0)
+            available_parameters = data_context.get('availableParameters', [])
+            
+            # Format parameters as bullet list (same as awaitAdditionalAndLatestSpecs)
+            if available_parameters:
+                params_display = format_available_parameters(available_parameters)
+            else:
+                # Fallback: convert comma-separated string to bullet list
+                params_display = "\n".join([f"- {s.strip()}" for s in available_specs.split(',') if s.strip()]) if available_specs else ""
+            
+            if params_display and specs_count > 0:
+                prompt_template = f"""
+You are Engenie - a helpful sales agent. The user provided all mandatory requirements for a {product_type}.
+
+You have the following {specs_count} additional and latest specifications available:
+
+{params_display}
+
+Your response must:
+1. Start positively (e.g., "Great choice!" or "Perfect!").
+2. Confirm the identified product type in a friendly way.
+3. Mention that you found {specs_count} additional and latest specifications available.
+4. List these specifications clearly (the list above).
+5. Ask: "Would you like to add any of these specifications?"
+
+Keep it friendly and concise. Show the specifications as a bullet list.
+"""
+            else:
+                prompt_template = f"""
+You are Engenie - a helpful sales agent. The user provided all mandatory requirements for a {product_type}.
+
+Your response must:
+1. Start positively (e.g., "Great choice!" or "Perfect!").
+2. Confirm the identified product type in a friendly way.
+3. Ask: "Additional and latest specifications are available. Would you like to add them?"
+
+Keep it friendly and concise (2-3 sentences max).
+"""
+            next_step = "awaitAdditionalAndLatestSpecs"
+        
+        elif step == 'askForMissingFields':
+            # User said "no" at awaitMissingInfo - they want to provide missing fields
+            product_type = data_context.get('productType', 'your product')
+            missing_fields = data_context.get('missingFields', '')
+            
+            prompt_template = f"""
+You are Engenie - a helpful sales assistant. The user indicated they want to provide more details.
+
+The following specifications are still missing: **{missing_fields}**
+
+Your response must:
+1. Acknowledge their choice to provide more details (e.g., "Sure!" or "Great!")
+2. List the missing specifications clearly: **{missing_fields}**
+3. Ask which one they would like to add, OR if they've changed their mind and want to proceed with approximate results
+
+Keep it friendly and concise. Example:
+"Sure! Here are the specifications we're still missing: **{missing_fields}**. Which one would you like to add? Or if you prefer, we can proceed with the given details for approximate results."
+"""
+            next_step = "awaitMissingInfo"  # Stay at this step until user says yes
+        
+        elif step == 'confirmAfterMissingInfo':
+            # User confirmed to proceed (either skipped or provided all fields)
+            product_type = data_context.get('productType', 'a product')
+            prompt_template = f"""
+You are Engenie - a helpful sales agent. The user is ready to proceed with their {product_type} search.
+
+Your response must:
+1. Acknowledge positively (e.g., "Perfect!" or "Great!")
+2. Mention that additional and latest specifications are available
+3. Ask: "Would you like to add any additional or latest specifications?"
+
+Keep it short and friendly (2-3 sentences max).
+"""
+            next_step = "awaitAdditionalAndLatestSpecs"
             
         elif step == 'awaitAdditionalAndLatestSpecs':
             # Handle the combined "Additional and Latest Specs" step
             user_lower = user_message.lower().strip()
             
-            # Define yes/no keywords
-            affirmative_keywords = ['yes', 'y', 'yeah', 'yep', 'sure', 'ok', 'okay']
-            negative_keywords = ['no', 'n', 'nope', 'skip']
+            # Get available parameters and track which are already added
+            available_parameters = data_context.get('availableParameters', [])
+            added_specs_key = f'added_specs_{search_session_id}'
+            added_specs = session.get(added_specs_key, [])
             
-            # Check if we're waiting for yes/no or collecting specs input
-            # Track state in session to know if we've asked the question
+            # Get product type for context
+            product_type = data_context.get('productType') or session.get(f'product_type_{search_session_id}', 'your product')
+            
+            # Calculate remaining parameters (those not yet added)
+            remaining_parameters = []
+            for param in available_parameters:
+                param_name = param.get('name') if isinstance(param, dict) else str(param)
+                param_lower = param_name.lower().replace('_', ' ')
+                if not any(added.lower() in param_lower or param_lower in added.lower() for added in added_specs):
+                    remaining_parameters.append(param)
+            
+            # Define keywords
+            affirmative_keywords = ['yes', 'y', 'yeah', 'yep', 'sure', 'ok', 'okay']
+            negative_keywords = ['no', 'n', 'nope', 'skip', 'done', 'finish', 'proceed', 'continue', 'that\'s all', 'nothing more']
+            
+            # Track state in session
             asking_state_key = f'awaiting_additional_specs_yesno_{search_session_id}'
             is_awaiting_yesno = session.get(asking_state_key, True)
             
-            # Check if user response is valid yes/no
-            is_yes = any(keyword in user_lower for keyword in affirmative_keywords)
-            is_no = any(keyword in user_lower for keyword in negative_keywords)
+            # Check if user response matches any parameter
+            def find_matching_parameter(user_input, params):
+                """Check if user input matches any available parameter"""
+                user_words = set(user_input.lower().replace('_', ' ').split())
+                for param in params:
+                    param_name = param.get('name') if isinstance(param, dict) else str(param)
+                    param_lower = param_name.lower().replace('_', ' ')
+                    param_words = set(param_lower.split())
+                    # Check if there's significant overlap
+                    if user_words & param_words or param_lower in user_input.lower() or user_input.lower() in param_lower:
+                        return param_name
+                return None
             
-            if is_awaiting_yesno:
-                # First interaction - asking yes/no question
-                if is_no:
-                    # User says NO -> skip directly to showSummary
-                    session[asking_state_key] = False
-                    # Use LLM to produce the fixed summary-intro sentence
-                    prompt_template = """
+            # Check if user input is yes/no
+            is_yes = any(keyword == user_lower or user_lower.startswith(keyword + ' ') for keyword in affirmative_keywords)
+            is_no = any(keyword == user_lower or user_lower.startswith(keyword + ' ') for keyword in negative_keywords)
+            
+            # CASE 2: User says NO -> Go to showSummary
+            if is_no:
+                session[asking_state_key] = True  # Reset for next time
+                session[added_specs_key] = []  # Clear added specs
+                prompt_template = """
 You are Engenie - a helpful sales agent.
 
-The user said NO to adding additional or latest specifications.
+The user said NO to adding additional specifications.
 
 Respond with EXACTLY this single sentence and nothing else:
 
 "It sounds like you're ready to move forward. Here's a quick summary of what you have provided:"
 """
-                    next_step = "showSummary"
-                elif is_yes:
-                    # User says YES -> ask them to enter their additional/latest specifications
-                    session[asking_state_key] = False  # Now we're collecting input
-                    # Use LLM to remind them of the latest advanced specifications, then ask for input
-                    available_parameters = data_context.get('availableParameters', [])
-                    if available_parameters:
-                        params_display = format_available_parameters(available_parameters)
-                        prompt_template = f"""
-You are Engenie - a helpful sales assistant. The user said YES to adding additional/latest specifications.
+                next_step = "showSummary"
+            
+            # CASE 3: User says YES -> Show list and ask which to add
+            elif is_yes:
+                session[asking_state_key] = False  # Now we're collecting input
+                if remaining_parameters:
+                    params_display = format_available_parameters(remaining_parameters)
+                    prompt_template = f"""
+You are Engenie - a helpful sales assistant. The user said YES to adding specifications.
 
-You have the following latest advanced specifications available:
+Here are the available specifications:
 
 {params_display}
 
-Respond with a short message that:
-1. Starts with "Great!" or similar.
-2. Briefly reminds the user of these latest advanced specifications.
-3. Asks them to enter their additional or latest specifications.
+Respond with:
+1. "Great!" or similar
+2. Show the list above
+3. Ask: "Which one would you like to add?"
 
-Keep it concise and friendly.
+Keep it concise.
 """
-                    # else:
-                    #     prompt_template = "Great! Please enter your additional or latest specifications."
-
-                    next_step = "awaitAdditionalAndLatestSpecs"  # Stay in step to collect input
                 else:
-                    # Invalid response - ask for yes/no
-                    llm_response = "Please respond with yes or no. Additional and latest specifications are available. Would you like to add them?"
-                    prompt_template = ""
-                    next_step = "awaitAdditionalAndLatestSpecs"  # Stay in step until valid answer
-            else:
-                # We're collecting the actual specifications input
-                # User has provided their additional/latest specs - process and move to advanced parameters
-                product_type = data_context.get('productType') or session.get(f'product_type_{search_session_id}')
-                
-                # Process the additional requirements using additional_requirements endpoint logic
-                # Store the user input for processing - frontend will call /additional_requirements to extract and merge
-                session[f'additional_specs_input_{search_session_id}'] = user_message
-                session[asking_state_key] = True  # Reset for next time
-                
-                prompt_template = f"""
-You are Engenie - a helpful sales agent. The user provided additional and latest specifications.
-Acknowledge their input briefly and say: "Thank you! Now let me discover the latest advanced parameters for {product_type}."
+                    # All specs already added - move to next step
+                    session[asking_state_key] = True  # Reset
+                    session[added_specs_key] = []  # Clear
+                    prompt_template = f"""
+You are Engenie - a helpful sales agent.
+All available specifications have been added! Say: "Perfect! Now let me discover the latest advanced parameters for {product_type}."
 """
-                next_step = "awaitAdvancedSpecs"
+                    next_step = "awaitAdvancedSpecs"
+                next_step = "awaitAdditionalAndLatestSpecs" if remaining_parameters else "awaitAdvancedSpecs"
+            
+            # CASE 1: User adds a specification from the list
+            elif not is_awaiting_yesno:
+                matched_param = find_matching_parameter(user_message, remaining_parameters)
+                
+                if matched_param:
+                    # User provided a valid spec - add to collection
+                    added_specs.append(matched_param)
+                    session[added_specs_key] = added_specs
+                    
+                    # Store for processing
+                    existing_specs = session.get(f'additional_specs_input_{search_session_id}', '')
+                    if existing_specs:
+                        session[f'additional_specs_input_{search_session_id}'] = f"{existing_specs}, {user_message}"
+                    else:
+                        session[f'additional_specs_input_{search_session_id}'] = user_message
+                    
+                    # Recalculate remaining after adding
+                    new_remaining = []
+                    for param in available_parameters:
+                        param_name = param.get('name') if isinstance(param, dict) else str(param)
+                        param_lower = param_name.lower().replace('_', ' ')
+                        if not any(added.lower() in param_lower or param_lower in added.lower() for added in added_specs):
+                            new_remaining.append(param)
+                    
+                    if new_remaining:
+                        # More specs remaining - show them and ask for more
+                        params_display = format_available_parameters(new_remaining)
+                        prompt_template = f"""
+You are Engenie - a helpful sales assistant. The user added: "{matched_param}".
+
+Acknowledge briefly (e.g., "Got it! Added {matched_param}.").
+
+Here are the remaining specifications:
+
+{params_display}
+
+Ask: "Would you like to add any more?"
+
+Keep it concise.
+"""
+                        next_step = "awaitAdditionalAndLatestSpecs"
+                    else:
+                        # All specs added - automatically move to next step
+                        session[asking_state_key] = True  # Reset
+                        session[added_specs_key] = []  # Clear
+                        prompt_template = f"""
+You are Engenie - a helpful sales agent.
+Say: "Great! You've added all available specifications. Now let me discover the latest advanced parameters for {product_type}."
+"""
+                        next_step = "awaitAdvancedSpecs"
+                else:
+                    # CASE 5: Irrelevant input - not matching any parameter
+                    if remaining_parameters:
+                        params_display = format_available_parameters(remaining_parameters)
+                        prompt_template = f"""
+You are Engenie - a helpful sales assistant.
+
+The user's input doesn't match any of the available specifications.
+
+Respond politely:
+1. Say: "I couldn't find that in the available specifications."
+2. Show the list again:
+
+{params_display}
+
+3. Ask: "Please choose from the list above, or say 'no' to skip."
+
+Keep it friendly and concise.
+"""
+                    else:
+                        prompt_template = """
+You are Engenie - a helpful sales assistant.
+Say: "I'm not sure what you mean. Would you like to continue to the next step? Please say 'yes' to proceed or 'no' to skip."
+"""
+                    next_step = "awaitAdditionalAndLatestSpecs"
+            
+            # First time asking - show list and ask yes/no
+            else:
+                if remaining_parameters:
+                    params_display = format_available_parameters(remaining_parameters)
+                    prompt_template = f"""
+You are Engenie - a helpful sales assistant.
+
+Here are the available additional and latest specifications:
+
+{params_display}
+
+Ask: "Would you like to add any of these specifications?"
+
+Keep it concise.
+"""
+                else:
+                    # No parameters available - skip to next step
+                    prompt_template = f"""
+You are Engenie - a helpful sales agent.
+Say: "No additional specifications needed. Now let me discover the latest advanced parameters for {product_type}."
+"""
+                    next_step = "awaitAdvancedSpecs"
+                next_step = "awaitAdditionalAndLatestSpecs" if remaining_parameters else "awaitAdvancedSpecs"
         
         elif step == 'awaitAdvancedSpecs':
             # Handle advanced parameters step
@@ -1155,10 +2237,12 @@ Acknowledge their comment and thank them for taking the time to provide their in
 @login_required
 def identify_instruments():
     """
-    Identifies instruments from user requirements using LLM.
-    Returns a list of identified instruments with their specifications and sample inputs.
+    Handles user input in project page with three cases:
+    1. Greeting - Returns friendly greeting response
+    2. Requirements - Returns identified instruments and accessories
+    3. Industrial Question - Returns answer or redirect if not related
     """
-    if not components or not components.get('llm'):
+    if not components or not components.get('llm_pro'):
         return jsonify({"error": "LLM component is not ready."}), 503
 
     try:
@@ -1169,10 +2253,157 @@ def identify_instruments():
         if not requirements:
             return jsonify({"error": "Requirements text is required"}), 400
 
-        # Create the prompt for instrument identification
-        prompt_template = """
+        # Pre-classification heuristics to catch obvious cases
+        requirements_lower = requirements.lower()
+        
+        # Strong indicators of unrelated content (emails, job offers, etc.)
+        unrelated_indicators = [
+            'from:', 'to:', 'subject:', 'date:',  # Email headers
+            'congratulations for the selection', 'job offer', 'recruitment',
+            'campus placement', 'hr department', 'hiring', 'interview process',
+            'provisionally selected', 'offer letter', 'employment application',
+            'dear sir', 'dear madam', 'forwarded message',
+            'training and placement officer', 'campus recruitment'
+        ]
+        
+        # Check if content has strong unrelated indicators
+        unrelated_count = sum(1 for indicator in unrelated_indicators if indicator in requirements_lower)
+        
+        # If 2+ strong indicators, skip LLM and classify as unrelated immediately
+        if unrelated_count >= 2:
+            logging.info(f"[CLASSIFY] Pre-classification: UNRELATED (found {unrelated_count} indicators)")
+            input_type = "unrelated"
+            confidence = "high"
+            reasoning = f"Contains {unrelated_count} strong indicators of non-industrial content (email headers, job/recruitment terms)"
+        else:
+            # Step 1: Classify the input type using LLM
+            classification_prompt = """
+You are an intelligent classifier for an industrial automation and instrumentation assistant named "Engenie".
 
+Analyze the user's input and classify it into ONE of these four categories:
+
+1. "greeting" - ONLY if the user is directly greeting YOU (the assistant) with a simple, standalone message like:
+   ✓ "Hi"
+   ✓ "Hello"
+   ✓ "Good morning"
+   ✓ "Hey there"
+   ✗ NOT formal email greetings like "Dear Sir/Madam" or "Greetings from Company X"
+   ✗ NOT emails that contain greetings to other people
+   ✗ NOT documents that happen to contain the word "greeting"
+   
+   **KEY RULE**: If the input is longer than 20 words OR contains email headers/signatures/formal content, it is NOT a greeting.
+
+2. "requirements" - If the user is providing technical requirements, specifications, or asking to identify instruments/equipment for an industrial process. This includes:
+   - Process control requirements (pressure, temperature, flow, level measurements)
+   - Industrial equipment specifications (valves, transmitters, controllers, actuators)
+   - Automation system requirements
+   - Instrumentation needs for industrial processes
+   - Technical specifications with measurements, ranges, materials, standards (ANSI, ASME, DIN, ISO, API)
+
+3. "question" - If the user is asking a question about industrial topics, processes, or equipment (e.g., "What is a pressure transmitter?", "How does HART protocol work?")
+
+4. "unrelated" - If the content is NOT related to industrial automation, instrumentation, or process control. This is the MOST COMMON category for uploaded documents. Examples:
+   - **Job offers, recruitment emails, selection letters** (e.g., "Congratulations for the selection at L&T")
+   - **HR communications, campus recruitment emails**
+   - Personal emails or messages to other people
+   - Formal letters, business correspondence not about industrial equipment
+   - General documents unrelated to industrial processes
+   - Academic content not related to industrial engineering
+   - News articles, social media posts, or general text
+   - Any content that doesn't involve industrial instruments, equipment, or processes
+   
+   **IMPORTANT INDICATORS OF "UNRELATED"**:
+   - Contains email headers (From:, To:, Subject:, Date:)
+   - Mentions job selection, recruitment, HR, campus placement
+   - Addressed to other people (not to you, the assistant)
+   - Contains formal business language but no technical industrial content
+   - Discusses employment, hiring, onboarding, training programs
+
+**CRITICAL CLASSIFICATION RULES**:
+1. If input contains "From:", "To:", "Subject:", "Date:" → Almost always "unrelated"
+2. If input mentions job/recruitment/selection/hiring → "unrelated"
+3. If input is addressed to people other than you (the assistant) → "unrelated"
+4. If input is a forwarded email or formal letter → Check content, likely "unrelated"
+5. Only classify as "greeting" if it's a SHORT, DIRECT greeting to YOU
+
+User Input: {user_input}
+
+Respond with ONLY a JSON object in this exact format:
+{{
+  "type": "<greeting|requirements|question|unrelated>",
+  "confidence": "<high|medium|low>",
+  "reasoning": "<brief explanation of why you chose this classification>"
+}}
+
+No additional text or explanation outside the JSON.
+"""
+        
+            classification_chain = ChatPromptTemplate.from_template(classification_prompt) | components['llm_pro'] | StrOutputParser()
+            classification_response = classification_chain.invoke({"user_input": requirements})
+            
+            # Clean and parse classification
+            cleaned_classification = classification_response.strip()
+            if cleaned_classification.startswith("```json"):
+                cleaned_classification = cleaned_classification[7:]
+            elif cleaned_classification.startswith("```"):
+                cleaned_classification = cleaned_classification[3:]
+            if cleaned_classification.endswith("```"):
+                cleaned_classification = cleaned_classification[:-3]
+            cleaned_classification = cleaned_classification.strip()
+            
+            try:
+                classification = json.loads(cleaned_classification)
+                input_type = classification.get("type", "requirements").lower()
+                confidence = classification.get("confidence", "medium").lower()
+                reasoning = classification.get("reasoning", "")
+                
+                # Log classification for debugging
+                logging.info(f"[CLASSIFY] LLM classified as '{input_type}' (confidence: {confidence})")
+                logging.info(f"[CLASSIFY] Reasoning: {reasoning}")
+                
+            except Exception as e:
+                # Default to requirements if classification fails
+                input_type = "requirements"
+                confidence = "low"
+                reasoning = "Classification parsing failed"
+                logging.warning(f"Failed to parse classification, defaulting to requirements. Response: {classification_response}")
+                logging.exception(e)
+
+        # CASE 1: Greeting
+        if input_type == "greeting":
+            greeting_prompt = """
+You are Engenie - a friendly and professional industrial automation assistant.
+
+The user has greeted you with: "{user_input}"
+
+Respond with a warm, professional greeting and briefly introduce yourself. 
+Mention that you can help them identify instruments and accessories for their industrial projects.
+Keep it concise (2-3 sentences max).
+
+Respond ONLY with the greeting text, no JSON.
+"""
+            greeting_chain = ChatPromptTemplate.from_template(greeting_prompt) | components['llm_pro'] | StrOutputParser()
+            greeting_response = greeting_chain.invoke({"user_input": requirements})
+            
+            return standardized_jsonify({
+                "response_type": "greeting",
+                "message": greeting_response.strip(),
+                "instruments": [],
+                "accessories": []
+            }, 200)
+
+        # CASE 2: Requirements - Identify instruments and accessories
+        elif input_type == "requirements":
+            instrument_prompt = """
 You are Engenie - an expert assistant in Industrial Process Control Systems. Analyze the given requirements and identify the Bill of Materials (instruments) needed.
+**IMPORTANT: Think step-by-step through your identification process.**
+
+Before providing the final JSON:
+1. First, read the requirements and extract a concise project name (1-2 words) that best represents the objective.
+2. Then, identify every instrument required by the problem statement. For each instrument, determine category, generic product name, quantity (explicit or inferred), and all specifications mentioned.
+3. For any specification not explicitly present but required for sensible procurement (e.g., typical ranges, common materials), mark it with the tag `[INFERRED]` and explain briefly in an internal analysis (see Validation step).
+4. Create a clear `sample_input` field for each instrument that contains every specification key/value exactly as listed in the `specifications` object.
+5. Identify accessories, consumables, or ancillary items (impulse lines, isolation valves, manifolds, mounting brackets, junction boxes, power supplies, calibration kits, connectors). Provide the same structure for accessories as for instruments.
 
 Requirements:
 {requirements}
@@ -1185,6 +2416,7 @@ Instructions:
    - Product Name (generic name based on the requirements)
    - Quantity
    - Specifications (extract from requirements or infer based on industry standards)
+   - Strategy (analyze user requirements to identify procurement approach: budget constraints suggest "Cost optimization", quality emphasis suggests "Life-cycle cost evaluation", sustainability mentions suggest "Sustainability and green procurement", critical applications suggest "Dual sourcing", standard applications suggest "Framework agreement", or leave empty if none identified)
    - Sample Input(must include all specification details exactly as listed in the specifications field (no field should be missing)).
    - Ensure every parameter appears explicitly in the sample input text.
 4. Mark inferred requirements explicitly with [INFERRED] tag
@@ -1194,6 +2426,7 @@ Additionally, identify any accessories, consumables, or ancillary items required
     - Accessory Name (generic)
     - Quantity
     - Specifications (size, material, pressure rating, connector type, etc.)
+    - Strategy (analyze user requirements for procurement approach or leave empty if none identified)
     - Sample Input(must also include every specification field listed.)
  
 Return ONLY a valid JSON object with this structure:
@@ -1209,6 +2442,7 @@ Return ONLY a valid JSON object with this structure:
         "<spec_field>": "<spec_value>",
         "<spec_field>": "<spec_value>"
       }},
+      "strategy": "<procurement strategy from user requirements or empty string>",
       "sample_input": "<category> with <key specifications>"
     }}
   ],
@@ -1220,6 +2454,7 @@ Return ONLY a valid JSON object with this structure:
             "specifications": {{
                 "<spec_field>": "<spec_value>"
             }},
+            "strategy": "<procurement strategy from user requirements or empty string>",
             "sample_input": " <accessory category> for <instrument or purpose> with <key specs>"
         }}
     ],
@@ -1229,67 +2464,390 @@ Return ONLY a valid JSON object with this structure:
 Respond ONLY with valid JSON, no additional text.
 Validate the outputs and adherence to the output structure.
 """
+            session_isolated_requirements = f"[Session: {search_session_id}] - This is an independent instrument identification request. Requirements: {requirements}"
+            
+            full_prompt = ChatPromptTemplate.from_template(instrument_prompt)
+            response_chain = full_prompt | components['llm_pro'] | StrOutputParser()
+            llm_response = response_chain.invoke({"requirements": session_isolated_requirements})
 
-        # Build and execute LLM chain with session isolation
-        session_isolated_requirements = f"[Session: {search_session_id}] - This is an independent instrument identification request. Requirements: {requirements}"
-        
-        full_prompt = ChatPromptTemplate.from_template(prompt_template)
-        response_chain = full_prompt | components['llm'] | StrOutputParser()
-        llm_response = response_chain.invoke({"requirements": session_isolated_requirements})
+            # Clean the LLM response
+            cleaned_response = llm_response.strip()
+            if cleaned_response.startswith("```json"):
+                cleaned_response = cleaned_response[7:]  
+            elif cleaned_response.startswith("```"):
+                cleaned_response = cleaned_response[3:]  
+            if cleaned_response.endswith("```"):
+                cleaned_response = cleaned_response[:-3]  
+            cleaned_response = cleaned_response.strip()
 
-        # Clean the LLM response - remove markdown code blocks if present
-        cleaned_response = llm_response.strip()
-        if cleaned_response.startswith("```json"):
-            cleaned_response = cleaned_response[7:]  
-        elif cleaned_response.startswith("```"):
-            cleaned_response = cleaned_response[3:]  
-        if cleaned_response.endswith("```"):
-            cleaned_response = cleaned_response[:-3]  
-        cleaned_response = cleaned_response.strip()
+            try:
+                result = json.loads(cleaned_response)
+                
+                # Validate the response structure
+                if "instruments" not in result or not isinstance(result["instruments"], list):
+                    raise ValueError("Invalid response structure from LLM")
+                
+                # Ensure all instruments have required fields
+                for instrument in result["instruments"]:
+                    if not all(key in instrument for key in ["category", "product_name", "specifications", "sample_input"]):
+                        raise ValueError("Missing required fields in instrument data")
+                
+                # Validate accessories if present
+                if "accessories" in result:
+                    if not isinstance(result["accessories"], list):
+                        raise ValueError("'accessories' must be a list if provided")
+                    for accessory in result["accessories"]:
+                        expected_acc_keys = ["category", "accessory_name", "specifications", "sample_input"]
+                        if not all(key in accessory for key in expected_acc_keys):
+                            raise ValueError("Missing required fields in accessory data")
+                
+                # Ensure strategy field exists for all instruments and accessories
+                for instrument in result.get("instruments", []):
+                    if "strategy" not in instrument:
+                        instrument["strategy"] = ""
 
-        # Parse JSON response
-        try:
-            result = json.loads(cleaned_response)
-            
-            # Validate the response structure
-            if "instruments" not in result or not isinstance(result["instruments"], list):
-                raise ValueError("Invalid response structure from LLM")
-            
-            # Ensure all instruments have required fields
-            for instrument in result["instruments"]:
-                if not all(key in instrument for key in ["category", "product_name", "specifications", "sample_input"]):
-                    raise ValueError("Missing required fields in instrument data")
+                for accessory in result.get("accessories", []):
+                    if "strategy" not in accessory:
+                        accessory["strategy"] = ""
+                
+                # Add response type
+                result["response_type"] = "requirements"
+                return standardized_jsonify(result, 200)
+                
+            except json.JSONDecodeError as e:
+                logging.error(f"Failed to parse LLM response as JSON: {e}")
+                logging.error(f"LLM Response: {llm_response}")
+                
+                return jsonify({
+                    "response_type": "error",
+                    "error": "Failed to parse instrument identification",
+                    "instruments": [],
+                    "accessories": [],
+                    "summary": "Unable to identify instruments from the provided requirements"
+                }), 500
 
+        # CASE 3: Unrelated content - Politely redirect
+        elif input_type == "unrelated":
+            unrelated_prompt = """
+You are Engenie - a friendly and professional industrial automation assistant.
+
+The user has provided content that appears to be unrelated to industrial automation or instrumentation.
+
+Content type detected: {reasoning}
+
+Craft a polite, helpful response that:
+1. Acknowledges their input
+2. Explains that you specialize in industrial automation, process control, and instrumentation
+3. Provides examples of what you CAN help with (e.g., "identifying instruments for a distillation column", "specifying pressure transmitters", "selecting control valves")
+4. Invites them to provide industrial requirements or ask industrial-related questions
+
+Keep it friendly, professional, and concise (2-3 sentences).
+
+Respond ONLY with the message text, no JSON.
+"""
+            unrelated_chain = ChatPromptTemplate.from_template(unrelated_prompt) | components['llm_pro'] | StrOutputParser()
+            unrelated_response = unrelated_chain.invoke({"reasoning": reasoning})
             
-            # Optional: validate accessories if present
-            if "accessories" in result:
-                if not isinstance(result["accessories"], list):
-                    raise ValueError("'accessories' must be a list if provided")
-                for accessory in result["accessories"]:
-                    # expected keys for accessories
-                    expected_acc_keys = ["category", "accessory_name", "specifications", "sample_input"]
-                    if not all(key in accessory for key in expected_acc_keys):
-                        raise ValueError("Missing required fields in accessory data")
-            
-            return standardized_jsonify(result, 200)
-            
-        except json.JSONDecodeError as e:
-            logging.error(f"Failed to parse LLM response as JSON: {e}")
-            logging.error(f"LLM Response: {llm_response}")
-            
-            # Fallback: Try to extract instruments from text response
-            return jsonify({
-                "error": "Failed to parse instrument identification",
+            return standardized_jsonify({
+                "response_type": "question",  # Use "question" type for frontend compatibility
+                "is_industrial": False,
+                "message": unrelated_response.strip(),
                 "instruments": [],
-                "summary": "Unable to identify instruments from the provided requirements"
-            }), 500
+                "accessories": []
+            }, 200)
+
+        # CASE 4: Question - Answer industrial questions or redirect
+        elif input_type == "question":
+            question_prompt = """
+You are Engenie - an expert in Industrial Process Control Systems and automation.
+
+The user has asked: "{user_input}"
+
+First, determine if this question is related to industrial automation, process control, instrumentation, or related topics.
+
+If YES (related to industrial topics):
+- Provide a helpful, accurate, and concise answer (2-4 sentences)
+- Focus on practical information
+
+If NO (not related to industrial topics):
+- Politely redirect the user
+- Mention that you specialize in industrial automation and instrumentation
+- Suggest they ask about industrial topics or provide requirements for instrument identification
+
+Respond ONLY with a JSON object in this format:
+{{
+  "is_industrial": <true|false>,
+  "answer": "<your response text>"
+}}
+
+No additional text outside the JSON.
+"""
+            question_chain = ChatPromptTemplate.from_template(question_prompt) | components['llm_pro'] | StrOutputParser()
+            question_response = question_chain.invoke({"user_input": requirements})
+            
+            # Clean and parse question response
+            cleaned_question = question_response.strip()
+            if cleaned_question.startswith("```json"):
+                cleaned_question = cleaned_question[7:]
+            elif cleaned_question.startswith("```"):
+                cleaned_question = cleaned_question[3:]
+            if cleaned_question.endswith("```"):
+                cleaned_question = cleaned_question[:-3]
+            cleaned_question = cleaned_question.strip()
+            
+            try:
+                question_result = json.loads(cleaned_question)
+                return standardized_jsonify({
+                    "response_type": "question",
+                    "is_industrial": question_result.get("is_industrial", True),
+                    "message": question_result.get("answer", ""),
+                    "instruments": [],
+                    "accessories": []
+                }, 200)
+            except:
+                # Fallback if parsing fails - generate response from LLM without JSON constraint
+                fallback_prompt = f"You are Engenie, an industrial automation assistant. The user asked: '{requirements}'. Provide a brief, helpful response about industrial automation and instrumentation (2-3 sentences)."
+                fallback_chain = ChatPromptTemplate.from_template(fallback_prompt) | components['llm_pro'] | StrOutputParser()
+                fallback_message = fallback_chain.invoke({})
+                
+                return standardized_jsonify({
+                    "response_type": "question",
+                    "is_industrial": False,
+                    "message": fallback_message.strip(),
+                    "instruments": [],
+                    "accessories": []
+                }, 200)
+        
+        # CASE 5: Unexpected classification type - Default fallback
+        else:
+            logging.warning(f"[CLASSIFY] Unexpected classification type: {input_type}")
+            # Generate dynamic response from LLM
+            unexpected_prompt = f"You are Engenie, an industrial automation assistant. The user provided: '{requirements}'. Politely explain that you specialize in industrial automation and instrumentation, and invite them to provide industrial requirements or ask related questions (2-3 sentences)."
+            unexpected_chain = ChatPromptTemplate.from_template(unexpected_prompt) | components['llm_pro'] | StrOutputParser()
+            unexpected_message = unexpected_chain.invoke({})
+            
+            return standardized_jsonify({
+                "response_type": "question",
+                "is_industrial": False,
+                "message": unexpected_message.strip(),
+                "instruments": [],
+                "accessories": []
+            }, 200)
 
     except Exception as e:
         logging.exception("Instrument identification failed.")
         return jsonify({
-            "error": "Failed to identify instruments: " + str(e),
+            "response_type": "error",
+            "error": "Failed to process request: " + str(e),
             "instruments": [],
+            "accessories": [],
             "summary": ""
+        }), 500
+
+@app.route("/api/search-vendors", methods=["POST"])
+@login_required
+def search_vendors():
+    """
+    Search for vendors based on selected instrument/accessory details.
+    Maps category, product name, and strategy to MongoDB strategy data and returns filtered vendor list.
+    """
+    try:
+        data = request.get_json(force=True)
+        category = data.get("category", "").strip()
+        product_name = data.get("product_name", "").strip() or data.get("accessory_name", "").strip()
+        strategy = data.get("strategy", "").strip()
+        
+        print(f"[VENDOR_SEARCH] Received request: category='{category}', product='{product_name}', strategy='{strategy}'")
+        
+        if not category or not product_name:
+            return jsonify({"error": "Category and product_name/accessory_name are required"}), 400
+        
+        # Load Strategy Data from MongoDB for current user
+        user_id = session.get('user_id')
+        if not user_id:
+             return jsonify({"error": "User not authenticated"}), 401
+             
+        conn = get_mongodb_connection()
+        stratergy_collection = conn['collections']['stratergy']
+        
+        # Find documents for this user
+        cursor = stratergy_collection.find({'user_id': user_id})
+        
+        vendors = []
+        for doc in cursor:
+            if 'data' in doc and isinstance(doc['data'], list):
+                for item in doc['data']:
+                    # Map MongoDB fields to the keys expected by the matching logic
+                    # MongoDB keys: vendor_name, stratergy (with typo), category, subcategory
+                    vendors.append({
+                        "vendor name": item.get("vendor_name", ""),
+                        "category": item.get("category", ""),
+                        "subcategory": item.get("subcategory", ""),
+                        "strategy": item.get("stratergy", ""), # Map 'stratergy' from DB to 'strategy'
+                    })
+        
+        if not vendors:
+            print(f"[VENDOR_SEARCH] No strategy data found in MongoDB for user_id={user_id}")
+            return jsonify({
+                "vendors": [], 
+                "total_count": 0, 
+                "matching_criteria": {
+                    "message": "No strategy data found. Please upload a strategy file."
+                }
+            }), 200
+        
+        # Get unique categories and subcategories for fuzzy matching
+        csv_categories = list(set([v.get('category', '').strip() for v in vendors if v.get('category')]))
+        csv_subcategories = list(set([v.get('subcategory', '').strip() for v in vendors if v.get('subcategory')]))
+        csv_strategies = list(set([v.get('strategy', '').strip() for v in vendors if v.get('strategy')]))
+        
+        # Step 1: Match Category using dynamic fuzzy matching
+        matched_category = None
+        category_match_type = None
+        
+        # Exact match first
+        for csv_cat in csv_categories:
+            if csv_cat.lower() == category.lower():
+                matched_category = csv_cat
+                category_match_type = "exact"
+                break
+        
+        # Fuzzy match if no exact match
+        if not matched_category:
+            fuzzy_result = process.extractOne(category, csv_categories, scorer=fuzz.ratio)
+            if fuzzy_result and fuzzy_result[1] >= 50:  # Flexible threshold for better matching
+                matched_category = fuzzy_result[0]
+                category_match_type = "fuzzy"
+        
+        print(f"[VENDOR_SEARCH] Category matching result: '{category}' -> '{matched_category}' (type: {category_match_type})")
+        
+        if not matched_category:
+            print(f"[VENDOR_SEARCH] No category match found. Available categories: {csv_categories}")
+            return jsonify({
+                "vendors": [],
+                "total_count": 0,
+                "matching_criteria": {
+                    "category_match": None,
+                    "subcategory_match": None,
+                    "strategy_match": None,
+                    "message": f"No matching category found for '{category}'. Available: {csv_categories}"
+                }
+            }), 200
+        
+        # Step 2: Match Product Name to Subcategory (exact first, then fuzzy)
+        matched_subcategory = None
+        subcategory_match_type = None
+        
+        # Exact match
+        for csv_subcat in csv_subcategories:
+            if csv_subcat.lower() == product_name.lower():
+                matched_subcategory = csv_subcat
+                subcategory_match_type = "exact"
+                break
+        
+        # Fuzzy match if no exact match
+        if not matched_subcategory:
+            fuzzy_result = process.extractOne(product_name, csv_subcategories, scorer=fuzz.ratio)
+            if fuzzy_result and fuzzy_result[1] >= 70:  # 70% similarity threshold
+                matched_subcategory = fuzzy_result[0]
+                subcategory_match_type = "fuzzy"
+        
+        # Step 3: Match Strategy (optional field, exact first, then fuzzy)
+        matched_strategy = None
+        strategy_match_type = None
+        
+        if strategy:  # Only if strategy is provided
+            # Exact match
+            for csv_strategy in csv_strategies:
+                if csv_strategy.lower() == strategy.lower():
+                    matched_strategy = csv_strategy
+                    strategy_match_type = "exact"
+                    break
+            
+            # Fuzzy match if no exact match
+            if not matched_strategy:
+                fuzzy_result = process.extractOne(strategy, csv_strategies, scorer=fuzz.ratio)
+                if fuzzy_result and fuzzy_result[1] >= 70:  # 70% similarity threshold
+                    matched_strategy = fuzzy_result[0]
+                    strategy_match_type = "fuzzy"
+        
+        # Step 4: Filter vendors based on matches
+        filtered_vendors = []
+        
+        for vendor in vendors:
+            vendor_category = vendor.get('category', '').strip()
+            vendor_subcategory = vendor.get('subcategory', '').strip()
+            vendor_strategy = vendor.get('strategy', '').strip()
+            
+            # Category must match
+            if vendor_category != matched_category:
+                continue
+            
+            # Subcategory should match if we found a match
+            if matched_subcategory and vendor_subcategory != matched_subcategory:
+                continue
+            
+            # Strategy should match if provided and we found a match
+            if strategy and matched_strategy and vendor_strategy != matched_strategy:
+                continue
+            
+            # Add vendor to results
+            filtered_vendors.append({
+                "vendor_name": vendor.get('vendor name', ''),
+                "category": vendor_category,
+                "subcategory": vendor_subcategory,
+                "strategy": vendor_strategy,
+            })
+        
+        # Prepare response
+        matching_criteria = {
+            "category_match": {
+                "input": category,
+                "matched": matched_category,
+                "match_type": category_match_type
+            },
+            "subcategory_match": {
+                "input": product_name,
+                "matched": matched_subcategory,
+                "match_type": subcategory_match_type
+            } if matched_subcategory else None,
+            "strategy_match": {
+                "input": strategy,
+                "matched": matched_strategy,
+                "match_type": strategy_match_type
+            } if strategy and matched_strategy else None
+        }
+        
+        # Store CSV vendor filter in session for analysis chain
+        if filtered_vendors:
+            session['csv_vendor_filter'] = {
+                'vendor_names': [v.get('vendor_name', '').strip() for v in filtered_vendors],
+                'csv_data': filtered_vendors,
+                'product_type': category,
+                'detected_product': product_name,
+                'matching_criteria': matching_criteria
+            }
+            print(f"[VENDOR_SEARCH] Stored {len(filtered_vendors)} vendors in session for analysis filtering")
+        else:
+            # Clear any existing filter if no vendors found
+            session.pop('csv_vendor_filter', None)
+            print("[VENDOR_SEARCH] No vendors found, cleared session filter")
+        
+        # Return only vendor names list for frontend
+        vendor_names_only = [v.get('vendor_name', '').strip() for v in filtered_vendors]
+        
+        return standardized_jsonify({
+            "vendors": vendor_names_only,
+            "total_count": len(filtered_vendors),
+            "matching_criteria": matching_criteria
+        }, 200)
+        
+    except Exception as e:
+        logging.exception("Vendor search failed.")
+        return jsonify({
+            "error": "Failed to search vendors: " + str(e),
+            "vendors": [],
+            "total_count": 0
         }), 500
 
 # =========================================================================
@@ -1867,6 +3425,8 @@ def fetch_images_google_cse_sync(vendor_name: str, product_name: str = None, man
         if product_type:
             query += f" {product_type}"  # Add space for better tokenization
             
+        query += " product image"
+            
         # We intentionally do NOT include raw product_name in the search query
         # to focus searches on model_family and product_type only.
         
@@ -1888,9 +3448,23 @@ def fetch_images_google_cse_sync(vendor_name: str, product_name: str = None, man
         ).execute()
         
         images = []
+        unsupported_schemes = ['x-raw-image://', 'data:', 'blob:', 'chrome://', 'about:']
+        
         for item in result.get("items", []):
+            url = item.get("link")
+            
+            # Skip images with unsupported URL schemes
+            if not url or any(url.startswith(scheme) for scheme in unsupported_schemes):
+                logging.debug(f"Skipping image with unsupported URL scheme: {url}")
+                continue
+            
+            # Only include http/https URLs
+            if not url.startswith(('http://', 'https://')):
+                logging.debug(f"Skipping non-HTTP URL: {url}")
+                continue
+                
             images.append({
-                "url": item.get("link"),
+                "url": url,
                 "title": item.get("title", ""),
                 "source": "google_cse",
                 "thumbnail": item.get("image", {}).get("thumbnailLink", ""),
@@ -1898,7 +3472,7 @@ def fetch_images_google_cse_sync(vendor_name: str, product_name: str = None, man
             })
         
         if images:
-            logging.info(f"Google CSE found {len(images)} images for {vendor_name}")
+            logging.info(f"Google CSE found {len(images)} valid images for {vendor_name}")
         return images
         
     except Exception as e:
@@ -1930,7 +3504,7 @@ def fetch_images_serpapi_sync(vendor_name: str, product_name: str = None, model_
         # Do not include raw product_name here — rely on model_family/product_type
 
         # Add helpful positive/negative tokens used previously
-        base_query += " product OR datasheet OR specification -used -refurbished -ebay -amazon -alibaba -walmart -etsy -pinterest -youtube -video -pdf -doc -xls -ppt -docx -xlsx -pptx"
+        base_query += " product image OR product OR datasheet OR specification -used -refurbished -ebay -amazon -alibaba -walmart -etsy -pinterest -youtube -video -pdf -doc -xls -ppt -docx -xlsx -pptx"
 
         # Build manufacturer domain filter using LLM domains when available
         try:
@@ -1997,7 +3571,7 @@ def fetch_images_serper_sync(vendor_name: str, product_name: str = None, model_f
 
         # Do not include raw product_name here — rely on model_family/product_type
 
-        base_query += " product OR datasheet OR specification -used -refurbished -ebay -amazon -alibaba -walmart -etsy -pinterest -youtube -video -pdf -doc -xls -ppt -docx -xlsx -pptx"
+        base_query += " product image OR product OR datasheet OR specification -used -refurbished -ebay -amazon -alibaba -walmart -etsy -pinterest -youtube -video -pdf -doc -xls -ppt -docx -xlsx -pptx"
 
         try:
             manufacturer_domains = get_manufacturer_domains_from_llm(vendor_name)
@@ -2045,7 +3619,8 @@ def fetch_images_serper_sync(vendor_name: str, product_name: str = None, model_f
 
 def fetch_product_images_with_fallback_sync(vendor_name: str, product_name: str = None, manufacturer_domains: list = None, model_family: str = None, product_type: str = None):
     """
-    Synchronous 3-level image search fallback system
+    Synchronous 3-level image search fallback system with MongoDB caching
+    0. Check MongoDB cache first
     1. Google Custom Search API (manufacturer domains)
     2. SerpAPI Google Images
     3. Serper.dev images
@@ -2059,6 +3634,29 @@ def fetch_product_images_with_fallback_sync(vendor_name: str, product_name: str 
     """
     logging.info(f"Starting image search for vendor: {vendor_name}, product: {product_name}, model family: {model_family}, type: {product_type}")
     
+    # Step 0: Check MongoDB cache first (if model_family is provided)
+    if vendor_name and model_family:
+        from mongodb_utils import get_cached_image, cache_image
+        
+        cached_image = get_cached_image(vendor_name, model_family)
+        if cached_image:
+            logging.info(f"Using cached image from GridFS for {vendor_name} - {model_family}")
+            # Convert GridFS file_id to backend URL
+            gridfs_file_id = cached_image.get('gridfs_file_id')
+            backend_url = f"/api/images/{gridfs_file_id}"
+            
+            # Return image with backend URL
+            image_response = {
+                'url': backend_url,
+                'title': cached_image.get('title', ''),
+                'source': 'mongodb_gridfs',
+                'thumbnail': backend_url,  # Same URL for thumbnail
+                'domain': 'local',
+                'cached': True,
+                'gridfs_file_id': gridfs_file_id
+            }
+            return [image_response], "mongodb_gridfs"
+    
     # Step 1: Try Google Custom Search API
     images = fetch_images_google_cse_sync(
         vendor_name=vendor_name,
@@ -2069,6 +3667,10 @@ def fetch_product_images_with_fallback_sync(vendor_name: str, product_name: str 
     )
     if images:
         logging.info(f"Using Google CSE images for {vendor_name}")
+        # Cache the top image if model_family is provided
+        if vendor_name and model_family and len(images) > 0:
+            from mongodb_utils import cache_image
+            cache_image(vendor_name, model_family, images[0])
         return images, "google_cse"
     
     # Step 2: Try SerpAPI
@@ -2080,6 +3682,10 @@ def fetch_product_images_with_fallback_sync(vendor_name: str, product_name: str 
     )
     if images:
         logging.info(f"Using SerpAPI images for {vendor_name}")
+        # Cache the top image if model_family is provided
+        if vendor_name and model_family and len(images) > 0:
+            from mongodb_utils import cache_image
+            cache_image(vendor_name, model_family, images[0])
         return images, "serpapi"
     
     # Step 3: Try Serper.dev
@@ -2091,6 +3697,10 @@ def fetch_product_images_with_fallback_sync(vendor_name: str, product_name: str 
     )
     if images:
         logging.info(f"Using Serper images for {vendor_name}")
+        # Cache the top image if model_family is provided
+        if vendor_name and model_family and len(images) > 0:
+            from mongodb_utils import cache_image
+            cache_image(vendor_name, model_family, images[0])
         return images, "serper"
     
     # All failed
@@ -2099,16 +3709,48 @@ def fetch_product_images_with_fallback_sync(vendor_name: str, product_name: str 
 
 def fetch_vendor_logo_sync(vendor_name: str, manufacturer_domains: list = None):
     """
-    Specialized function to fetch vendor logo
+    Specialized function to fetch vendor logo with MongoDB caching
     """
     logging.info(f"Fetching logo for vendor: {vendor_name}")
     
+    # Step 0: Check MongoDB cache first
+    try:
+        from mongodb_utils import mongodb_file_manager, download_image_from_url
+        
+        logos_collection = mongodb_file_manager.collections.get('vendor_logos')
+        if logos_collection is not None:
+            normalized_vendor = vendor_name.strip().lower()
+            
+            cached_logo = logos_collection.find_one({
+                'vendor_name_normalized': normalized_vendor
+            })
+            
+            if cached_logo and cached_logo.get('gridfs_file_id'):
+                logging.info(f"Using cached logo from GridFS for {vendor_name}")
+                gridfs_file_id = cached_logo.get('gridfs_file_id')
+                backend_url = f"/api/images/{gridfs_file_id}"
+                
+                return {
+                    'url': backend_url,
+                    'thumbnail': backend_url,
+                    'source': 'mongodb_gridfs',
+                    'title': cached_logo.get('title', f"{vendor_name} Logo"),
+                    'domain': 'local',
+                    'cached': True,
+                    'gridfs_file_id': str(gridfs_file_id)
+                }
+    except Exception as e:
+        logging.warning(f"Failed to check logo cache for {vendor_name}: {e}")
+    
+    # Step 1: Cache miss - fetch from web
+    logo_result = None
+    
     # Try different logo-specific searches
     logo_queries = [
-        f"{vendor_name} logo",
-        f"{vendor_name} company logo", 
-        f"{vendor_name} brand",
-        f"{vendor_name}"
+        f"{vendor_name} logo transparent",
+        f"{vendor_name} company logo transparent", 
+        f"{vendor_name} brand transparent",
+        f"{vendor_name} transparent"
     ]
     
     for query in logo_queries:
@@ -2137,41 +3779,114 @@ def fetch_vendor_logo_sync(vendor_name: str, manufacturer_domains: list = None):
                     
                     # Check if this looks like a logo
                     if any(keyword in title for keyword in ["logo", "brand", "company"]):
-                        return {
+                        logo_result = {
                             "url": logo_url,
                             "thumbnail": item.get("image", {}).get("thumbnailLink", logo_url),
                             "source": "google_cse_logo",
                             "title": item.get("title", ""),
                             "domain": item.get("displayLink", "")
                         }
+                        break
                 
                 # If no specific logo found, use first result from official domain
-                if result.get("items"):
+                if not logo_result and result.get("items"):
                     item = result["items"][0]
-                    return {
+                    logo_result = {
                         "url": item.get("link"),
                         "thumbnail": item.get("image", {}).get("thumbnailLink", item.get("link")),
                         "source": "google_cse_general",
                         "title": item.get("title", ""),
                         "domain": item.get("displayLink", "")
                     }
+                
+                if logo_result:
+                    break
                     
         except Exception as e:
             logging.warning(f"Logo search failed for query '{query}': {e}")
             continue
     
     # Fallback: use general vendor search
-    try:
-        images, source = fetch_product_images_with_fallback_sync(vendor_name, "")
-        if images:
-            # Return first image as logo
-            logo = images[0].copy()
-            logo["source"] = f"{source}_fallback"
-            return logo
-    except Exception as e:
-        logging.warning(f"Fallback logo search failed for {vendor_name}: {e}")
+    if not logo_result:
+        try:
+            images, source = fetch_product_images_with_fallback_sync(vendor_name, "")
+            if images:
+                # Return first image as logo
+                logo_result = images[0].copy()
+                logo_result["source"] = f"{source}_fallback"
+        except Exception as e:
+            logging.warning(f"Fallback logo search failed for {vendor_name}: {e}")
     
-    return None
+    # Step 2: Cache the logo in MongoDB if found
+    if logo_result:
+        try:
+            from mongodb_utils import mongodb_file_manager, download_image_from_url
+            
+            logo_url = logo_result.get('url')
+            if logo_url and not logo_url.startswith('/api/images/'):  # Don't re-cache GridFS URLs
+                # Download the logo
+                download_result = download_image_from_url(logo_url)
+                if download_result:
+                    image_bytes, content_type, file_size = download_result
+                    
+                    gridfs = mongodb_file_manager.gridfs
+                    logos_collection = mongodb_file_manager.collections.get('vendor_logos')
+                    
+                    if logos_collection is not None:
+                        normalized_vendor = vendor_name.strip().lower()
+                        file_extension = content_type.split('/')[-1] if '/' in content_type else 'png'
+                        filename = f"logo_{normalized_vendor}.{file_extension}"
+                        
+                        # Store in GridFS
+                        gridfs_file_id = gridfs.put(
+                            image_bytes,
+                            filename=filename,
+                            content_type=content_type,
+                            vendor_name=vendor_name,
+                            original_url=logo_url,
+                            logo_type='vendor_logo'
+                        )
+                        
+                        logging.info(f"Stored vendor logo in GridFS: {filename} (ID: {gridfs_file_id})")
+                        
+                        # Store metadata
+                        logo_doc = {
+                            'vendor_name': vendor_name,
+                            'vendor_name_normalized': normalized_vendor,
+                            'gridfs_file_id': gridfs_file_id,
+                            'original_url': logo_url,
+                            'title': logo_result.get('title', f"{vendor_name} Logo"),
+                            'source': logo_result.get('source', ''),
+                            'domain': logo_result.get('domain', ''),
+                            'content_type': content_type,
+                            'file_size': file_size,
+                            'filename': filename,
+                            'created_at': datetime.utcnow()
+                        }
+                        
+                        logos_collection.update_one(
+                            {'vendor_name_normalized': normalized_vendor},
+                            {'$set': logo_doc},
+                            upsert=True
+                        )
+                        
+                        logging.info(f"Successfully cached vendor logo for {vendor_name}")
+                        
+                        # Return cached version
+                        backend_url = f"/api/images/{gridfs_file_id}"
+                        return {
+                            'url': backend_url,
+                            'thumbnail': backend_url,
+                            'source': 'mongodb_gridfs',
+                            'title': logo_doc['title'],
+                            'domain': 'local',
+                            'cached': True,
+                            'gridfs_file_id': str(gridfs_file_id)
+                        }
+        except Exception as e:
+            logging.warning(f"Failed to cache vendor logo for {vendor_name}: {e}")
+    
+    return logo_result
 
 async def fetch_images_google_cse(vendor_name: str, model_family: str = None, product_type: str = None):
     """
@@ -2205,9 +3920,23 @@ async def fetch_images_google_cse(vendor_name: str, model_family: str = None, pr
         ).execute()
         
         images = []
+        unsupported_schemes = ['x-raw-image://', 'data:', 'blob:', 'chrome://', 'about:']
+        
         for item in result.get("items", []):
+            url = item.get("link")
+            
+            # Skip images with unsupported URL schemes
+            if not url or any(url.startswith(scheme) for scheme in unsupported_schemes):
+                logging.debug(f"Skipping image with unsupported URL scheme: {url}")
+                continue
+            
+            # Only include http/https URLs
+            if not url.startswith(('http://', 'https://')):
+                logging.debug(f"Skipping non-HTTP URL: {url}")
+                continue
+                
             images.append({
-                "url": item.get("link"),
+                "url": url,
                 "title": item.get("title", ""),
                 "source": "google_cse",
                 "thumbnail": item.get("image", {}).get("thumbnailLink", ""),
@@ -2215,7 +3944,7 @@ async def fetch_images_google_cse(vendor_name: str, model_family: str = None, pr
             })
         
         if images:
-            logging.info(f"Google CSE found {len(images)} images for {vendor_name}")
+            logging.info(f"Google CSE found {len(images)} valid images for {vendor_name}")
         return images
         
     except Exception as e:
@@ -2338,7 +4067,7 @@ async def fetch_images_serper(vendor_name: str, model_family: str = None, produc
         logging.warning(f"Serper image search failed for {vendor_name}: {e}")
         return []
 
-async def fetch_product_images_with_fallback(vendor_name: str, product_name: str = None):
+async def fetch_product_images_with_fallback(vendor_name: str, product_name: str = None, model_family: str = None, product_type: str = None):
     """
     3-level image search fallback system
     1. Google Custom Search API (manufacturer domains)
@@ -2422,35 +4151,6 @@ def test_image_search():
         }), 500
 
 
-# @app.route("/api/test_domain_generation", methods=["GET"])
-# @login_required
-# def test_domain_generation():
-#     """
-#     Test endpoint for LLM-based domain generation
-#     """
-#     vendor_name = request.args.get("vendor", "Emerson")
-    
-#     try:
-#         generated_domains = get_manufacturer_domains_from_llm(vendor_name)
-        
-#         return jsonify({
-#             "vendor": vendor_name,
-#             "generated_domains": generated_domains,
-#             "count": len(generated_domains),
-#             "status": "success"
-#         })
-        
-#     except Exception as e:
-#         logging.error(f"Domain generation test failed: {e}")
-#         return jsonify({
-#             "error": str(e),
-#             "vendor": vendor_name,
-#             "generated_domains": [],
-#             "count": 0,
-#             "status": "error"
-#         }), 500
-
-
 @app.route("/api/get_analysis_product_images", methods=["POST"])
 @login_required
 def get_analysis_product_images():
@@ -2475,51 +4175,8 @@ def get_analysis_product_images():
         if not vendor:
             return jsonify({"error": "Vendor name is required"}), 400
 
-        analysis_result = session.get("log_system_response", {}) or {}
-        vendor_analysis = analysis_result.get("vendor_analysis") or {}
-        vendor_matches = vendor_analysis.get("vendor_matches") or []
-
-        is_requirements_match = False
-        for match in vendor_matches:
-            try:
-                match_vendor = match.get("vendor")
-                match_name = match.get("product_name")
-                match_requirements = match.get("requirements_match", False)
-            except AttributeError:
-                continue
-
-            if match_requirements and match_vendor == vendor and match_name == product_name:
-                is_requirements_match = True
-                break
-
-        if not is_requirements_match:
-            logging.info(
-                "Skipping image search for %s %s %s because requirements_match is False or not found",
-                vendor,
-                product_type,
-                product_name,
-            )
-            # Return a consistent shape even when skipping, so frontend can safely read fields
-            return jsonify({
-                "vendor": vendor,
-                "product_type": product_type,
-                "product_name": product_name,
-                "model_families": model_families,
-                "top_image": None,
-                "vendor_logo": None,
-                "all_images": [],
-                "images": [],
-                "image": None,
-                "total_found": 0,
-                "unique_count": 0,
-                "best_count": 0,
-                "search_summary": {
-                    "searches_performed": 0,
-                    "search_types": [],
-                    "sources_used": []
-                }
-            }), 200
-
+        # Removed requirements_match check - fetch images for ALL products (exact and approximate matches)
+        # This supports the fallback display of approximate matches when no exact matches are found
         logging.info(f"Fetching images for analysis result: {vendor} {product_type} {product_name}")
 
         # Generate manufacturer domains once per request for this vendor
@@ -2796,10 +4453,24 @@ def upload_pdf_from_url():
     
 @app.route("/register", methods=["POST"])
 def register():
-    data = request.get_json()
+    # Handle both JSON and Multipart data
+    if request.content_type.startswith('multipart/form-data'):
+        data = request.form
+        file = request.files.get('document')
+    else:
+        data = request.get_json() or {}
+        file = None
+
     username = data.get("username")
     email = data.get("email")
     password = data.get("password")
+    first_name = data.get("first_name")
+    last_name = data.get("last_name")
+    
+    # New Fields
+    company_name = data.get("company_name")
+    category = data.get("category")
+    strategy_interest = data.get("strategy") # Field name from frontend is 'strategy'
 
     if not username or not email or not password:
         return jsonify({"error": "Missing username, email, or password"}), 400
@@ -2809,18 +4480,63 @@ def register():
     if User.query.filter_by(email=email).first():
         return jsonify({"error": "Email already registered"}), 409
 
+    # Handle File Upload - Store in GridFS AND extract strategy data using LLM
+    document_file_id = None
+    strategy_extraction_result = None
+    pending_strategy_file_data = None
+    pending_strategy_filename = None
+    
+    if file:
+        try:
+            filename = secure_filename(file.filename)
+            file_data = file.read()
+            
+            # Store the file data for later LLM processing (after user is created)
+            pending_strategy_file_data = file_data
+            pending_strategy_filename = filename
+            
+            metadata = {
+                'filename': filename,
+                'content_type': file.content_type,
+                'uploaded_by_username': username,
+                'collection_type': 'strategy_documents'
+            }
+            # Upload to GridFS for raw file storage
+            document_file_id = mongodb_file_manager.upload_to_mongodb(file_data, metadata)
+            logging.info(f"Uploaded signup document for user {username}: {document_file_id}")
+        except Exception as e:
+            logging.error(f"Failed to upload signup document: {e}")
+            # We continue registration even if file upload fails
+
     hashed_pw = hash_password(password)
     new_user = User(
         username=username,
         email=email,
         password_hash=hashed_pw,
+        first_name=first_name,
+        last_name=last_name,
+        company_name=company_name,
+        category=category,
+        strategy_interest=strategy_interest,
+        document_file_id=document_file_id,
         status='pending',
         role='user'
     )
     db.session.add(new_user)
     db.session.commit()
+    
+    # After user is created, process the strategy file with LLM extraction IN BACKGROUND
+    # This ensures registration completes quickly without waiting for LLM processing
+    if pending_strategy_file_data and pending_strategy_filename:
+        logging.info(f"[REGISTER] Queueing background strategy extraction for new user {new_user.id}: {pending_strategy_filename}")
+        extract_strategy_from_file_background(
+            pending_strategy_file_data, 
+            pending_strategy_filename, 
+            new_user.id
+        )
 
     return jsonify({"message": "User registration submitted. Awaiting admin approval."}), 201
+
 
 @app.route("/login", methods=["POST"])
 def login():
@@ -2833,11 +4549,24 @@ def login():
         if user.status != 'active':
             return jsonify({"error": f"Account not active. Current status: {user.status}."}), 403
         session['user_id'] = user.id
+        # Construct full name from first_name and last_name
+        full_name = ""
+        if user.first_name and user.last_name:
+            full_name = f"{user.first_name} {user.last_name}"
+        elif user.first_name:
+            full_name = user.first_name
+        elif user.last_name:
+            full_name = user.last_name
+        else:
+            full_name = user.username
+        
         return jsonify({
             "message": "Login successful",
             "user": {
                 "username": user.username,
-                "name": getattr(user, "name", user.username),
+                "name": full_name,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
                 "email": user.email,
                 "role": user.role
             }
@@ -2856,10 +4585,23 @@ def get_current_user():
     user = User.query.get(session['user_id'])
     if not user:
         return jsonify({"error": "User not found"}), 404
+    # Construct full name from first_name and last_name
+    full_name = ""
+    if user.first_name and user.last_name:
+        full_name = f"{user.first_name} {user.last_name}"
+    elif user.first_name:
+        full_name = user.first_name
+    elif user.last_name:
+        full_name = user.last_name
+    else:
+        full_name = user.username
+    
     return jsonify({
         "user": {
             "username": user.username,
-            "name": getattr(user, "name", user.username),
+            "name": full_name,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
             "email": user.email,
             "role": user.role
         }
@@ -3173,17 +4915,53 @@ def api_schema():
         return jsonify({"error": "Backend is not ready. LangChain failed."}), 503
     try:
         product_type = request.args.get("product_type", "").strip()
+        
         if product_type:
-            schema_data = load_requirements_schema(product_type)
-            if not schema_data:
-                # Fallback to web discovery if local schema is missing
-                schema_data = build_requirements_schema_from_web(product_type)
+            try:
+                # Try to load from MongoDB with timeout protection
+                schema_data = load_requirements_schema(product_type)
+                
+                # Check if schema is valid (not empty)
+                if schema_data and (schema_data.get("mandatory_requirements") or schema_data.get("optional_requirements")):
+                    logging.info(f"[SCHEMA] Successfully loaded schema for '{product_type}'")
+                    return jsonify(convert_keys_to_camel_case(schema_data)), 200
+                else:
+                    logging.warning(f"[SCHEMA] Empty schema returned for '{product_type}', building from web")
+                    # Fallback to web discovery if schema is empty
+                    schema_data = build_requirements_schema_from_web(product_type)
+                    return jsonify(convert_keys_to_camel_case(schema_data)), 200
+                    
+            except Exception as mongo_error:
+                # MongoDB timeout or connection error - fallback to web-based schema
+                logging.error(f"[SCHEMA] MongoDB error for '{product_type}': {str(mongo_error)}")
+                logging.info(f"[SCHEMA] Falling back to web-based schema generation for '{product_type}'")
+                
+                try:
+                    schema_data = build_requirements_schema_from_web(product_type)
+                    return jsonify(convert_keys_to_camel_case(schema_data)), 200
+                except Exception as web_error:
+                    logging.error(f"[SCHEMA] Web-based schema generation also failed: {str(web_error)}")
+                    # Return minimal schema to prevent complete failure
+                    return jsonify({
+                        "productType": product_type,
+                        "mandatoryRequirements": {},
+                        "optionalRequirements": {},
+                        "error": f"Failed to load schema: {str(mongo_error)}"
+                    }), 200  # Return 200 with error message instead of 500
         else:
+            # No product type - return generic schema
             schema_data = load_requirements_schema()
-        return jsonify(convert_keys_to_camel_case(schema_data)), 200
+            return jsonify(convert_keys_to_camel_case(schema_data)), 200
+            
     except Exception as e:
         logging.exception("Schema fetch failed.")
-        return jsonify({"error": str(e)}), 500
+        # Return minimal schema with error instead of failing completely
+        return jsonify({
+            "productType": product_type if 'product_type' in locals() else "",
+            "mandatoryRequirements": {},
+            "optionalRequirements": {},
+            "error": str(e)
+        }), 200  # Return 200 to prevent frontend from breaking
 
 @app.route("/additional_requirements", methods=["POST"])
 @login_required
@@ -3194,14 +4972,19 @@ def api_additional_requirements():
         data = request.get_json(force=True)
         product_type = data.get("product_type", "").strip()
         user_input = data.get("user_input", "").strip()
+        search_session_id = data.get("search_session_id", "default")
 
         
         if not product_type:
             return jsonify({"error": "Missing product_type"}), 400
 
         specific_schema = load_requirements_schema(product_type)
+        
+        # Add session isolation to prevent cross-contamination
+        session_isolated_input = f"[Session: {search_session_id}] - This is an independent additional requirements request. User input: {user_input}"
+        
         validation_result = components['additional_requirements_chain'].invoke({
-            "user_input": user_input,
+            "user_input": session_isolated_input,
             "product_type": product_type,
             "schema": json.dumps(specific_schema, indent=2),
             "format_instructions": components['additional_requirements_format_instructions']
@@ -3219,6 +5002,8 @@ def api_additional_requirements():
 
                 Requirements:
                 {requirements}
+                
+                Provide your explanation in plain text format (not JSON).
                 """
             )
             llm_chain = prompt | components['llm'] | StrOutputParser()
@@ -3341,7 +5126,9 @@ Extract the specifications the user wants to add from their input. The user migh
 3. Select categories or groups of specifications
 4. Provide specific values for specifications
 
-Return a JSON object with:
+CRITICAL: Return ONLY valid JSON, no markdown, no explanations, no code blocks.
+
+Return a JSON object with EXACTLY this structure:
 {{
     "selected_parameters": {{"specification_name": "user_specified_value_or_empty_string"}},
     "explanation": "Brief explanation of what was selected"
@@ -3351,9 +5138,11 @@ If the user didn't specify values, use empty strings for the specification value
 Only include specifications that are in the available specifications list.
 
 Examples:
-- "I want response_time and accuracy" → {{"response_time": "", "accuracy": ""}}
+- "I want response_time and accuracy" → {{"selected_parameters": {{"response_time": "", "accuracy": ""}}, "explanation": "Selected response_time and accuracy"}}
 - "Add all specifications" → Include all available specifications with empty values
-- "Set accuracy to 0.1% and response_time to 1ms" → {{"accuracy": "0.1%", "response_time": "1ms"}}
+- "Set accuracy to 0.1% and response_time to 1ms" → {{"selected_parameters": {{"accuracy": "0.1%", "response_time": "1ms"}}, "explanation": "Set accuracy to 0.1% and response_time to 1ms"}}
+
+Remember: Return ONLY the JSON object, nothing else.
 """)
 
         try:
@@ -3448,24 +5237,56 @@ def api_analyze():
         if not data:
             return jsonify({"error": "No input data provided"}), 400
 
+        # Check if CSV vendors are provided for targeted analysis
+        csv_vendors = data.get("csv_vendors", [])
+        requirements = data.get("requirements", "")
+        product_type = data.get("product_type", "")
+        detected_product = data.get("detected_product", "")
         user_input = data.get("user_input")
-        if user_input is None:
-            return jsonify({"error": "Missing 'user_input' parameter"}), 400
+        
+        # Handle CSV vendor filtering for existing analysis process
+        if csv_vendors and len(csv_vendors) > 0:
+            logging.info(f"[CSV_VENDOR_FILTER] Applying CSV vendor filter with {len(csv_vendors)} vendors")
+            
+            # Standardize CSV vendor names for filtering
+            csv_vendor_names = []
+            for csv_vendor in csv_vendors:
+                try:
+                    original_name = csv_vendor.get("vendor_name", "")
+                    standardized_name = standardize_vendor_name(original_name)
+                    csv_vendor_names.append(standardized_name.lower())
+                except Exception as e:
+                    logging.warning(f"Failed to standardize CSV vendor {csv_vendor.get('vendor_name', '')}: {e}")
+                    csv_vendor_names.append(csv_vendor.get("vendor_name", "").lower())
+            
+            # Store CSV filter in session for analysis chain to use
+            session[f'csv_vendor_filter_{session.get("user_id", "default")}'] = {
+                'vendor_names': csv_vendor_names,
+                'csv_vendors': csv_vendors,
+                'product_type': product_type,
+                'detected_product': detected_product
+            }
+            
+            logging.info(f"[CSV_VENDOR_FILTER] Applied filter for vendors: {csv_vendor_names}")
+        
+        # Handle regular analysis (with or without CSV vendor filtering)
+        elif user_input is not None:
+            # Ensure user_input is a dict
+            if isinstance(user_input, str):
+                try:
+                    user_input = json.loads(user_input)
+                except json.JSONDecodeError:
+                    # fallback: wrap string into dict
+                    user_input = {"raw_input": user_input}
 
-  
-        # Ensure user_input is a dict
-        if isinstance(user_input, str):
-            try:
-                user_input = json.loads(user_input)
-            except json.JSONDecodeError:
-                # fallback: wrap string into dict
-                user_input = {"raw_input": user_input}
+            if not isinstance(user_input, dict):
+                return jsonify({"error": "user_input must be a dict or JSON string representing a dict"}), 400
 
-        if not isinstance(user_input, dict):
-            return jsonify({"error": "user_input must be a dict or JSON string representing a dict"}), 400
-
-        # Pass user_input to the analysis chain
-        analysis_result = analysis_chain.invoke({"user_input": user_input})
+            # Pass user_input to the analysis chain
+            analysis_result = analysis_chain.invoke({"user_input": user_input})
+        
+        else:
+            return jsonify({"error": "Missing 'user_input' parameter or CSV vendor data"}), 400
         
         # Apply standardization to the analysis result
         try:
@@ -3772,7 +5593,9 @@ def pending_users():
     result = [{
         "id": u.id,
         "username": u.username,
-        "email": u.email
+        "email": u.email,
+        "first_name": u.first_name,
+        "last_name": u.last_name
     } for u in pending]
     return jsonify({"pending_users": result}), 200
 
@@ -4015,7 +5838,13 @@ def save_project():
         if not project_name:
             return jsonify({"error": "Project name is required"}), 400
         
-        if not data.get("initial_requirements", "").strip():
+        # Check if initial_requirements is provided
+        # Allow saving if project has instruments/accessories (already analyzed) even without requirements text
+        has_requirements = bool(data.get("initial_requirements", "").strip())
+        has_instruments = bool(data.get("identified_instruments") and len(data.get("identified_instruments", [])) > 0)
+        has_accessories = bool(data.get("identified_accessories") and len(data.get("identified_accessories", [])) > 0)
+        
+        if not has_requirements and not has_instruments and not has_accessories:
             return jsonify({"error": "Initial requirements are required"}), 400
         
         # Save project to MongoDB using project manager
@@ -4220,7 +6049,7 @@ def serve_project_file(file_id):
 @login_required
 def delete_project(project_id):
     """
-    Delete a project (soft delete by changing status to archived) in MongoDB
+    Permanently delete a project from MongoDB
     """
     try:
         user_id = str(session['user_id'])
@@ -4237,12 +6066,21 @@ def delete_project(project_id):
         logging.exception(f"Failed to delete project {project_id}.")
         return jsonify({"error": "Failed to delete project: " + str(e)}), 500
 
+
 def create_db():
     with app.app_context():
         db.create_all()
         if not User.query.filter_by(role='admin').first():
             hashed_pw = hash_password("Daman@123")
-            admin = User(username="Daman", email="reddydaman04@gmail.com", password_hash=hashed_pw, status='active', role='admin')
+            admin = User(
+                username="Daman", 
+                email="reddydaman04@gmail.com", 
+                password_hash=hashed_pw, 
+                first_name="Daman",
+                last_name="Reddy",
+                status='active', 
+                role='admin'
+            )
             db.session.add(admin)
             db.session.commit()
             print("Admin user created with username 'Daman' and password 'Daman@123'.")

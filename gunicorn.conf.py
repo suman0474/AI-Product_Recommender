@@ -1,4 +1,4 @@
 # gunicorn.conf.py
-timeout = 1800        
-workers = 10         
-threads = 10
+timeout = 3600        
+workers = 4         
+threads = 4

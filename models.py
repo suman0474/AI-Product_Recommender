@@ -5,7 +5,8 @@ from pydantic import BaseModel, Field
 from typing import List, Dict, Any
 
 class ProductMatch(BaseModel):
-    product_name: str = Field(description="Only the specific submodel/series name (e.g., 'STD800', 'SMV800') - just the short model identifier, not full descriptions")
+    product_name: str = Field(description="Specific submodel name (e.g., 'STD850', '3051CD') - the exact model being matched")
+    model_family: str = Field(default="", description="Model family/series name (e.g., 'STD800', '3051C') - the broader product family this submodel belongs to")
     product_type: str = Field(description="type of the matching product")
 
     vendor: str = Field(description="Vendor/manufacturer name")
@@ -22,6 +23,7 @@ class RankedProduct(BaseModel):
     rank: int = Field(description="Overall ranking position")
     product_name: str = Field(description="Only the specific submodel/series name (e.g., 'STD800', 'SMV800') - just the short model identifier, not full descriptions")
     vendor: str = Field(description="Vendor name")
+    model_family: str = Field(default="", description="Model family/series name (e.g., '3051C', 'STD800') for more specific image searches")
     
     overall_score: int = Field(description="Overall score 0-100")
     requirements_match: bool = Field(description="Whether the product meets ALL critical/mandatory requirements (True) or has fundamental gaps (False)")

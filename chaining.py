@@ -3,10 +3,12 @@
 import json
 import logging
 import os
+import time
+import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from langchain_openai import ChatOpenAI
 from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
-from langchain.memory import ConversationBufferWindowMemory
+# Memory imports removed - not used in current implementation
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 from models import VendorAnalysis, OverallRanking, RequirementValidation
 from prompts import (
@@ -17,10 +19,11 @@ from prompts import (
     additional_requirements_prompt,
 )
 from loading import load_requirements_schema, load_products_runnable
+from mongodb_utils import get_available_vendors_from_mongodb, get_vendors_for_product_type
 from dotenv import load_dotenv
 
-# Import the OutputFixingParser
-from langchain.output_parsers import OutputFixingParser
+# OutputFixingParser is no longer available in current LangChain versions
+# Using base parsers with error handling instead
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 # Import standardization utilities
@@ -32,21 +35,39 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def setup_langchain_components():
-    # Use the old import since it's still functional (just shows deprecation warning)
-    from langchain.callbacks import OpenAICallbackHandler
+    # Use the updated import from langchain_community
+    from langchain_community.callbacks import OpenAICallbackHandler
     callback_handler = OpenAICallbackHandler()
     
     # Create different models for different purposes
-    # Gemini 2.5 Flash for simple conversations and text generation
-    llm_flash = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.1, google_api_key=os.getenv("GOOGLE_API_KEY"))
+    # Enable thinking mode using the correct parameter: thinking_budget
+    # -1 = dynamic thinking (model adjusts based on complexity)
+    # 0 = disable thinking (only for Flash models)
+    # Max: 24k for Flash/Flash Lite, 32k for Pro
     
-    # Gemini 2.5 Flash Lite for generating descriptions of schema keys (lightweight tasks)
-    llm_flash_lite = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", temperature=0.1, google_api_key=os.getenv("GOOGLE_API_KEY"))
+    # Gemini 2.5 Flash with dynamic thinking
+    llm_flash = ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash", 
+        temperature=0.1, 
+        google_api_key=os.getenv("GOOGLE_API_KEY"),
+        thinking_budget=-1  # Dynamic thinking enabled
+    )
     
-    # Gemini 2.5 Pro for complex analysis tasks - uses second API key
-    llm_pro = ChatGoogleGenerativeAI(model="gemini-2.5-pro", temperature=0.1, google_api_key=os.getenv("GOOGLE_API_KEY1"))
+    # Gemini 2.5 Flash Lite with dynamic thinking
+    llm_flash_lite = ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash-lite", 
+        temperature=0.1, 
+        google_api_key=os.getenv("GOOGLE_API_KEY"),
+    )
     
-    memory = ConversationBufferWindowMemory(k=1, memory_key="chat_history", return_messages=True)
+    # Gemini 2.5 Pro (thinking always enabled, cannot be disabled)
+    llm_pro = ChatGoogleGenerativeAI(
+        model="gemini-2.5-pro", 
+        temperature=0.1, 
+        google_api_key=os.getenv("GOOGLE_API_KEY1")
+        # Note: Pro has thinking enabled by default, no parameter needed
+    )
+    # Memory object removed - not used in current implementation
     
     # 1. Instantiate the base parsers
     validation_parser = JsonOutputParser(pydantic_object=RequirementValidation)
@@ -54,26 +75,21 @@ def setup_langchain_components():
     ranking_parser = JsonOutputParser(pydantic_object=OverallRanking)
     str_parser = StrOutputParser()
     
-    # 2. Wrap the JSON parsers with OutputFixingParser for robustness
-    # Use Flash model for validation and additional requirements (faster)
-    validation_fixing_parser = OutputFixingParser.from_llm(parser=validation_parser, llm=llm_flash)
-    # Use Pro model only for complex vendor analysis and ranking
-    vendor_fixing_parser = OutputFixingParser.from_llm(parser=vendor_parser, llm=llm_pro)
-    ranking_fixing_parser = OutputFixingParser.from_llm(parser=ranking_parser, llm=llm_pro)
+    # 2. Use direct parsers (OutputFixingParser is no longer available)
+    # The base JsonOutputParser should handle most parsing needs
     
     # 3. Use the appropriate models for different tasks
     # Fast tasks use Flash model
-    validation_chain = validation_prompt | llm_flash | validation_fixing_parser
+    validation_chain = validation_prompt | llm_flash | validation_parser
     requirements_chain = requirements_prompt | llm_flash | str_parser
     
     # Final analysis tasks use Pro model (vendor analysis and ranking)
-    vendor_chain = vendor_prompt | llm_pro | vendor_fixing_parser
-    ranking_chain = ranking_prompt | llm_pro | ranking_fixing_parser
+    vendor_chain = vendor_prompt | llm_pro | vendor_parser
+    ranking_chain = ranking_prompt | llm_pro | ranking_parser
     
     # --- NEW CHAIN FOR ADDITIONAL REQUIREMENTS ---
     additional_requirements_parser = JsonOutputParser(pydantic_object=RequirementValidation)
-    additional_requirements_fixing_parser = OutputFixingParser.from_llm(parser=additional_requirements_parser, llm=llm_flash)
-    additional_requirements_chain = additional_requirements_prompt | llm_flash | additional_requirements_fixing_parser
+    additional_requirements_chain = additional_requirements_prompt | llm_flash | additional_requirements_parser
     
     # --- NEW CHAIN FOR SCHEMA KEY DESCRIPTIONS ---
     # Using Flash Lite model for generating user-friendly descriptions of schema keys
@@ -87,11 +103,11 @@ def setup_langchain_components():
     additional_requirements_format_instructions = additional_requirements_parser.get_format_instructions()
     
     return {
-        'llm': llm_flash,  # Default LLM for conversations (backward compatibility)
+        'llm': llm_pro,  # General LLM for conversations and simple text generation
         'llm_flash': llm_flash,  # For conversations and simple text generation
         'llm_flash_lite': llm_flash_lite,  # For generating schema key descriptions
         'llm_pro': llm_pro,  # For complex analysis tasks
-        'memory': memory,
+        # 'memory': removed - not used
         'validation_chain': validation_chain,
         'requirements_chain': requirements_chain,
         'vendor_chain': vendor_chain,
@@ -118,10 +134,23 @@ def get_final_ranking(vendor_analysis_dict):
         
     for product in vendor_analysis_dict['vendor_matches']:
         product_score = product.get('match_score', 0)
+        product_name = product.get('product_name', '')
+        
+        # Extract model_family from the vendor analysis
+        # model_family is the broader series (e.g., 'STD800', '3051C')
+        # product_name is the specific submodel (e.g., 'STD850', '3051CD')
+        model_family = product.get('model_family', '')
+        
+        # Fallback: if model_family is empty, use product_name
+        # This handles cases where LLM doesn't provide model_family
+        if not model_family:
+            model_family = product_name
+        
         # Ensure requirements_match is a boolean. Default to False if missing.
         products.append({
-            'product_name': product.get('product_name', ''),
+            'product_name': product_name,
             'vendor': product.get('vendor', ''),
+            'model_family': model_family,
             'match_score': product_score,
             'requirements_match': product.get('requirements_match', False),
             'reasoning': product.get('reasoning', ''),
@@ -137,6 +166,7 @@ def get_final_ranking(vendor_analysis_dict):
             'rank': rank,
             'product_name': product['product_name'],
             'vendor': product['vendor'],
+            'model_family': product['model_family'],
             'overall_score': product['match_score'],
             'requirements_match': product['requirements_match'],
             'key_strengths': product['reasoning'],  # Use the same reasoning from vendor match
@@ -169,6 +199,9 @@ def _prepare_vendor_payloads(products_json_str, pdf_content_json_str):
     except (json.JSONDecodeError, TypeError):
         logging.warning("Failed to parse pdf_content_json; defaulting to empty dict.")
         pdf_content = {}
+
+    # CSV filtering is now done earlier in the pipeline before PDF loading
+    logging.info(f"[VENDOR_PAYLOADS] Processing {len(pdf_content)} vendors from filtered PDF content")
 
     vendor_payloads = {}
 
@@ -253,27 +286,52 @@ def _run_parallel_vendor_analysis(
     def _worker(vendor, data):
         result_dict = None
         error = None
-        try:
-            logging.info("[VENDOR_ANALYSIS] START vendor=%s", vendor)
-            result = _invoke_vendor_chain_for_payload(
-                vendor_chain,
-                format_instructions,
-                structured_requirements,
-                vendor,
-                data,
-            )
-            result_dict = to_dict_if_pydantic(result)
-        except Exception as exc:
-            logging.error(f"Vendor analysis failed for {vendor}: {exc}")
-            error = str(exc)
-        finally:
-            logging.info("[VENDOR_ANALYSIS] END   vendor=%s error=%s", vendor, error)
+        max_retries = 3
+        base_retry_delay = 15  # Start with 15 seconds
+        
+        logging.info("[VENDOR_ANALYSIS] START vendor=%s", vendor)
+        
+        for attempt in range(max_retries):
+            try:
+                result = _invoke_vendor_chain_for_payload(
+                    vendor_chain,
+                    format_instructions,
+                    structured_requirements,
+                    vendor,
+                    data,
+                )
+                result_dict = to_dict_if_pydantic(result)
+                break  # Success, exit retry loop
+                
+            except Exception as exc:
+                error_msg = str(exc)
+                is_rate_limit = "429" in error_msg or "Resource has been exhausted" in error_msg or "quota" in error_msg.lower()
+                
+                if is_rate_limit and attempt < max_retries - 1:
+                    wait_time = base_retry_delay * (2 ** attempt)  # Exponential backoff: 15s, 30s, 60s
+                    logging.warning(f"[VENDOR_ANALYSIS] Rate limit hit for {vendor}, retry {attempt + 1}/{max_retries} after {wait_time}s")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logging.error(f"Vendor analysis failed for {vendor}: {error_msg}")
+                    error = error_msg
+                    break
+                    
+        logging.info("[VENDOR_ANALYSIS] END   vendor=%s error=%s", vendor, error)
         return vendor, result_dict, error
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_map = {
-            executor.submit(_worker, vendor, data): vendor for vendor, data in payloads.items()
-        }
+        future_map = {}
+        # Submit threads with 10-second gaps between each submission
+        for i, (vendor, data) in enumerate(payloads.items()):
+            if i > 0:  # Add 10-second delay before submitting each subsequent thread
+                time.sleep(10)
+                logging.info("[VENDOR_ANALYSIS] Submitting thread %d for vendor: %s (after 10s delay)", i+1, vendor)
+            else:
+                logging.info("[VENDOR_ANALYSIS] Submitting thread %d for vendor: %s (no delay)", i+1, vendor)
+            future = executor.submit(_worker, vendor, data)
+            future_map[future] = vendor
+        
         for future in as_completed(future_map):
             vendor = future_map[future]
             vendor_result = None
@@ -299,17 +357,156 @@ def _run_parallel_vendor_analysis(
 
     return {"vendor_matches": vendor_matches, "vendor_run_details": run_details}
 
-# chaining.py
-# ... (add this to your imports)
-from loading import load_pdf_content_runnable
+def load_vendors_and_filter():
+    """Load vendors from database and apply CSV filtering after product type detection"""
+    def _get_filtered_vendors(input_dict):
+        # Get detected product type from previous step
+        detected_product_type = input_dict.get("detected_product_type", None)
+        logging.info(f"[VENDOR_LOADING] Using detected product type: {detected_product_type}")
+        
+        # Get vendors that match the detected product type
+        if detected_product_type:
+            all_vendors = get_vendors_for_product_type(detected_product_type)
+            logging.info(f"[VENDOR_LOADING] Found {len(all_vendors)} vendors for product type '{detected_product_type}': {all_vendors}")
+        else:
+            # Fallback to all vendors if no product type detected
+            all_vendors = get_available_vendors_from_mongodb()
+            logging.info(f"[VENDOR_LOADING] No product type detected, found {len(all_vendors)} vendors in database: {all_vendors}")
+        
+        # Check for CSV vendor filter in session
+        from flask import session
+        csv_vendor_filter = session.get('csv_vendor_filter', {})
+        allowed_vendors = csv_vendor_filter.get('vendor_names', [])
+        
+        if allowed_vendors:
+            logging.info(f"[CSV_FILTER] Restricting analysis to CSV vendors: {allowed_vendors}")
+            
+            # Import fuzzy matching
+            from fuzzywuzzy import process
+            from standardization_utils import standardize_vendor_name
+            
+            # Filter vendors using fuzzy matching (no LLM standardization needed!)
+            filtered_vendors = []
+            logging.info(f"[CSV_FILTER] Starting fuzzy matching with {len(all_vendors)} DB vendors against {len(allowed_vendors)} CSV vendors")
+            
+            try:
+                # Process each DB vendor against all CSV vendors using fuzzy matching
+                for i, db_vendor in enumerate(all_vendors):
+                    logging.info(f"[CSV_FILTER] Processing DB vendor {i+1}/{len(all_vendors)}: '{db_vendor}'")
+                    
+                    # Use fuzzy matching to find best match among all CSV vendors (no standardization needed)
+                    fuzzy_result = process.extractOne(db_vendor, allowed_vendors)
+                    
+                    if fuzzy_result and fuzzy_result[1] >= 70:  # 70% similarity threshold to avoid false matches
+                        best_match = fuzzy_result[0]
+                        best_score = fuzzy_result[1]
+                        filtered_vendors.append(db_vendor)
+                        logging.info(f"[CSV_FILTER] ✓ Matched DB vendor '{db_vendor}' with CSV vendor '{best_match}' (Score: {best_score}%)")
+                    else:
+                        logging.info(f"[CSV_FILTER] ✗ No match found for DB vendor '{db_vendor}' (best score: {fuzzy_result[1] if fuzzy_result else 0}%)")
+                        
+            except Exception as e:
+                logging.error(f"[CSV_FILTER] Error in fuzzy matching: {e}")
+                # Fallback to all vendors if fuzzy matching fails
+                filtered_vendors = all_vendors
+                logging.warning(f"[CSV_FILTER] Falling back to all {len(filtered_vendors)} vendors due to error")
+            
+            logging.info(f"[CSV_FILTER] After fuzzy filtering, will analyze vendors: {filtered_vendors}")
+            
+            # FALLBACK: If CSV filtering resulted in 0 vendors, use all database vendors
+            if not filtered_vendors:
+                logging.warning("[FALLBACK] CSV filtering resulted in 0 vendors, falling back to all database vendors")
+                filtered_vendors = all_vendors
+                logging.info(f"[FALLBACK] Using all {len(filtered_vendors)} database vendors for analysis: {filtered_vendors}")
+        else:
+            filtered_vendors = all_vendors
+            logging.info("[CSV_FILTER] No CSV vendor filter found, analyzing all vendors")
+        
+        # FINAL SAFETY CHECK: Ensure we have at least some vendors for analysis
+        if not filtered_vendors:
+            logging.warning("[SAFETY_FALLBACK] No vendors available after all filtering")
+            if all_vendors:
+                filtered_vendors = all_vendors
+                logging.info(f"[SAFETY_FALLBACK] Using {len(filtered_vendors)} product-specific vendors: {filtered_vendors}")
+            else:
+                logging.error("[SAFETY_FALLBACK] No vendors found for this product type - analysis cannot proceed")
+        
+        enriched = dict(input_dict)
+        enriched["available_vendors"] = all_vendors
+        enriched["filtered_vendors"] = filtered_vendors
+        return enriched
+    
+    return RunnableLambda(_get_filtered_vendors)
 
-# ... (inside the file)
+def load_filtered_pdf_content():
+    """Load PDF content only for filtered vendors"""
+    def _load_pdfs_for_filtered_vendors(input_dict):
+        filtered_vendors = input_dict.get("filtered_vendors", [])
+        
+        if not filtered_vendors:
+            logging.warning("[PDF_LOADING] No filtered vendors available for PDF loading")
+            enriched = dict(input_dict)
+            enriched["pdf_content_json"] = json.dumps({})
+            return enriched
+        
+        logging.info(f"[PDF_LOADING] Loading PDFs for {len(filtered_vendors)} vendors: {filtered_vendors}")
+        
+        # Import the PDF loading function
+        from loading import load_pdf_content_runnable
+        pdf_loader = load_pdf_content_runnable()
+        
+        # Load all PDFs first
+        pdf_result = pdf_loader.invoke(input_dict)
+        all_pdf_content = json.loads(pdf_result.get("pdf_content_json", "{}"))
+        
+        # Filter PDF content to only include filtered vendors (with fuzzy vendor name matching)
+        filtered_pdf_content = {}
+        for vendor in filtered_vendors:
+            # First try exact match
+            if vendor in all_pdf_content:
+                filtered_pdf_content[vendor] = all_pdf_content[vendor]
+                logging.info(f"[PDF_LOADING] Loaded PDF for vendor: {vendor}")
+            else:
+                # Try fuzzy matching for case-insensitive and slight variations
+                matched_key = None
+                vendor_lower = vendor.lower()
+                
+                for pdf_vendor_key in all_pdf_content.keys():
+                    pdf_vendor_lower = pdf_vendor_key.lower()
+                    
+                    # Check for exact case-insensitive match
+                    if vendor_lower == pdf_vendor_lower:
+                        matched_key = pdf_vendor_key
+                        break
+                    
+                    # Check for fuzzy match (handles Endress+Hauser vs Endress+hauser)
+                    from fuzzywuzzy import fuzz
+                    similarity = fuzz.ratio(vendor_lower, pdf_vendor_lower)
+                    if similarity >= 85:  # 85% similarity threshold
+                        matched_key = pdf_vendor_key
+                        break
+                
+                if matched_key:
+                    filtered_pdf_content[vendor] = all_pdf_content[matched_key]
+                    logging.info(f"[PDF_LOADING] Loaded PDF for vendor: {vendor} (matched with: {matched_key})")
+                else:
+                    logging.warning(f"[PDF_LOADING] No PDF found for vendor: {vendor}")
+        
+        logging.info(f"[PDF_LOADING] Successfully loaded PDFs for {len(filtered_pdf_content)} vendors")
+        
+        enriched = dict(pdf_result)
+        enriched["pdf_content_json"] = json.dumps(filtered_pdf_content)
+        enriched["filtered_vendors"] = filtered_vendors
+        return enriched
+    
+    return RunnableLambda(_load_pdfs_for_filtered_vendors)
 
 def create_analysis_chain(components, vendors_base_path=None):
-    """Create analysis chain using MongoDB for all data loading"""
+    """Create analysis chain using MongoDB for all data loading with vendor pre-filtering"""
     product_loader = load_products_runnable()  # No path needed - uses MongoDB
-    # --- Load PDFs from MongoDB ---
-    pdf_loader = load_pdf_content_runnable()  # No path needed - uses MongoDB
+    # --- Load vendors first, then filter, then load PDFs ---
+    vendor_loader = load_vendors_and_filter()
+    filtered_pdf_loader = load_filtered_pdf_content()
     
     def attach_parallel_vendor_analysis(input_dict):
         enriched = dict(input_dict)
@@ -334,8 +531,9 @@ def create_analysis_chain(components, vendors_base_path=None):
             }).get('product_type', None)
         ).with_config(run_name="ProductTypeDetection")
         | product_loader.with_config(run_name="ProductDataLoading")
-        # --- NEW: Add the PDF loading step to the chain ---
-        | pdf_loader.with_config(run_name="LocalPDFLoading")
+        | vendor_loader.with_config(run_name="VendorListLoading")
+        # --- Load PDFs only for filtered vendors ---
+        | filtered_pdf_loader.with_config(run_name="FilteredPDFLoading")
         | RunnableLambda(attach_parallel_vendor_analysis).with_config(run_name="ParallelVendorAnalysis")
         | RunnablePassthrough.assign(
             overall_ranking=lambda x: get_final_ranking(to_dict_if_pydantic(x.get("vendor_analysis", {})))

@@ -1,6 +1,6 @@
 """
 MongoDB Project Management Module
-Handles project storage and retrieval in MongoDB
+Handles project storage and retrieval in MongoDB using GridFS
 """
 import logging
 from datetime import datetime
@@ -10,35 +10,16 @@ from bson import ObjectId
 import json
 
 class MongoProjectManager:
-    """Manages project operations in MongoDB"""
+    """Manages project operations in MongoDB with GridFS storage"""
     
     def __init__(self):
         self.file_manager = MongoDBFileManager()
         self.collection_name = 'user_projects'
         self.logger = logging.getLogger(__name__)
     
-    def _serialize_project_data(self, data: Any) -> str:
-        """Convert project data to JSON string for storage"""
-        if data is None:
-            return None
-        if isinstance(data, (dict, list)):
-            return json.dumps(data)
-        return str(data)
-    
-    def _deserialize_project_data(self, data: str) -> Any:
-        """Convert JSON string back to Python objects"""
-        if data is None:
-            return None
-        if isinstance(data, str):
-            try:
-                return json.loads(data)
-            except json.JSONDecodeError:
-                return data
-        return data
-    
     def save_project(self, user_id: str, project_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Save or update a project in MongoDB
+        Save or update a project in MongoDB using GridFS
         
         Args:
             user_id: ID of the user who owns the project
@@ -66,39 +47,42 @@ class MongoProjectManager:
                 else:
                     product_type = incoming_product_type
 
-            project_doc = {
-                'user_id': str(user_id),
+            # Build complete project data for GridFS storage (no serialization needed)
+            complete_project_data = {
                 'project_name': project_data.get('project_name', ''),
                 'project_description': project_data.get('project_description', ''),
                 'initial_requirements': project_data.get('initial_requirements', ''),
                 'product_type': product_type,
-                # Pricing stored as structured data (dict) so it can be returned without extra parsing
                 'pricing': project_data.get('pricing', {}),
-                'identified_instruments': self._serialize_project_data(project_data.get('identified_instruments')),
-                'identified_accessories': self._serialize_project_data(project_data.get('identified_accessories')),
-                'search_tabs': self._serialize_project_data(project_data.get('search_tabs')),
-                'conversation_histories': self._serialize_project_data(project_data.get('conversation_histories')),
-                'collected_data': self._serialize_project_data(project_data.get('collected_data')),
-                # Feedback entries stored as array of subdocuments for easy appends
+                'identified_instruments': project_data.get('identified_instruments', []),
+                'identified_accessories': project_data.get('identified_accessories', []),
+                'search_tabs': project_data.get('search_tabs', []),
+                'conversation_histories': project_data.get('conversation_histories', {}),
+                'collected_data': project_data.get('collected_data', {}),
+                'generic_images': project_data.get('generic_images', {}),
                 'feedback_entries': project_data.get('feedback_entries', project_data.get('feedback', [])),
                 'current_step': project_data.get('current_step', ''),
                 'active_tab': project_data.get('active_tab', ''),
-                'analysis_results': self._serialize_project_data(project_data.get('analysis_results')),
-                'field_descriptions': self._serialize_project_data(project_data.get('field_descriptions')),
-                'workflow_position': self._serialize_project_data(project_data.get('workflow_position')),
-                'user_interactions': self._serialize_project_data(project_data.get('user_interactions')),
+                'analysis_results': project_data.get('analysis_results', {}),
+                'field_descriptions': project_data.get('field_descriptions', {}),
+                'workflow_position': project_data.get('workflow_position', {}),
+                'user_interactions': project_data.get('user_interactions', {}),
+                'embedded_media': project_data.get('embedded_media', {}),
                 'project_metadata': {
-                    'schema_version': '1.0',
-                    'data_structure_description': 'Complete project state including conversations, analysis, and workflow position',
+                    'schema_version': '2.0',
+                    'storage_format': 'gridfs',
+                    'data_structure_description': 'Complete project state stored in GridFS',
                     'supported_features': ['multi_tab_search', 'conversation_persistence', 'state_restoration', 'analysis_results'],
                     'last_updated_by': 'ai_product_recommender_system'
-                },
-                'project_status': 'active',
-                'updated_at': current_time
+                }
             }
             
+            # Convert to JSON bytes for GridFS storage
+            project_json = json.dumps(complete_project_data, ensure_ascii=False, indent=2)
+            project_bytes = project_json.encode('utf-8')
+            
             # Log the product_type we plan to save for debugging
-            self.logger.info(f"Saving project - detected_product_type='{detected_product_type}' resolved_product_type='{product_type}' for user {user_id}")
+            self.logger.info(f"Saving project to GridFS - detected_product_type='{detected_product_type}' resolved_product_type='{product_type}' for user {user_id}")
 
             if project_id:
                 # Update existing project
@@ -112,51 +96,114 @@ class MongoProjectManager:
                     if not existing_project:
                         raise ValueError("Project not found or access denied")
                     
-                    # Update the document
+                    # Check for duplicate project name if name changed
+                    if existing_project.get('project_name', '').strip().lower() != project_name.lower():
+                        existing_duplicate = self.file_manager.db[self.collection_name].find_one({
+                            'user_id': str(user_id),
+                            'project_name': project_name,
+                            'project_status': 'active'
+                        })
+                        
+                        if existing_duplicate and str(existing_duplicate.get('_id')) != project_id:
+                            self.logger.warning(f"Duplicate project name '{project_name}' found for user {user_id}")
+                            raise ValueError(f"Project name '{project_name}' already exists. Please choose a different name.")
+                    
+                    # Delete old GridFS file if it exists
+                    old_gridfs_id = existing_project.get('gridfs_file_id')
+                    if old_gridfs_id:
+                        try:
+                            self.file_manager.gridfs.delete(ObjectId(old_gridfs_id))
+                            self.logger.info(f"Deleted old GridFS file {old_gridfs_id} for project {project_id}")
+                        except Exception as e:
+                            self.logger.warning(f"Failed to delete old GridFS file: {e}")
+                    
+                    # Upload new data to GridFS
+                    gridfs_file_id = self.file_manager.gridfs.put(
+                        project_bytes,
+                        filename=f"project_{project_id}_{current_time.timestamp()}.json",
+                        content_type='application/json',
+                        user_id=str(user_id),
+                        project_name=project_name,
+                        upload_date=current_time
+                    )
+                    
+                    # Update metadata document in collection
+                    metadata_doc = {
+                        'user_id': str(user_id),
+                        'project_name': project_name,
+                        'project_description': project_data.get('project_description', ''),
+                        'product_type': product_type,
+                        'gridfs_file_id': gridfs_file_id,
+                        'storage_format': 'gridfs',
+                        'project_status': 'active',
+                        'updated_at': current_time,
+                        'file_size': len(project_bytes)
+                    }
+                    
                     result = self.file_manager.db[self.collection_name].update_one(
                         {'_id': object_id, 'user_id': str(user_id)},
-                        {'$set': project_doc}
+                        {'$set': metadata_doc}
                     )
                     
                     if result.matched_count == 0:
                         raise ValueError("Failed to update project")
                     
                     final_project_id = str(object_id)
-                    self.logger.info(f"Updated project {final_project_id} for user {user_id}")
-                    # Read back saved document to verify stored product_type
-                    try:
-                        saved_doc = self.file_manager.db[self.collection_name].find_one({'_id': object_id, 'user_id': str(user_id)})
-                        self.logger.info(f"Post-update stored product_type for {final_project_id}: '{saved_doc.get('product_type') if saved_doc else None}'")
-                    except Exception as e:
-                        self.logger.warning(f"Failed to read back project after update: {e}")
+                    self.logger.info(f"Updated project {final_project_id} in GridFS for user {user_id}")
                     
                 except (ValueError, Exception) as e:
                     self.logger.error(f"Failed to update project {project_id}: {e}")
                     raise
             else:
-                # Create new project
-                project_doc['created_at'] = current_time
+                # Create new project - first check for duplicate name
+                existing_duplicate = self.file_manager.db[self.collection_name].find_one({
+                    'user_id': str(user_id),
+                    'project_name': project_name,
+                    'project_status': 'active'
+                })
                 
-                result = self.file_manager.db[self.collection_name].insert_one(project_doc)
+                if existing_duplicate:
+                    self.logger.warning(f"Duplicate project name '{project_name}' found for user {user_id}")
+                    raise ValueError(f"Project name '{project_name}' already exists. Please choose a different name.")
+                
+                # Upload data to GridFS first
+                gridfs_file_id = self.file_manager.gridfs.put(
+                    project_bytes,
+                    filename=f"project_new_{current_time.timestamp()}.json",
+                    content_type='application/json',
+                    user_id=str(user_id),
+                    project_name=project_name,
+                    upload_date=current_time
+                )
+                
+                # Create metadata document in collection
+                metadata_doc = {
+                    'user_id': str(user_id),
+                    'project_name': project_name,
+                    'project_description': project_data.get('project_description', ''),
+                    'product_type': product_type,
+                    'gridfs_file_id': gridfs_file_id,
+                    'storage_format': 'gridfs',
+                    'project_status': 'active',
+                    'created_at': current_time,
+                    'updated_at': current_time,
+                    'file_size': len(project_bytes)
+                }
+                
+                result = self.file_manager.db[self.collection_name].insert_one(metadata_doc)
                 final_project_id = str(result.inserted_id)
-                self.logger.info(f"Created new project {final_project_id} for user {user_id}")
-                # Read back saved document to verify stored product_type
-                try:
-                    saved_doc = self.file_manager.db[self.collection_name].find_one({'_id': result.inserted_id, 'user_id': str(user_id)})
-                    self.logger.info(f"Post-insert stored product_type for {final_project_id}: '{saved_doc.get('product_type') if saved_doc else None}'")
-                except Exception as e:
-                    self.logger.warning(f"Failed to read back project after insert: {e}")
+                self.logger.info(f"Created new project {final_project_id} in GridFS for user {user_id}")
             
             return {
                 'project_id': final_project_id,
-                'project_name': project_doc['project_name'],
-                'project_description': project_doc['project_description'],
-                'product_type': project_doc.get('product_type', ''),
-                'pricing': project_doc.get('pricing', {}),
-                'feedback_entries': project_doc.get('feedback_entries', []),
-                'created_at': project_doc.get('created_at', current_time).isoformat(),
-                'updated_at': project_doc['updated_at'].isoformat(),
-                'project_status': project_doc['project_status']
+                'project_name': project_name,
+                'project_description': project_data.get('project_description', ''),
+                'product_type': product_type,
+                'pricing': project_data.get('pricing', {}),
+                'feedback_entries': project_data.get('feedback_entries', project_data.get('feedback', [])),
+                'created_at': metadata_doc.get('created_at', current_time).isoformat(),
+                'updated_at': metadata_doc['updated_at'].isoformat(),
+                'project_status': metadata_doc['project_status']
             }
             
         except Exception as e:
@@ -165,7 +212,7 @@ class MongoProjectManager:
     
     def get_user_projects(self, user_id: str) -> List[Dict[str, Any]]:
         """
-        Get all projects for a user
+        Get all projects for a user (metadata only, no GridFS loading)
         
         Args:
             user_id: ID of the user
@@ -174,32 +221,51 @@ class MongoProjectManager:
             List of project summaries
         """
         try:
-            projects_cursor = self.file_manager.db[self.collection_name].find({
-                'user_id': str(user_id),
-                'project_status': 'active'
-            }).sort('updated_at', -1)  # Most recently updated first
+            projects_cursor = self.file_manager.db[self.collection_name].find(
+                {
+                    'user_id': str(user_id),
+                    'project_status': 'active'
+                },
+                no_cursor_timeout=True
+            ).sort('updated_at', -1)  # Most recently updated first
             
             project_list = []
             for project in projects_cursor:
-                # Parse JSON fields safely for summary
-                try:
-                    identified_instruments = self._deserialize_project_data(project.get('identified_instruments')) or []
-                    identified_accessories = self._deserialize_project_data(project.get('identified_accessories')) or []
-                    search_tabs = self._deserialize_project_data(project.get('search_tabs')) or []
-                except Exception as e:
-                    self.logger.warning(f"Failed to parse project {project['_id']} JSON fields: {e}")
+                # For GridFS projects, we need to load the file to get counts
+                gridfs_file_id = project.get('gridfs_file_id')
+                
+                if gridfs_file_id:
+                    # GridFS project - load data to get counts
+                    try:
+                        grid_file = self.file_manager.gridfs.get(ObjectId(gridfs_file_id))
+                        project_data = json.loads(grid_file.read().decode('utf-8'))
+                        
+                        identified_instruments = project_data.get('identified_instruments', [])
+                        identified_accessories = project_data.get('identified_accessories', [])
+                        search_tabs = project_data.get('search_tabs', [])
+                        workflow_position = project_data.get('workflow_position', {})
+                        user_interactions = project_data.get('user_interactions', {})
+                        requirements = project_data.get('initial_requirements', '')
+                        
+                    except Exception as e:
+                        self.logger.warning(f"Failed to load GridFS data for project {project['_id']}: {e}")
+                        identified_instruments = []
+                        identified_accessories = []
+                        search_tabs = []
+                        workflow_position = {}
+                        user_interactions = {}
+                        requirements = ''
+                else:
+                    # Legacy format - shouldn't happen with new implementation
                     identified_instruments = []
                     identified_accessories = []
                     search_tabs = []
+                    workflow_position = {}
+                    user_interactions = {}
+                    requirements = project.get('initial_requirements', '')
                 
                 # Create requirements preview
-                requirements = project.get('initial_requirements', '')
                 requirements_preview = requirements[:200] + "..." if len(requirements) > 200 else requirements
-                
-                # Extract workflow position and user interactions
-                workflow_position = self._deserialize_project_data(project.get('workflow_position')) or {}
-                user_interactions = self._deserialize_project_data(project.get('user_interactions')) or {}
-                project_metadata = project.get('project_metadata') or {}
                 
                 project_summary = {
                     'id': str(project['_id']),
@@ -209,22 +275,16 @@ class MongoProjectManager:
                     'instruments_count': len(identified_instruments) if isinstance(identified_instruments, list) else 0,
                     'accessories_count': len(identified_accessories) if isinstance(identified_accessories, list) else 0,
                     'search_tabs_count': len(search_tabs) if isinstance(search_tabs, list) else 0,
-                    'current_step': project.get('current_step', ''),
-                    'active_tab': project.get('active_tab', ''),   
                     'project_phase': workflow_position.get('project_phase', 'unknown'),
                     'conversations_count': user_interactions.get('conversations_count', 0),
                     'has_analysis': user_interactions.get('has_analysis', False),
-                    'schema_version': project_metadata.get('schema_version', 'unknown'),
+                    'schema_version': '2.0',
+                    'storage_format': 'gridfs',
                     'project_status': project.get('project_status', 'active'),
                     'created_at': project.get('created_at', datetime.utcnow()).isoformat(),
                     'updated_at': project.get('updated_at', datetime.utcnow()).isoformat(),
                     'requirements_preview': requirements_preview,
-                    'field_descriptions_available': bool(project.get('field_descriptions')),
-                    'workflow_metadata': {
-                        'has_workflow_position': bool(workflow_position),
-                        'has_user_interactions': bool(user_interactions),
-                        'total_data_fields': len(project.keys())
-                    }
+                    'file_size': project.get('file_size', 0)
                 }
                 project_list.append(project_summary)
             
@@ -237,7 +297,7 @@ class MongoProjectManager:
     
     def get_project_details(self, project_id: str, user_id: str) -> Dict[str, Any]:
         """
-        Get full project details for loading
+        Get full project details for loading from GridFS
         
         Args:
             project_id: ID of the project
@@ -248,42 +308,32 @@ class MongoProjectManager:
         """
         try:
             object_id = ObjectId(project_id)
-            project = self.file_manager.db[self.collection_name].find_one({
+            project_meta = self.file_manager.db[self.collection_name].find_one({
                 '_id': object_id,
                 'user_id': str(user_id)
             })
             
-            if not project:
+            if not project_meta:
                 raise ValueError("Project not found or access denied")
             
-            # Parse all JSON fields
-            project_details = {
-                'id': str(project['_id']),
-                'project_name': project.get('project_name', ''),
-                'project_description': project.get('project_description', ''),
-                'initial_requirements': project.get('initial_requirements', ''),
-                'product_type': project.get('product_type', ''),
-                'identified_instruments': self._deserialize_project_data(project.get('identified_instruments')) or [],
-                'identified_accessories': self._deserialize_project_data(project.get('identified_accessories')) or [],
-                'search_tabs': self._deserialize_project_data(project.get('search_tabs')) or [],
-                'conversation_histories': self._deserialize_project_data(project.get('conversation_histories')) or {},
-                'collected_data': self._deserialize_project_data(project.get('collected_data')) or {},
-                'pricing': project.get('pricing') or {},
-                'feedback_entries': project.get('feedback_entries') or [],
-                'current_step': project.get('current_step', ''),
-                'active_tab': project.get('active_tab', ''),
-                'analysis_results': self._deserialize_project_data(project.get('analysis_results')) or {},
-                'field_descriptions': self._deserialize_project_data(project.get('field_descriptions')) or {},
-                'workflow_position': self._deserialize_project_data(project.get('workflow_position')) or {},
-                'user_interactions': self._deserialize_project_data(project.get('user_interactions')) or {},
-                'project_metadata': project.get('project_metadata') or {},
-                'project_status': project.get('project_status', 'active'),
-                'created_at': project.get('created_at', datetime.utcnow()).isoformat(),
-                'updated_at': project.get('updated_at', datetime.utcnow()).isoformat()
-            }
+            # Get GridFS file ID
+            gridfs_file_id = project_meta.get('gridfs_file_id')
             
-            self.logger.info(f"Retrieved project {project_id} details for user {user_id}")
-            return project_details
+            if not gridfs_file_id:
+                raise ValueError("Project data not found in GridFS")
+            
+            # Load complete project data from GridFS
+            grid_file = self.file_manager.gridfs.get(ObjectId(gridfs_file_id))
+            project_data = json.loads(grid_file.read().decode('utf-8'))
+            
+            # Add metadata fields
+            project_data['id'] = str(project_meta['_id'])
+            project_data['created_at'] = project_meta.get('created_at', datetime.utcnow()).isoformat()
+            project_data['updated_at'] = project_meta.get('updated_at', datetime.utcnow()).isoformat()
+            project_data['project_status'] = project_meta.get('project_status', 'active')
+            
+            self.logger.info(f"Retrieved project {project_id} from GridFS for user {user_id}")
+            return project_data
             
         except Exception as e:
             self.logger.error(f"Failed to get project {project_id} for user {user_id}: {e}")
@@ -291,21 +341,21 @@ class MongoProjectManager:
 
     def append_feedback_to_project(self, project_id: str, user_id: str, feedback_entry: Dict[str, Any]) -> bool:
         """
-        Append a feedback entry to a project's `feedback_entries` array.
+        Append a feedback entry to a project's feedback_entries array in GridFS
         """
         try:
-            object_id = ObjectId(project_id)
-            update_result = self.file_manager.db[self.collection_name].update_one(
-                {'_id': object_id, 'user_id': str(user_id)},
-                {
-                    '$push': {'feedback_entries': feedback_entry},
-                    '$set': {'updated_at': datetime.utcnow()}
-                }
-            )
-
-            if update_result.matched_count == 0:
-                raise ValueError('Project not found or access denied')
-
+            # Load current project data
+            project_data = self.get_project_details(project_id, user_id)
+            
+            # Append feedback
+            if 'feedback_entries' not in project_data:
+                project_data['feedback_entries'] = []
+            project_data['feedback_entries'].append(feedback_entry)
+            
+            # Save back (this will update the GridFS file)
+            project_data['project_id'] = project_id
+            self.save_project(user_id, project_data)
+            
             self.logger.info(f"Appended feedback to project {project_id} for user {user_id}")
             return True
         except Exception as e:
@@ -314,7 +364,7 @@ class MongoProjectManager:
     
     def delete_project(self, project_id: str, user_id: str) -> bool:
         """
-        Delete (archive) a project
+        Permanently delete a project from MongoDB and GridFS
         
         Args:
             project_id: ID of the project
@@ -326,23 +376,34 @@ class MongoProjectManager:
         try:
             object_id = ObjectId(project_id)
             
-            result = self.file_manager.db[self.collection_name].update_one(
-                {
-                    '_id': object_id,
-                    'user_id': str(user_id)
-                },
-                {
-                    '$set': {
-                        'project_status': 'archived',
-                        'updated_at': datetime.utcnow()
-                    }
-                }
-            )
+            # Get project metadata to find GridFS file
+            project_meta = self.file_manager.db[self.collection_name].find_one({
+                '_id': object_id,
+                'user_id': str(user_id)
+            })
             
-            if result.matched_count == 0:
+            if not project_meta:
                 raise ValueError("Project not found or access denied")
             
-            self.logger.info(f"Archived project {project_id} for user {user_id}")
+            # Delete GridFS file first
+            gridfs_file_id = project_meta.get('gridfs_file_id')
+            if gridfs_file_id:
+                try:
+                    self.file_manager.gridfs.delete(ObjectId(gridfs_file_id))
+                    self.logger.info(f"Deleted GridFS file {gridfs_file_id} for project {project_id}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to delete GridFS file: {e}")
+            
+            # Delete metadata document
+            result = self.file_manager.db[self.collection_name].delete_one({
+                '_id': object_id,
+                'user_id': str(user_id)
+            })
+            
+            if result.deleted_count == 0:
+                raise ValueError("Project not found or access denied")
+            
+            self.logger.info(f"Permanently deleted project {project_id} for user {user_id}")
             return True
             
         except Exception as e:

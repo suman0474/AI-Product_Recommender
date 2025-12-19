@@ -48,10 +48,10 @@ class MongoDBManager:
             # Database name
             db_name = os.getenv('MONGODB_DATABASE', 'product-recommender')
             
-            # Create MongoDB client
+            # Create MongoDB client with timeout settings
             self._client = MongoClient(
             mongodb_uri
-        )
+            )
             self._database = self._client[db_name]
             
             # Setup GridFS for file storage
@@ -105,18 +105,19 @@ mongodb_manager = MongoDBManager()
 # Collection names constants
 class Collections:
     """MongoDB collection names"""
-    # Main collections for 3 folders
-    SPECS = "specs"                          # specs/ folder → product type schemas
-    VENDORS = "vendors"                      # vendors/ folder → vendor data
-    DOCUMENT_METADATA = "document_metadata"  # documents/ folder → PDF metadata
+    # Main collections
+    SPECS = "specs"                          # Product type schemas
+    VENDORS = "vendors"                      # Vendor product data
     ADVANCED_PARAMETERS = "advanced_parameters"  # Cached advanced parameters
+    IMAGES = "images"                        # Cached product images
+    GENERIC_IMAGES = "generic_images"        # Cached generic product type images
+    VENDOR_LOGOS = "vendor_logos"            # Cached vendor logos
     
-    # Project management
-    PROJECTS = "projects"                    # User projects collection
+    # User project management
+    USER_PROJECTS = "user_projects"          # User saved projects
     
-    # GridFS and other collections
-    FILES = "files"                          # GridFS files collection
-    DOCUMENTS = "documents"                  # Legacy collection
+    # Strategy collection
+    STRATERGY = "stratergy"                  # Strategy data
 
 def get_mongodb_connection():
     """Get MongoDB connection components"""
@@ -125,17 +126,19 @@ def get_mongodb_connection():
         'database': mongodb_manager.database,
         'gridfs': mongodb_manager.gridfs,
         'collections': {
-            # Main collections for 3 folders
+            # Main collections
             'specs': mongodb_manager.get_collection(Collections.SPECS),
             'vendors': mongodb_manager.get_collection(Collections.VENDORS),
-            'document_metadata': mongodb_manager.get_collection(Collections.DOCUMENT_METADATA),
             'advanced_parameters': mongodb_manager.get_collection(Collections.ADVANCED_PARAMETERS),
+            'images': mongodb_manager.get_collection(Collections.IMAGES),
+            'generic_images': mongodb_manager.get_collection(Collections.GENERIC_IMAGES),
+            'vendor_logos': mongodb_manager.get_collection(Collections.VENDOR_LOGOS),
             
-            # Project management
-            'projects': mongodb_manager.get_collection(Collections.PROJECTS),
+            # User project management
+            'user_projects': mongodb_manager.get_collection(Collections.USER_PROJECTS),
             
-            # Legacy collection
-            'documents': mongodb_manager.get_collection(Collections.DOCUMENTS),
+            # Strategy collection
+            'stratergy': mongodb_manager.get_collection(Collections.STRATERGY),
         }
     }
 
@@ -144,13 +147,17 @@ def ensure_indexes():
     try:
         conn = get_mongodb_connection()
         collections = conn['collections']
+        db = conn['database']
         
-        # Specs collection indexes (specs/ folder)
+        # Specs collection indexes
         collections['specs'].create_index([
             ("product_type", 1)
         ])
+        collections['specs'].create_index([
+            ("metadata.product_type", 1)
+        ])
         
-        # Vendors collection indexes (vendors/ folder)
+        # Vendors collection indexes
         collections['vendors'].create_index([
             ("product_type", 1),
             ("vendor", 1)
@@ -160,25 +167,13 @@ def ensure_indexes():
             ("metadata.vendor_name", 1)
         ])
         
-        # Document metadata indexes (documents/ folder)
-        collections['document_metadata'].create_index([
-            ("product_type", 1),
-            ("vendor_name", 1),
-            ("file_type", 1)
-        ])
-        collections['document_metadata'].create_index([
-            ("metadata.product_type", 1),
-            ("metadata.vendor_name", 1),
-            ("metadata.file_type", 1)
-        ])
-        
-        # Projects collection indexes
-        collections['projects'].create_index([
+        # User projects collection indexes
+        collections['user_projects'].create_index([
             ("user_id", 1),
             ("project_status", 1),
             ("updated_at", -1)
         ])
-        collections['projects'].create_index([
+        collections['user_projects'].create_index([
             ("user_id", 1),
             ("project_name", 1)
         ])
@@ -192,7 +187,58 @@ def ensure_indexes():
             expireAfterSeconds=60 * 60 * 24 * 30  # ~30 days
         )
         
-        logger.info("MongoDB indexes created successfully")
+        # Images cache indexes
+        collections['images'].create_index([
+            ("vendor_name_normalized", 1),
+            ("model_family_normalized", 1)
+        ], unique=True)
+        collections['images'].create_index(
+            "created_at",
+            expireAfterSeconds=60 * 60 * 24 * 90  # ~90 days
+        )
+        
+        # Generic images cache indexes
+        collections['generic_images'].create_index(
+            "product_type_normalized",
+            unique=True
+        )
+        collections['generic_images'].create_index(
+            "created_at",
+            expireAfterSeconds=60 * 60 * 24 * 90  # ~90 days
+        )
+        
+        # Vendor logos cache indexes
+        collections['vendor_logos'].create_index(
+            "vendor_name_normalized",
+            unique=True
+        )
+        collections['vendor_logos'].create_index(
+            "created_at",
+            expireAfterSeconds=60 * 60 * 24 * 90  # ~90 days
+        )
+        
+        # Strategy collection indexes
+        collections['stratergy'].create_index([
+            ("user_id", 1),
+            ("uploaded_at", -1)
+        ])
+        collections['stratergy'].create_index([
+            ("user_id", 1),
+            ("filename", 1)
+        ])
+        
+        # GridFS indexes (fs.files and fs.chunks are auto-created by GridFS)
+        # Add custom indexes for fs.files for better query performance
+        fs_files = db['fs.files']
+        fs_files.create_index([
+            ("metadata.product_type", 1),
+            ("metadata.vendor", 1)
+        ])
+        fs_files.create_index([
+            ("metadata.collection_type", 1)
+        ])
+        
+        logger.info("MongoDB indexes created successfully for all active collections")
         
     except Exception as e:
         logger.error(f"Failed to create MongoDB indexes: {e}")

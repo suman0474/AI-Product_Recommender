@@ -341,6 +341,19 @@ Task:
 Product type: {product_type}
 Existing schema parameter keys (snake_case): {existing_parameters}
 
+**CRITICAL - Avoid Duplicates:**
+Do NOT suggest parameters that are semantically similar to existing ones.
+
+Examples of what to AVOID:
+- If "output_signal" exists, DON'T suggest "signal_output", "output_type", or "signal_type"
+- If "pressure_range" exists, DON'T suggest "range_pressure", "pressure_limits", or "measurement_range"
+- If "communication_protocol" exists, DON'T suggest "protocol_communication" or "comm_protocol"
+- If "temperature_range" exists, DON'T suggest "temp_range" or "operating_temperature"
+
+Examples of what IS acceptable (truly new parameters):
+- If "output_signal" exists, you CAN suggest "wireless_diagnostics" (different concept)
+- If "pressure_range" exists, you CAN suggest "predictive_maintenance" (different concept)
+
 Return strict JSON only in this exact format and nothing else:
 {{
   "parameters": [
@@ -408,4 +421,3 @@ Rules:
         fallback_response = _build_response(product_type, fallback_specs)
         fallback_response["fallback"] = True
         return fallback_response
-

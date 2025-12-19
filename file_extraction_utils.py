@@ -1,10 +1,11 @@
 """
 File Extraction Utilities
-Extracts text from various file formats: PDF, DOCX, DOC, TXT, Images (OCR)
+Extracts text from various file formats: PDF, DOCX, DOC, TXT, CSV, Images (OCR)
 """
 
 import logging
 import io
+import csv
 from typing import Optional, Dict, Any
 from PIL import Image
 import fitz  # PyMuPDF for PDF
@@ -13,66 +14,33 @@ from docx import Document  # python-docx for DOCX
 # Initialize logger first
 logger = logging.getLogger(__name__)
 
-# Make pytesseract optional (only needed for image OCR)
+# Make EasyOCR optional (only needed for image OCR)
 try:
-    import pytesseract
+    import easyocr
     import os
     
-    # Check if Tesseract executable exists
-    tesseract_cmd = None
+    # Initialize EasyOCR reader
+    # Using English by default, can add more languages as needed: ['en', 'es', 'fr', etc.]
+    # gpu=False for CPU-only environments (Railway/most cloud deployments)
+    # download_enabled=True allows downloading models on first use
+    logger.info("Initializing EasyOCR reader...")
     
-    # Common installation paths for different platforms
-    windows_paths = [
-        r'C:\Program Files\Tesseract-OCR\tesseract.exe',
-        r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
-        r'C:\Users\{}\AppData\Local\Tesseract-OCR\tesseract.exe'.format(os.getenv('USERNAME', '')),
-    ]
-    
-    # Linux/Railway paths (installed via apt)
-    linux_paths = [
-        '/usr/bin/tesseract',
-        '/usr/local/bin/tesseract',
-    ]
-    
-    # Check environment variable first
-    if os.getenv('TESSERACT_CMD'):
-        tesseract_cmd = os.getenv('TESSERACT_CMD')
-        logger.info(f"Using Tesseract from TESSERACT_CMD env var: {tesseract_cmd}")
-    else:
-        # Determine platform and check appropriate paths
-        import platform
-        system = platform.system()
-        
-        if system == 'Windows':
-            paths_to_check = windows_paths
-        else:  # Linux, Darwin (macOS), etc.
-            paths_to_check = linux_paths
-        
-        logger.info(f"Detected platform: {system}, checking paths: {paths_to_check}")
-        
-        # Check common installation paths
-        for path in paths_to_check:
-            if os.path.isfile(path):
-                tesseract_cmd = path
-                logger.info(f"Found Tesseract at: {path}")
-                break
-    
-    # Set tesseract command path if found
-    if tesseract_cmd:
-        pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
-        TESSERACT_AVAILABLE = True
-        logger.info(f"✓ Tesseract OCR configured at: {tesseract_cmd}")
-    else:
-        TESSERACT_AVAILABLE = False
-        logger.warning(
-            "⚠ Tesseract executable not found. "
-            "For Railway deployment, ensure nixpacks.toml includes tesseract-ocr. "
-            "For local Windows, install from: https://github.com/UB-Mannheim/tesseract/wiki"
-        )
+    try:
+        # Initialize with English language support
+        # Set gpu=False for CPU-only environments
+        # The model will be downloaded on first use (~100MB for English)
+        easyocr_reader = easyocr.Reader(['en'], gpu=False, verbose=False)
+        EASYOCR_AVAILABLE = True
+        logger.info("✓ EasyOCR initialized successfully with English language support")
+    except Exception as e:
+        EASYOCR_AVAILABLE = False
+        logger.warning(f"⚠ Failed to initialize EasyOCR reader: {e}")
+        easyocr_reader = None
         
 except ImportError:
-    TESSERACT_AVAILABLE = False
-    logger.warning("⚠ pytesseract not installed - image OCR will not be available")
+    EASYOCR_AVAILABLE = False
+    easyocr_reader = None
+    logger.warning("⚠ easyocr not installed - image OCR will not be available")
 
 
 def extract_text_from_pdf(file_bytes: bytes) -> str:
@@ -142,7 +110,7 @@ def extract_text_from_docx(file_bytes: bytes) -> str:
 
 def extract_text_from_image(file_bytes: bytes) -> str:
     """
-    Extract text from image using OCR (Tesseract)
+    Extract text from image using OCR (EasyOCR)
     
     Args:
         file_bytes: Image file as bytes
@@ -150,14 +118,13 @@ def extract_text_from_image(file_bytes: bytes) -> str:
     Returns:
         Extracted text via OCR
     """
-    if not TESSERACT_AVAILABLE:
+    if not EASYOCR_AVAILABLE or easyocr_reader is None:
         error_msg = (
-            "Tesseract OCR is not installed or not found in PATH. "
+            "EasyOCR is not installed or failed to initialize. "
             "To enable image text extraction:\n"
-            "1. Download Tesseract from: https://github.com/UB-Mannheim/tesseract/wiki\n"
-            "2. Install it (default path: C:\\Program Files\\Tesseract-OCR)\n"
-            "3. Add Tesseract to your PATH or set TESSERACT_CMD environment variable\n"
-            "4. Restart the backend server"
+            "1. Install easyocr: pip install easyocr\n"
+            "2. Restart the backend server\n"
+            "Note: EasyOCR will download language models (~100MB for English) on first use."
         )
         logger.error(error_msg)
         raise RuntimeError(error_msg)
@@ -166,18 +133,23 @@ def extract_text_from_image(file_bytes: bytes) -> str:
         # Open and validate image
         image = Image.open(io.BytesIO(file_bytes))
         
-        # Convert to RGB if necessary (some formats like RGBA or P mode can cause issues)
+        # Convert to RGB if necessary (EasyOCR works best with RGB)
         if image.mode not in ('RGB', 'L'):
             logger.info(f"Converting image from {image.mode} to RGB for OCR")
             image = image.convert('RGB')
         
-        # Perform OCR with optimized config
-        # --psm 6: Assume a single uniform block of text
-        # --oem 3: Use both legacy and LSTM OCR engines
-        text = pytesseract.image_to_string(image, config='--psm 6 --oem 3')
+        # Perform OCR with EasyOCR
+        # readtext returns a list of tuples: (bbox, text, confidence)
+        # We extract just the text from each detection
+        logger.info("Performing OCR with EasyOCR...")
+        results = easyocr_reader.readtext(file_bytes)
         
-        extracted_text = text.strip()
-        logger.info(f"Extracted {len(extracted_text)} characters from image via OCR")
+        # Extract text from results
+        # Each result is a tuple: (bbox, text, confidence)
+        extracted_texts = [text for (bbox, text, confidence) in results]
+        extracted_text = '\n'.join(extracted_texts).strip()
+        
+        logger.info(f"Extracted {len(extracted_text)} characters from image via EasyOCR ({len(results)} text regions detected)")
         
         if not extracted_text:
             logger.warning("OCR completed but no text was found in the image")
@@ -185,21 +157,11 @@ def extract_text_from_image(file_bytes: bytes) -> str:
         
         return extracted_text
         
-    except pytesseract.TesseractNotFoundError as e:
-        error_msg = (
-            f"Tesseract executable not found: {e}\n"
-            "Please install Tesseract OCR:\n"
-            "Windows: https://github.com/UB-Mannheim/tesseract/wiki\n"
-            "Linux: sudo apt-get install tesseract-ocr\n"
-            "Mac: brew install tesseract"
-        )
-        logger.error(error_msg)
-        raise RuntimeError(error_msg)
     except RuntimeError:
         # Re-raise RuntimeError as-is (already formatted)
         raise
     except Exception as e:
-        logger.error(f"Failed to extract text from image: {e}")
+        logger.error(f"Failed to extract text from image with EasyOCR: {e}")
         logger.exception(e)
         raise RuntimeError(f"Image OCR failed: {str(e)}")
 
@@ -227,6 +189,115 @@ def extract_text_from_txt(file_bytes: bytes) -> str:
         
     except Exception as e:
         logger.error(f"Failed to extract text from text file: {e}")
+        return ""
+
+
+def extract_text_from_csv(file_bytes: bytes) -> str:
+    """
+    Extract text from CSV file
+    
+    Args:
+        file_bytes: CSV file as bytes
+        
+    Returns:
+        Text representation of CSV data
+    """
+    try:
+        # Try UTF-8 first, then fallback
+        try:
+            text_content = file_bytes.decode('utf-8')
+        except UnicodeDecodeError:
+            try:
+                text_content = file_bytes.decode('latin-1')
+            except UnicodeDecodeError:
+                text_content = file_bytes.decode('cp1252')
+        
+        # Parse CSV
+        csv_reader = csv.reader(io.StringIO(text_content))
+        rows = list(csv_reader)
+        
+        if not rows:
+            logger.warning("CSV file is empty")
+            return ""
+        
+        # Extract headers
+        headers = rows[0] if rows else []
+        
+        # Convert to readable text format for LLM processing
+        text_parts = []
+        text_parts.append(f"CSV File with {len(rows)} rows and {len(headers)} columns")
+        text_parts.append(f"Headers: {', '.join(headers)}")
+        text_parts.append("")
+        
+        # Add each row as a structured entry
+        for i, row in enumerate(rows[1:], start=1):  # Skip header row
+            row_data = []
+            for j, value in enumerate(row):
+                if j < len(headers):
+                    header = headers[j]
+                    if value.strip():  # Only include non-empty values
+                        row_data.append(f"{header}: {value.strip()}")
+            
+            if row_data:
+                text_parts.append(f"Row {i}: {' | '.join(row_data)}")
+        
+        extracted_text = "\n".join(text_parts)
+        logger.info(f"Extracted {len(extracted_text)} characters from CSV ({len(rows)} rows)")
+        return extracted_text
+        
+    except Exception as e:
+        logger.error(f"Failed to extract text from CSV file: {e}")
+        return ""
+
+
+def extract_text_from_excel(file_bytes: bytes) -> str:
+    """
+    Extract text from Excel file (xlsx, xls)
+    
+    Args:
+        file_bytes: Excel file as bytes
+        
+    Returns:
+        Text representation of Excel data
+    """
+    try:
+        import openpyxl
+        
+        workbook = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+        text_parts = []
+        
+        for sheet_name in workbook.sheetnames:
+            sheet = workbook[sheet_name]
+            text_parts.append(f"=== Sheet: {sheet_name} ===")
+            
+            rows = list(sheet.iter_rows(values_only=True))
+            if not rows:
+                continue
+                
+            headers = [str(cell) if cell else "" for cell in rows[0]]
+            text_parts.append(f"Headers: {', '.join(headers)}")
+            
+            for i, row in enumerate(rows[1:], start=1):
+                row_data = []
+                for j, cell in enumerate(row):
+                    if cell is not None and j < len(headers):
+                        header = headers[j]
+                        row_data.append(f"{header}: {cell}")
+                
+                if row_data:
+                    text_parts.append(f"Row {i}: {' | '.join(row_data)}")
+            
+            text_parts.append("")
+        
+        extracted_text = "\n".join(text_parts)
+        logger.info(f"Extracted {len(extracted_text)} characters from Excel")
+        return extracted_text
+        
+    except ImportError:
+        logger.error("openpyxl not installed - Excel extraction not available")
+        return ""
+    except Exception as e:
+        logger.error(f"Failed to extract text from Excel file: {e}")
         return ""
 
 
@@ -268,6 +339,16 @@ def extract_text_from_file(file_bytes: bytes, filename: str) -> Dict[str, Any]:
     elif file_ext in ['txt', 'text', 'log']:
         file_type = "TEXT"
         extracted_text = extract_text_from_txt(file_bytes)
+    
+    # CSV files
+    elif file_ext == 'csv':
+        file_type = "CSV"
+        extracted_text = extract_text_from_csv(file_bytes)
+    
+    # Excel files
+    elif file_ext in ['xlsx', 'xls']:
+        file_type = "EXCEL"
+        extracted_text = extract_text_from_excel(file_bytes)
     
     # Image files (OCR)
     elif file_ext in ['jpg', 'jpeg', 'png', 'bmp', 'tiff', 'tif']:

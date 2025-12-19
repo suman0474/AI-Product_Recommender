@@ -19,7 +19,7 @@ class MongoDBProjectManager:
     
     def __init__(self):
         self.conn = get_mongodb_connection()
-        self.projects_collection = self.conn['collections']['projects']
+        self.projects_collection = self.conn['collections']['user_projects']
     
     def save_project(self, user_id: str, project_data: Dict[str, Any], project_id: Optional[str] = None) -> Dict[str, Any]:
         """

@@ -28,11 +28,37 @@ except ImportError:
 # --- NEW: Prompt and Chain for identifying the selection guide ---
 guide_identification_prompt = ChatPromptTemplate.from_template("""
 You are an expert document analyst specializing in technical datasheets.
-Your task is to determine if the following text from a PDF page contains a "Model Selection Guide",
-"Ordering Information" table, or any table used to construct a specific product model number by 
-selecting different options (like pressure range, output, materials, etc.).
 
-The answer must be a single word: YES or NO. Do not provide any explanation or other text.
+**Definition:** A "Model Selection Guide" or "Ordering Information" table is a structured table that helps construct a specific product model number by selecting different options.
+
+**Characteristics of a Model Selection Guide:**
+1. Contains model codes/numbers (usually in the first column)
+2. Has multiple columns for different selectable options (output type, range, material, mounting, etc.)
+3. Used to build/configure a specific product model number
+4. Often titled "Model Selection Guide", "Ordering Information", "Model Code", or "Configuration Guide"
+
+**Examples of YES (This IS a Model Selection Guide):**
+- Table with columns: Code | Description | Options
+  - A | Output Signal | 4-20mA, HART, Digital
+  - B | Range | 0-100 psi, 0-200 psi
+  - C | Material | 316SS, Hastelloy
+- "Model Selection Guide" heading with structured option table
+- "Ordering Information" showing how to construct model number
+- Table showing "Model Code Construction" with selectable features
+
+**Examples of NO (This is NOT a Model Selection Guide):**
+- General specifications table (just listing specs, not for model selection)
+- Feature comparison table (comparing different models)
+- Installation instructions or procedures
+- Dimensional drawings or diagrams
+- Performance curves or graphs
+- Warranty or compliance information
+
+**Your Task:**
+Analyze the page text below and determine if it contains a Model Selection Guide.
+
+Answer with ONLY one word: YES or NO
+Do not provide any explanation or other text.
 
 Page Text:
 ---

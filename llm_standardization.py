@@ -248,4 +248,3 @@ def standardize_ranking_result(ranking_result: Dict[str, Any]) -> Dict[str, Any]
             })
     
     return result
-

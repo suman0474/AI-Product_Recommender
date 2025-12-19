@@ -380,3 +380,276 @@ def upload_json_to_mongodb(json_data: Dict[str, Any], metadata: Dict[str, Any]) 
 def get_json_from_mongodb(collection_name: str, query: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Convenience function for retrieving JSON data"""
     return mongodb_file_manager.get_json_data_from_mongodb(collection_name, query)
+
+# ==================== IMAGE CACHING FUNCTIONS ====================
+
+def download_image_from_url(url: str, timeout: int = 30) -> Optional[tuple]:
+    """
+    Download image from URL and return binary data with metadata
+    
+    Args:
+        url: Image URL to download
+        timeout: Request timeout in seconds
+        
+    Returns:
+        Tuple of (image_data: bytes, content_type: str, file_size: int) or None if failed
+    """
+    try:
+        import requests
+        
+        # Validate URL scheme - reject unsupported schemes
+        if not url or not isinstance(url, str):
+            logger.warning(f"Invalid URL provided: {url}")
+            return None
+            
+        # Check for unsupported URL schemes
+        unsupported_schemes = ['x-raw-image://', 'data:', 'blob:', 'chrome://', 'about:']
+        if any(url.startswith(scheme) for scheme in unsupported_schemes):
+            logger.warning(f"Unsupported URL scheme, skipping: {url}")
+            return None
+        
+        # Ensure URL starts with http:// or https://
+        if not url.startswith(('http://', 'https://')):
+            logger.warning(f"URL must start with http:// or https://, got: {url}")
+            return None
+        
+        # Add headers to appear like a browser
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+        }
+        
+        logger.info(f"Downloading image from: {url}")
+        response = requests.get(url, timeout=timeout, headers=headers, stream=True)
+        response.raise_for_status()
+        
+        # Get content type
+        content_type = response.headers.get('content-type', 'image/jpeg').lower()
+        
+        # Validate it's an image
+        if 'image' not in content_type:
+            logger.warning(f"URL does not return an image: {url} (content-type: {content_type})")
+            return None
+        
+        # Download image data
+        image_data = b''
+        for chunk in response.iter_content(chunk_size=8192):
+            if chunk:
+                image_data += chunk
+        
+        file_size = len(image_data)
+        
+        # Validate minimum size (avoid empty or corrupt images)
+        if file_size < 100:  # Less than 100 bytes is suspicious
+            logger.warning(f"Downloaded image is too small ({file_size} bytes): {url}")
+            return None
+        
+        logger.info(f"Successfully downloaded image: {file_size} bytes, type: {content_type}")
+        return (image_data, content_type, file_size)
+        
+    except requests.Timeout:
+        logger.error(f"Timeout downloading image from: {url}")
+        return None
+    except requests.RequestException as e:
+        logger.error(f"Failed to download image from {url}: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error downloading image from {url}: {e}")
+        return None
+
+def get_cached_image(vendor_name: str, model_family: str) -> Optional[Dict[str, Any]]:
+    """
+    Retrieve cached product image from MongoDB GridFS
+    
+    Args:
+        vendor_name: Vendor/manufacturer name
+        model_family: Model family name
+        
+    Returns:
+        Dict containing image metadata with gridfs_file_id or None if not found
+    """
+    try:
+        images_collection = mongodb_file_manager.collections['images']
+        
+        # Normalize search keys
+        normalized_vendor = vendor_name.strip().lower()
+        normalized_model = model_family.strip().lower()
+        
+        query = {
+            'vendor_name_normalized': normalized_vendor,
+            'model_family_normalized': normalized_model
+        }
+        
+        cached_image = images_collection.find_one(query)
+        
+        if cached_image and cached_image.get('gridfs_file_id'):
+            logger.info(f"Found cached image in GridFS for {vendor_name} - {model_family}")
+            # Return image metadata with GridFS file reference
+            return {
+                'gridfs_file_id': str(cached_image.get('gridfs_file_id')),
+                'title': cached_image.get('title'),
+                'source': cached_image.get('source'),
+                'domain': cached_image.get('domain'),
+                'content_type': cached_image.get('content_type', 'image/jpeg'),
+                'file_size': cached_image.get('file_size', 0),
+                'original_url': cached_image.get('original_url'),
+                'cached': True
+            }
+        
+        return None
+        
+    except Exception as e:
+        logger.error(f"Failed to retrieve cached image: {e}")
+        return None
+
+def cache_image(vendor_name: str, model_family: str, image_data: Dict[str, Any]) -> bool:
+    """
+    Download and store product image in MongoDB GridFS
+    
+    Args:
+        vendor_name: Vendor/manufacturer name
+        model_family: Model family name
+        image_data: Image data dict containing url, title, source, etc.
+        
+    Returns:
+        bool: True if successfully cached
+    """
+    try:
+        images_collection = mongodb_file_manager.collections['images']
+        gridfs = mongodb_file_manager.gridfs
+        
+        # Get image URL
+        image_url = image_data.get('url')
+        if not image_url:
+            logger.warning(f"No URL provided for image caching: {vendor_name} - {model_family}")
+            return False
+        
+        # Download the actual image
+        download_result = download_image_from_url(image_url)
+        if not download_result:
+            logger.warning(f"Failed to download image from {image_url}, skipping cache")
+            return False
+        
+        image_bytes, content_type, file_size = download_result
+        
+        # Normalize keys for indexing
+        normalized_vendor = vendor_name.strip().lower()
+        normalized_model = model_family.strip().lower()
+        
+        # Generate filename
+        file_extension = content_type.split('/')[-1] if '/' in content_type else 'jpg'
+        filename = f"{normalized_vendor}_{normalized_model}.{file_extension}"
+        
+        # Store image in GridFS
+        gridfs_metadata = {
+            'vendor_name': vendor_name,
+            'model_family': model_family,
+            'original_url': image_url,
+            'source': image_data.get('source', ''),
+            'domain': image_data.get('domain', '')
+        }
+        
+        gridfs_file_id = gridfs.put(
+            image_bytes,
+            filename=filename,
+            content_type=content_type,
+            **gridfs_metadata
+        )
+        
+        logger.info(f"Stored image in GridFS: {filename} (ID: {gridfs_file_id}, size: {file_size} bytes)")
+        
+        # Store metadata in images collection
+        image_doc = {
+            'vendor_name': vendor_name,
+            'vendor_name_normalized': normalized_vendor,
+            'model_family': model_family,
+            'model_family_normalized': normalized_model,
+            'gridfs_file_id': gridfs_file_id,
+            'original_url': image_url,
+            'title': image_data.get('title', ''),
+            'source': image_data.get('source', ''),
+            'domain': image_data.get('domain', ''),
+            'content_type': content_type,
+            'file_size': file_size,
+            'filename': filename,
+            'created_at': datetime.utcnow()
+        }
+        
+        # Use upsert to avoid duplicates (update if exists, insert if not)
+        result = images_collection.update_one(
+            {
+                'vendor_name_normalized': normalized_vendor,
+                'model_family_normalized': normalized_model
+            },
+            {'$set': image_doc},
+            upsert=True
+        )
+        
+        if result.upserted_id or result.modified_count > 0:
+            logger.info(f"Successfully cached image in GridFS for {vendor_name} - {model_family}")
+            return True
+        
+        return False
+        
+    except Exception as e:
+        logger.error(f"Failed to cache image in GridFS: {e}")
+        return False
+
+def get_available_vendors_from_mongodb() -> List[str]:
+    """
+    Get list of all available vendor names from MongoDB.
+    """
+    try:
+        conn = get_mongodb_connection()
+        products_collection = conn['collections']['vendors']
+        
+        # Get distinct vendor names from products collection
+        vendor_names = products_collection.distinct("vendor_name")
+        
+        # Filter out None/empty values and sort
+        valid_vendors = [vendor for vendor in vendor_names if vendor and str(vendor).strip()]
+        valid_vendors.sort()
+        
+        logger.info(f"Retrieved {len(valid_vendors)} vendors from MongoDB")
+        return valid_vendors
+        
+    except Exception as e:
+        logger.error(f"Failed to get vendors from MongoDB: {e}")
+        return []
+
+def get_vendors_for_product_type(product_type: str) -> List[str]:
+    """
+    Get list of vendor names that have products for the specified product type.
+    """
+    try:
+        conn = get_mongodb_connection()
+        vendors_collection = conn['collections']['vendors']
+        
+        # Get smart analysis search categories based on product type
+        from standardization_utils import get_analysis_search_categories
+        search_categories = get_analysis_search_categories(product_type)
+        
+        logger.info(f"[VENDOR_LOADING] Searching for vendors with product categories: {search_categories}")
+        
+        # Query for vendors that have products in the relevant categories
+        query = {
+            '$or': [
+                {'product_type': {'$regex': category, '$options': 'i'}}
+                for category in search_categories
+            ]
+        }
+        
+        # Get distinct vendor names from matching documents
+        vendor_names = vendors_collection.distinct("vendor_name", query)
+        
+        # Filter out None/empty values and sort
+        valid_vendors = [vendor for vendor in vendor_names if vendor and str(vendor).strip()]
+        valid_vendors.sort()
+        
+        logger.info(f"Retrieved {len(valid_vendors)} vendors for product type '{product_type}': {valid_vendors[:10]}...")
+        return valid_vendors
+        
+    except Exception as e:
+        logger.error(f"Failed to get vendors for product type '{product_type}': {e}")
+        # Fallback to all vendors
+        return get_available_vendors_from_mongodb()
