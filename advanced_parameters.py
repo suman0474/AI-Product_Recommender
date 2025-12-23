@@ -143,30 +143,37 @@ def _get_advanced_param_collection():
 def _load_cached_specifications(product_type: str) -> Optional[List[Dict[str, Any]]]:
     in_memory = _get_in_memory_specs(product_type)
     if in_memory is not None:
+        logging.info(f"[ADVANCED_PARAMS] In-memory cache HIT for {product_type}")
         return in_memory
 
     collection = _get_advanced_param_collection()
-    if collection is None or not product_type:
+    if collection is None:
+        logging.warning(f"[ADVANCED_PARAMS] MongoDB collection not available for {product_type}")
+        return None
+    if not product_type:
+        logging.warning("[ADVANCED_PARAMS] No product_type provided")
         return None
 
-    cutoff = datetime.utcnow() - timedelta(days=MONGO_TTL_DAYS)
     normalized = _normalize_product_type(product_type)
+    
+    logging.info(f"[ADVANCED_PARAMS] Looking up MongoDB cache for: product_type='{product_type}', normalized='{normalized}'")
 
     try:
-        doc = collection.find_one(
-            {
-                "normalized_product_type": normalized,
-                "created_at": {"$gte": cutoff},
-            }
-        )
+        # NOTE: TTL index on 'created_at' field auto-expires documents after 30 days,
+        # so no need to filter by date here. The TTL index handles expiration.
+        doc = collection.find_one({"normalized_product_type": normalized})
         if doc:
             specs = doc.get("unique_specifications")
             if isinstance(specs, list):
-                logging.info(f"Advanced parameters cache hit for {product_type}")
+                logging.info(f"[ADVANCED_PARAMS] MongoDB cache HIT for {product_type} - found {len(specs)} specs (created: {doc.get('created_at')})")
                 _set_in_memory_specs(product_type, specs)
                 return specs
+            else:
+                logging.warning(f"[ADVANCED_PARAMS] MongoDB cache found doc but 'unique_specifications' is not a list: {type(specs)}")
+        else:
+            logging.info(f"[ADVANCED_PARAMS] MongoDB cache MISS for {product_type} - no document found with normalized_product_type='{normalized}'")
     except PyMongoError as exc:
-        logging.warning(f"Unable to read advanced parameters cache for {product_type}: {exc}")
+        logging.warning(f"[ADVANCED_PARAMS] Unable to read cache for {product_type}: {exc}")
 
     return None
 
@@ -177,7 +184,11 @@ def _persist_specifications(
     existing_snapshot: List[str],
 ) -> None:
     collection = _get_advanced_param_collection()
-    if collection is None or not product_type:
+    if collection is None:
+        logging.warning(f"[ADVANCED_PARAMS] Cannot persist - collection not available for {product_type}")
+        return
+    if not product_type:
+        logging.warning("[ADVANCED_PARAMS] Cannot persist - no product_type provided")
         return
 
     normalized = _normalize_product_type(product_type)
@@ -192,18 +203,20 @@ def _persist_specifications(
         "updated_at": now,
     }
 
+    logging.info(f"[ADVANCED_PARAMS] Persisting to MongoDB: product_type='{product_type}', normalized='{normalized}', specs_count={len(unique_specifications)}")
+
     try:
-        collection.update_one(
+        result = collection.update_one(
             {"normalized_product_type": normalized},
             {"$set": document},
             upsert=True,
         )
         logging.info(
-            f"Cached advanced parameters in MongoDB for {product_type} ({len(unique_specifications)} specs)"
+            f"[ADVANCED_PARAMS] MongoDB persist SUCCESS for {product_type}: matched={result.matched_count}, modified={result.modified_count}, upserted_id={result.upserted_id}"
         )
         _set_in_memory_specs(product_type, unique_specifications)
     except PyMongoError as exc:
-        logging.warning(f"Failed to cache advanced parameters for {product_type}: {exc}")
+        logging.warning(f"[ADVANCED_PARAMS] MongoDB persist FAILED for {product_type}: {exc}")
         # Still keep in-memory cache even if Mongo upsert fails so current request benefits
         _set_in_memory_specs(product_type, unique_specifications)
 

@@ -746,8 +746,8 @@ def api_update_profile():
         last_name = data.get("last_name")
         username = data.get("username")
         company_name = data.get("company_name")
-        category = data.get("category")
-        strategy_interest = data.get("strategy")
+        location = data.get("location")
+        strategy_interest = data.get("strategy_interest")
         
         if first_name is not None:
             user.first_name = first_name.strip()
@@ -764,8 +764,8 @@ def api_update_profile():
 
         if company_name is not None:
             user.company_name = company_name.strip()
-        if category is not None:
-            user.category = category.strip()
+        if location is not None:
+            user.location = location.strip()
         if strategy_interest is not None:
             user.strategy_interest = strategy_interest.strip()
 
@@ -806,7 +806,7 @@ def api_update_profile():
                 "last_name": user.last_name,
                 "username": user.username,
                 "company_name": user.company_name,
-                "category": user.category,
+                "location": user.location,
                 "strategy_interest": user.strategy_interest,
                 "document_file_id": user.document_file_id
             }
@@ -1475,46 +1475,18 @@ Important: This is an independent conversation session. Do not reference any pre
             next_step = "awaitAdditionalAndLatestSpecs"
         
         elif step == 'initialInputWithSpecs':
-            # All mandatory fields provided - show available specs
+            # All mandatory fields provided - ask if user wants to see additional specs
+            # The specs list will be shown when user says "yes" at awaitAdditionalAndLatestSpecs
             product_type = data_context.get('productType', 'a product')
-            available_specs = data_context.get('availableSpecs', '')
-            specs_count = data_context.get('specsCount', 0)
-            available_parameters = data_context.get('availableParameters', [])
             
-            # Format parameters as bullet list (same as awaitAdditionalAndLatestSpecs)
-            if available_parameters:
-                params_display = format_available_parameters(available_parameters)
-            else:
-                # Fallback: convert comma-separated string to bullet list
-                params_display = "\n".join([f"- {s.strip()}" for s in available_specs.split(',') if s.strip()]) if available_specs else ""
-            
-            if params_display and specs_count > 0:
-                prompt_template = f"""
+            prompt_template = f"""
 You are Engenie - a helpful sales agent. The user provided all mandatory requirements for a {product_type}.
 
-You have the following {specs_count} additional and latest specifications available:
+Your response must follow this EXACT format:
 
-{params_display}
+"Perfect! It seems like you are looking for a {product_type}. Additional and latest specifications are available. Would you like to add them?"
 
-Your response must:
-1. Start positively (e.g., "Great choice!" or "Perfect!").
-2. Confirm the identified product type in a friendly way.
-3. Mention that you found {specs_count} additional and latest specifications available.
-4. List these specifications clearly (the list above).
-5. Ask: "Would you like to add any of these specifications?"
-
-Keep it friendly and concise. Show the specifications as a bullet list.
-"""
-            else:
-                prompt_template = f"""
-You are Engenie - a helpful sales agent. The user provided all mandatory requirements for a {product_type}.
-
-Your response must:
-1. Start positively (e.g., "Great choice!" or "Perfect!").
-2. Confirm the identified product type in a friendly way.
-3. Ask: "Additional and latest specifications are available. Would you like to add them?"
-
-Keep it friendly and concise (2-3 sentences max).
+You may vary the opening word (Perfect/Great/Excellent) but keep the rest of the sentence structure exactly as shown.
 """
             next_step = "awaitAdditionalAndLatestSpecs"
         
@@ -1616,6 +1588,20 @@ Respond with EXACTLY this single sentence and nothing else:
             # CASE 3: User says YES -> Show list and ask which to add
             elif is_yes:
                 session[asking_state_key] = False  # Now we're collecting input
+                
+                # If no parameters available, discover them now
+                if not remaining_parameters and product_type:
+                    try:
+                        parameters_result = discover_advanced_parameters(product_type)
+                        discovered_params = parameters_result.get('unique_parameters') or parameters_result.get('unique_specifications', [])
+                        remaining_parameters = discovered_params[:15] if discovered_params else []
+                        # Store in session for future use
+                        session[f'available_parameters_{search_session_id}'] = remaining_parameters
+                        session.modified = True
+                    except Exception as e:
+                        logging.warning(f"Could not discover parameters for {product_type}: {e}")
+                        remaining_parameters = []
+                
                 if remaining_parameters:
                     params_display = format_available_parameters(remaining_parameters)
                     prompt_template = f"""
@@ -1625,20 +1611,21 @@ Here are the available specifications:
 
 {params_display}
 
-Respond with:
-1. "Great!" or similar
-2. Show the list above
-3. Ask: "Which one would you like to add?"
+Your response must follow this format:
+1. Start with "Great!" or "Perfect!"
+2. Say "Here are the additional and latest specifications that are available:"
+3. List the specifications above as bullet points
+4. Ask: "Would you like to add any of these?"
 
-Keep it concise.
+Keep it friendly and concise.
 """
                 else:
-                    # All specs already added - move to next step
+                    # No specs available - move to next step
                     session[asking_state_key] = True  # Reset
                     session[added_specs_key] = []  # Clear
                     prompt_template = f"""
 You are Engenie - a helpful sales agent.
-All available specifications have been added! Say: "Perfect! Now let me discover the latest advanced parameters for {product_type}."
+No additional specifications were found. Say: "Let me show you the advanced parameters available for {product_type}."
 """
                     next_step = "awaitAdvancedSpecs"
                 next_step = "awaitAdditionalAndLatestSpecs" if remaining_parameters else "awaitAdvancedSpecs"
@@ -1690,7 +1677,7 @@ Keep it concise.
                         session[added_specs_key] = []  # Clear
                         prompt_template = f"""
 You are Engenie - a helpful sales agent.
-Say: "Great! You've added all available specifications. Now let me discover the latest advanced parameters for {product_type}."
+Say: "Great! You've added all available specifications. Let me show you the advanced parameters available for {product_type}."
 """
                         next_step = "awaitAdvancedSpecs"
                 else:
@@ -1708,14 +1695,14 @@ Respond politely:
 
 {params_display}
 
-3. Ask: "Please choose from the list above, or say 'no' to skip."
+3. Ask: "Please choose from the list above"
 
 Keep it friendly and concise.
 """
                     else:
                         prompt_template = """
 You are Engenie - a helpful sales assistant.
-Say: "I'm not sure what you mean. Would you like to continue to the next step? Please say 'yes' to proceed or 'no' to skip."
+Say: "I'm not sure what you mean. Would you like to continue to the next step?"
 """
                     next_step = "awaitAdditionalAndLatestSpecs"
             
@@ -1738,7 +1725,7 @@ Keep it concise.
                     # No parameters available - skip to next step
                     prompt_template = f"""
 You are Engenie - a helpful sales agent.
-Say: "No additional specifications needed. Now let me discover the latest advanced parameters for {product_type}."
+Say: "No additional specifications needed. Let me show you the advanced parameters available for {product_type}."
 """
                     next_step = "awaitAdvancedSpecs"
                 next_step = "awaitAdditionalAndLatestSpecs" if remaining_parameters else "awaitAdvancedSpecs"
@@ -1935,9 +1922,21 @@ Respond with EXACTLY this single sentence and nothing else:
                 # CASE 3: Force the list to display if the user explicitly asks to see it, or empty message
                 elif wants_display or (not user_message.strip() and not total_selected > 0):
                     params_display = format_available_parameters(available_parameters)
-
-                    # Use LLM to present the list and ask if they want to add them
-                    prompt_template = f"""
+                    
+                    # Check if we should include intro message (coming from awaitAdditionalAndLatestSpecs transition)
+                    show_intro = data_context.get('showIntro', False)
+                    
+                    if show_intro:
+                        # Combined intro + parameters response (for smooth transition from yes/no)
+                        llm_response = (
+                            f"Perfect! Here are the advanced parameters available for {product_type}:\n\n"
+                            f"{params_display}\n\n"
+                            "Would you like to add any of these?"
+                        )
+                        prompt_template = ""  # Skip LLM call, use direct response
+                    else:
+                        # Use LLM to present the list and ask if they want to add them
+                        prompt_template = f"""
 You are Engenie - a helpful sales agent.
 
 You need to show the user the advanced parameters that were identified and ask if they want to add them.
@@ -2056,7 +2055,7 @@ You are Engenie – a helpful sales agent. I have completed the analysis and fou
             next_step = None  # End of workflow
             
         elif step == 'analysisError':
-            prompt_template = "You are Engenie - a helpful sales agent. An error happened during the analysis. Apologize and politely ask the user to type 'rerun' to try again."
+            prompt_template = "You are Engenie - a helpful sales agent. An error happened during the analysis. Apologize and politely ask the user to try again when ready."
             next_step = "showSummary"  # Allow retry from summary
             
         elif step == 'default':
@@ -4469,7 +4468,7 @@ def register():
     
     # New Fields
     company_name = data.get("company_name")
-    category = data.get("category")
+    location = data.get("location")
     strategy_interest = data.get("strategy") # Field name from frontend is 'strategy'
 
     if not username or not email or not password:
@@ -4516,7 +4515,7 @@ def register():
         first_name=first_name,
         last_name=last_name,
         company_name=company_name,
-        category=category,
+        location=location,
         strategy_interest=strategy_interest,
         document_file_id=document_file_id,
         status='pending',
@@ -4568,7 +4567,10 @@ def login():
                 "first_name": user.first_name,
                 "last_name": user.last_name,
                 "email": user.email,
-                "role": user.role
+                "role": user.role,
+                "companyName": user.company_name,
+                "location": user.location,
+                "strategyInterest": user.strategy_interest
             }
         }), 200
 
@@ -4603,7 +4605,10 @@ def get_current_user():
             "first_name": user.first_name,
             "last_name": user.last_name,
             "email": user.email,
-            "role": user.role
+            "role": user.role,
+            "companyName": user.company_name,
+            "location": user.location,
+            "strategyInterest": user.strategy_interest
         }
     }), 200
 
@@ -4867,6 +4872,17 @@ Write a short, clear response (1–2 sentences):
 
         # Store product_type in session for later use in advanced parameters (session-isolated)
         session[f'product_type_{search_session_id}'] = response_data["productType"]
+        
+        # CRITICAL: Set session step to 'awaitMissingInfo' if there are missing mandatory fields
+        # This is required for the /api/intent endpoint to correctly handle "yes" responses
+        # The intent API checks current_step to determine if user is responding to missing info prompt
+        if missing_mandatory_fields:
+            session[f'current_step_{search_session_id}'] = 'awaitMissingInfo'
+            logging.info(f"[VALIDATE] Session {search_session_id}: Set step to 'awaitMissingInfo' - missing fields: {missing_mandatory_fields}")
+        else:
+            # If all mandatory fields are provided, stay at initialInput or move forward
+            session[f'current_step_{search_session_id}'] = 'initialInput'
+        session.modified = True
 
         return jsonify(response_data), 200
 
@@ -5211,7 +5227,7 @@ Remember: Return ONLY the JSON object, nothing else.
                 )
                 friendly_response = (
                     "Here are the latest advanced specifications you can add: "
-                    f"{formatted_available}. Let me know the names you want to include or say 'no' to skip."
+                    f"{formatted_available}. Let me know the names you want to include "
                 )
             else:
                 friendly_response = "I didn't find any matching specifications in your input. Could you please specify which latest specifications you'd like to add?"

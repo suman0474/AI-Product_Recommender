@@ -9,12 +9,12 @@ class User(db.Model):
     email = db.Column(db.String(120), unique=True, nullable=False)
     password_hash = db.Column(db.String(120), nullable=False)
     # User's full name
-    first_name = db.Column(db.String(80), nullable=True)
-    last_name = db.Column(db.String(80), nullable=True)
+    first_name = db.Column(db.String(80), nullable=False)
+    last_name = db.Column(db.String(80), nullable=False)
     
     # New Signup Fields
     company_name = db.Column(db.String(120), nullable=True)
-    category = db.Column(db.String(100), nullable=True)
+    location = db.Column(db.String(100), nullable=True)
     strategy_interest = db.Column(db.String(200), nullable=True) # Renamed to avoid reserved word conflict if any
     document_file_id = db.Column(db.String(100), nullable=True) # Linked MongoDB file ID
     

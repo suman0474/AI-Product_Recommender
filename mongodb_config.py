@@ -179,8 +179,9 @@ def ensure_indexes():
         ])
 
         # Advanced parameters cache indexes
+        # Index on normalized_product_type which is what the queries use
         collections['advanced_parameters'].create_index([
-            ("product_type", 1)
+            ("normalized_product_type", 1)
         ], unique=True)
         collections['advanced_parameters'].create_index(
             "created_at",

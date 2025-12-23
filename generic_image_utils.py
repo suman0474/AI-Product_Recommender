@@ -93,8 +93,8 @@ def _generate_image_with_llm(product_type: str, retry_count: int = 0, max_retrie
         logger.info(f"[LLM_IMAGE_GEN] Generating image for '{product_type}' using Gemini Imagen model...")
         
         # Construct the prompt for image generation
-        # Ensure no text and no background color as per user requirement
-        prompt = f"A professional 3D render of a {product_type}, studio lighting, high resolution, isolated on a transparent background, no shadow, clean edges."
+        # Explicit instructions for solid white background to avoid transparency or black backgrounds
+        prompt = f"A professional high-quality product photograph of a {product_type}, centered composition, studio lighting, isolated on a solid pure white background (RGB 255,255,255), no transparency, no shadows, clean edges, product photography style."
         
         logger.info(f"[LLM_IMAGE_GEN] Prompt: {prompt}")
         
