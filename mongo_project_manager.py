@@ -60,6 +60,7 @@ class MongoProjectManager:
                 'conversation_histories': project_data.get('conversation_histories', {}),
                 'collected_data': project_data.get('collected_data', {}),
                 'generic_images': project_data.get('generic_images', {}),
+                'project_chat_messages': project_data.get('project_chat_messages', []),  # Project page chat messages
                 'feedback_entries': project_data.get('feedback_entries', project_data.get('feedback', [])),
                 'current_step': project_data.get('current_step', ''),
                 'active_tab': project_data.get('active_tab', ''),

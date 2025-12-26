@@ -2236,10 +2236,15 @@ Acknowledge their comment and thank them for taking the time to provide their in
 @login_required
 def identify_instruments():
     """
-    Handles user input in project page with three cases:
+    Handles user input in project page with intelligent LLM-based classification:
     1. Greeting - Returns friendly greeting response
     2. Requirements - Returns identified instruments and accessories
-    3. Industrial Question - Returns answer or redirect if not related
+    3. Modification - Modifies existing instruments/accessories list
+    4. Question - Returns answer or redirect if not related
+    5. Unrelated - Politely redirects non-industrial content
+    
+    When current_instruments/current_accessories are provided, the LLM will
+    detect if the user wants to modify the existing list.
     """
     if not components or not components.get('llm_pro'):
         return jsonify({"error": "LLM component is not ready."}), 503
@@ -2248,6 +2253,11 @@ def identify_instruments():
         data = request.get_json(force=True)
         requirements = data.get("requirements", "").strip()
         search_session_id = data.get("search_session_id", "default")
+        
+        # NEW: Accept current instruments/accessories for modification detection
+        current_instruments = data.get("current_instruments", [])
+        current_accessories = data.get("current_accessories", [])
+        has_existing_data = len(current_instruments) > 0 or len(current_accessories) > 0
         
         if not requirements:
             return jsonify({"error": "Requirements text is required"}), 400
@@ -2276,10 +2286,36 @@ def identify_instruments():
             reasoning = f"Contains {unrelated_count} strong indicators of non-industrial content (email headers, job/recruitment terms)"
         else:
             # Step 1: Classify the input type using LLM
-            classification_prompt = """
+            # Build dynamic prompt based on whether existing instruments/accessories exist
+            
+            # Modification category - only included when existing data is present
+            modification_category = ""
+            modification_types = ""
+            if has_existing_data:
+                modification_category = """
+5. "modification" - If the user wants to MODIFY, ADD TO, or REMOVE FROM the existing list of instruments/accessories.
+   This includes:
+   - Adding new items: "Add a control valve", "I also need a flow meter", "Include another sensor"
+   - Removing items: "Remove the temperature transmitter", "Delete the flow meter", "Take out the valve"
+   - Updating specs: "Change the pressure range to 0-200 psi", "Update the material to Hastelloy"
+   - Quantity changes: "I need 2 more transmitters", "Reduce to 1 valve", "Add another one"
+   
+   **KEY INDICATORS OF MODIFICATION**:
+   - Words like: add, remove, delete, change, update, modify, include, also need, more, another, additional, replace, swap, edit, increase, decrease, fewer
+   - References to existing items being changed
+   - Requests that imply changing the current list rather than starting fresh
+
+   **IMPORTANT**: If the user provides completely NEW requirements (a full new project description), classify as "requirements" not "modification".
+   Modification is for incremental changes to an existing list.
+"""
+                modification_types = "|modification"
+            
+            classification_prompt = f"""
 You are an intelligent classifier for an industrial automation and instrumentation assistant named "Engenie".
 
-Analyze the user's input and classify it into ONE of these four categories:
+{"**CONTEXT**: The user already has an existing list of instruments and accessories identified. Consider if they want to modify this existing list." if has_existing_data else ""}
+
+Analyze the user's input and classify it into ONE of these categories:
 
 1. "greeting" - ONLY if the user is directly greeting YOU (the assistant) with a simple, standalone message like:
    ✓ "Hi"
@@ -2292,47 +2328,42 @@ Analyze the user's input and classify it into ONE of these four categories:
    
    **KEY RULE**: If the input is longer than 20 words OR contains email headers/signatures/formal content, it is NOT a greeting.
 
-2. "requirements" - If the user is providing technical requirements, specifications, or asking to identify instruments/equipment for an industrial process. This includes:
+2. "requirements" - If the user is providing NEW/FRESH technical requirements, specifications, or asking to identify instruments/equipment for an industrial process. This includes:
    - Process control requirements (pressure, temperature, flow, level measurements)
    - Industrial equipment specifications (valves, transmitters, controllers, actuators)
    - Automation system requirements
    - Instrumentation needs for industrial processes
    - Technical specifications with measurements, ranges, materials, standards (ANSI, ASME, DIN, ISO, API)
+   {"**NOTE**: Only use 'requirements' if it's a COMPLETELY NEW set of requirements, not changes to existing items." if has_existing_data else ""}
 
 3. "question" - If the user is asking a question about industrial topics, processes, or equipment (e.g., "What is a pressure transmitter?", "How does HART protocol work?")
 
-4. "unrelated" - If the content is NOT related to industrial automation, instrumentation, or process control. This is the MOST COMMON category for uploaded documents. Examples:
-   - **Job offers, recruitment emails, selection letters** (e.g., "Congratulations for the selection at L&T")
-   - **HR communications, campus recruitment emails**
+4. "unrelated" - If the content is NOT related to industrial automation, instrumentation, or process control. Examples:
+   - Job offers, recruitment emails, selection letters
+   - HR communications, campus recruitment emails
    - Personal emails or messages to other people
-   - Formal letters, business correspondence not about industrial equipment
    - General documents unrelated to industrial processes
-   - Academic content not related to industrial engineering
-   - News articles, social media posts, or general text
-   - Any content that doesn't involve industrial instruments, equipment, or processes
    
    **IMPORTANT INDICATORS OF "UNRELATED"**:
    - Contains email headers (From:, To:, Subject:, Date:)
    - Mentions job selection, recruitment, HR, campus placement
    - Addressed to other people (not to you, the assistant)
-   - Contains formal business language but no technical industrial content
-   - Discusses employment, hiring, onboarding, training programs
-
+{modification_category}
 **CRITICAL CLASSIFICATION RULES**:
 1. If input contains "From:", "To:", "Subject:", "Date:" → Almost always "unrelated"
 2. If input mentions job/recruitment/selection/hiring → "unrelated"
 3. If input is addressed to people other than you (the assistant) → "unrelated"
-4. If input is a forwarded email or formal letter → Check content, likely "unrelated"
-5. Only classify as "greeting" if it's a SHORT, DIRECT greeting to YOU
+4. Only classify as "greeting" if it's a SHORT, DIRECT greeting to YOU
+{"5. If user wants to ADD, REMOVE, CHANGE, or UPDATE existing items → 'modification'" if has_existing_data else ""}
 
-User Input: {user_input}
+User Input: {{user_input}}
 
 Respond with ONLY a JSON object in this exact format:
-{{
-  "type": "<greeting|requirements|question|unrelated>",
+{{{{
+  "type": "<greeting|requirements|question|unrelated{modification_types}>",
   "confidence": "<high|medium|low>",
   "reasoning": "<brief explanation of why you chose this classification>"
-}}
+}}}}
 
 No additional text or explanation outside the JSON.
 """
@@ -2511,6 +2542,45 @@ Validate the outputs and adherence to the output structure.
                 
                 # Add response type
                 result["response_type"] = "requirements"
+                
+                # Generate summary message using LLM
+                instrument_count = len(result.get("instruments", []))
+                accessory_count = len(result.get("accessories", []))
+                instrument_names = [inst.get("product_name", inst.get("category", "")) for inst in result.get("instruments", [])]
+                accessory_names = [acc.get("accessory_name", acc.get("category", "")) for acc in result.get("accessories", [])]
+                
+                summary_prompt = """
+You are Engenie - a friendly industrial automation assistant.
+
+You have just analyzed the user's requirements and identified the following:
+- Number of instruments: {instrument_count}
+- Instrument types: {instrument_names}
+- Number of accessories: {accessory_count}
+- Accessory types: {accessory_names}
+
+Generate a brief, friendly summary message (2-3 sentences) that:
+1. Tells the user how many instruments and accessories you've identified
+2. Mentions they can view the detailed list in the right panel
+3. Invites them to click on any item to run a detailed vendor analysis
+
+Keep it natural, professional, and helpful. Use markdown for emphasis (e.g., **bold** for counts).
+Respond ONLY with the message text, no JSON or additional formatting.
+"""
+                try:
+                    summary_chain = ChatPromptTemplate.from_template(summary_prompt) | components['llm'] | StrOutputParser()
+                    llm_summary = summary_chain.invoke({
+                        "instrument_count": instrument_count,
+                        "instrument_names": ", ".join(instrument_names[:5]) if instrument_names else "None",
+                        "accessory_count": accessory_count,
+                        "accessory_names": ", ".join(accessory_names[:5]) if accessory_names else "None"
+                    })
+                    result["message"] = llm_summary.strip()
+                except Exception as summary_error:
+                    logging.warning(f"Failed to generate LLM summary, using fallback: {summary_error}")
+                    instrument_word = "instrument" if instrument_count == 1 else "instruments"
+                    accessory_word = "accessory" if accessory_count == 1 else "accessories"
+                    result["message"] = f"I've identified **{instrument_count} {instrument_word}** and **{accessory_count} {accessory_word}** based on your requirements. You can view the detailed list in the right panel. Click on any item to run a detailed analysis."
+                
                 return standardized_jsonify(result, 200)
                 
             except json.JSONDecodeError as e:
@@ -2616,10 +2686,189 @@ No additional text outside the JSON.
                     "instruments": [],
                     "accessories": []
                 }, 200)
+        # CASE 5: Modification - User wants to modify existing instruments/accessories
+        elif input_type == "modification":
+            logging.info(f"[MODIFY] LLM classified as modification request. Processing...")
+            
+            # Reuse the modification logic
+            if not current_instruments and not current_accessories:
+                # Edge case: classified as modification but no existing data
+                # Fall back to requirements processing
+                logging.warning("[MODIFY] Classified as modification but no existing data. Treating as new requirements.")
+                input_type = "requirements"
+                # Note: This will fall through to requirements handling below
+            else:
+                # Create JSON representation of current items for the LLM  
+                current_state = {
+                    "instruments": current_instruments,
+                    "accessories": current_accessories
+                }
+                current_state_json = json.dumps(current_state, indent=2)
+
+                modification_prompt = """
+You are Engenie - an expert assistant in Industrial Process Control Systems.
+Your task is to modify the current list of identified instruments and accessories based on the user's request.
+
+CURRENT INSTRUMENTS AND ACCESSORIES:
+{current_state}
+
+USER'S MODIFICATION REQUEST:
+"{modification_request}"
+
+INSTRUCTIONS:
+1. Carefully analyze the user's request to understand what changes they want:
+   - ADD: Add new instruments or accessories to the list
+   - REMOVE: Remove specific items from the list
+   - MODIFY: Change specifications of existing items
+   - UPDATE: Update quantities, materials, or other properties
+
+2. Apply the requested changes to the current list.
+
+3. For new items being added, include:
+   - category: Product category (e.g., "Pressure Transmitter", "Control Valve")
+   - product_name (for instruments) or accessory_name (for accessories)
+   - quantity: Number of items
+   - specifications: Detailed specs based on user request or industry standards
+   - strategy: Procurement strategy (leave empty if none specified)
+   - sample_input: A description combining category and key specifications
+
+4. Mark any inferred specifications with [INFERRED] tag.
+
+5. Provide a clear summary of changes made.
+
+Return ONLY a valid JSON object with this structure:
+{{
+    "instruments": [
+        {{
+            "category": "<category>",
+            "product_name": "<product name>",
+            "quantity": "<quantity>",
+            "specifications": {{
+                "<spec_field>": "<spec_value>"
+            }},
+            "strategy": "<strategy or empty>",
+            "sample_input": "<category> with <key specifications>"
+        }}
+    ],
+    "accessories": [
+        {{
+            "category": "<accessory category>",
+            "accessory_name": "<accessory name>",
+            "quantity": "<quantity>",
+            "specifications": {{
+                "<spec_field>": "<spec_value>"
+            }},
+            "strategy": "<strategy or empty>",
+            "sample_input": "<accessory category> for <purpose> with <key specs>"
+        }}
+    ],
+    "changes_made": [
+        "<description of change 1>",
+        "<description of change 2>"
+    ],
+    "summary": "<brief friendly summary of all modifications>"
+}}
+
+Respond ONLY with valid JSON, no additional text.
+"""
+                
+                # Invoke LLM for modification
+                mod_prompt = ChatPromptTemplate.from_template(modification_prompt)
+                mod_chain = mod_prompt | components['llm_pro'] | StrOutputParser()
+                mod_response = mod_chain.invoke({
+                    "current_state": current_state_json,
+                    "modification_request": requirements
+                })
+
+                # Clean the LLM response
+                cleaned_mod = mod_response.strip()
+                if cleaned_mod.startswith("```json"):
+                    cleaned_mod = cleaned_mod[7:]
+                elif cleaned_mod.startswith("```"):
+                    cleaned_mod = cleaned_mod[3:]
+                if cleaned_mod.endswith("```"):
+                    cleaned_mod = cleaned_mod[:-3]
+                cleaned_mod = cleaned_mod.strip()
+
+                try:
+                    mod_result = json.loads(cleaned_mod)
+                    
+                    # Validate response structure
+                    if "instruments" not in mod_result:
+                        mod_result["instruments"] = current_instruments
+                    if "accessories" not in mod_result:
+                        mod_result["accessories"] = current_accessories
+                    if "changes_made" not in mod_result:
+                        mod_result["changes_made"] = []
+
+                    # Ensure all required fields exist in instruments
+                    for instrument in mod_result.get("instruments", []):
+                        if "strategy" not in instrument:
+                            instrument["strategy"] = ""
+                        if "quantity" not in instrument:
+                            instrument["quantity"] = "1"
+
+                    # Ensure all required fields exist in accessories
+                    for accessory in mod_result.get("accessories", []):
+                        if "strategy" not in accessory:
+                            accessory["strategy"] = ""
+                        if "quantity" not in accessory:
+                            accessory["quantity"] = "1"
+
+                    # Generate a friendly message
+                    instrument_count = len(mod_result.get("instruments", []))
+                    accessory_count = len(mod_result.get("accessories", []))
+                    changes = mod_result.get("changes_made", [])
+                    
+                    message_prompt = """
+You are Engenie - a friendly industrial automation assistant.
+
+You have just modified the user's instrument list based on their request.
+
+Changes made: {changes_list}
+Total instruments now: {instrument_count}
+Total accessories now: {accessory_count}
+
+Generate a brief, friendly confirmation message (2-3 sentences) that:
+1. Confirms the changes were successful
+2. Summarizes what was changed
+3. Mentions the updated counts
+
+Use markdown formatting for emphasis (e.g., **bold** for counts).
+Respond ONLY with the message text, no JSON.
+"""
+                    try:
+                        msg_chain = ChatPromptTemplate.from_template(message_prompt) | components['llm'] | StrOutputParser()
+                        friendly_message = msg_chain.invoke({
+                            "changes_list": ", ".join(changes) if changes else "Updates applied",
+                            "instrument_count": instrument_count,
+                            "accessory_count": accessory_count
+                        })
+                        mod_result["message"] = friendly_message.strip()
+                    except Exception as msg_error:
+                        logging.warning(f"Failed to generate friendly modification message: {msg_error}")
+                        mod_result["message"] = f"I've updated your list! You now have **{instrument_count} instruments** and **{accessory_count} accessories**."
+
+                    mod_result["response_type"] = "modification"
+                    
+                    logging.info(f"[MODIFY] Successfully modified instruments. Changes: {changes}")
+                    
+                    return standardized_jsonify(mod_result, 200)
+
+                except json.JSONDecodeError as e:
+                    logging.error(f"Failed to parse modification LLM response as JSON: {e}")
+                    logging.error(f"LLM Response: {mod_response}")
+                    
+                    return jsonify({
+                        "response_type": "question",
+                        "message": "I couldn't process your modification request. Please try rephrasing it, for example: 'Add a control valve' or 'Remove the flow meter'.",
+                        "instruments": current_instruments,
+                        "accessories": current_accessories
+                    }), 200
         
-        # CASE 5: Unexpected classification type - Default fallback
-        else:
-            logging.warning(f"[CLASSIFY] Unexpected classification type: {input_type}")
+        # CASE 6: Unexpected classification type - Default fallback
+        # Note: If modification was detected but no existing data, input_type was changed to "requirements" above
+        if input_type not in ["greeting", "requirements", "question", "unrelated", "modification"]:
             # Generate dynamic response from LLM
             unexpected_prompt = f"You are Engenie, an industrial automation assistant. The user provided: '{requirements}'. Politely explain that you specialize in industrial automation and instrumentation, and invite them to provide industrial requirements or ask related questions (2-3 sentences)."
             unexpected_chain = ChatPromptTemplate.from_template(unexpected_prompt) | components['llm_pro'] | StrOutputParser()
@@ -2641,6 +2890,247 @@ No additional text outside the JSON.
             "instruments": [],
             "accessories": [],
             "summary": ""
+        }), 500
+
+# =========================================================================
+# === INSTRUMENT MODIFICATION ENDPOINT ===
+# =========================================================================
+
+@app.route("/api/modify-instruments", methods=["POST"])
+@login_required
+def modify_instruments():
+    """
+    Allows users to modify/refine the identified instruments and accessories list.
+    Users can add new items, remove existing items, or modify specifications.
+    
+    REQUEST:
+    --------
+    POST /api/modify-instruments
+    Content-Type: application/json
+    
+    {
+        "modification_request": "<user's modification request in natural language>",
+        "current_instruments": [<current list of identified instruments>],
+        "current_accessories": [<current list of identified accessories>],
+        "search_session_id": "<optional session ID>"
+    }
+    
+    MODIFICATION EXAMPLES:
+    ----------------------
+    - "Add a control valve with 2-inch size"
+    - "Remove the temperature transmitter"
+    - "Change the pressure range to 0-200 psi for the first pressure transmitter"
+    - "Add 2 more flow meters with magnetic sensing"
+    - "Remove all impulse lines"
+    - "Update the material to Hastelloy for all transmitters"
+    
+    RESPONSE:
+    ---------
+    {
+        "responseType": "modification",
+        "message": "<friendly summary of changes made>",
+        "instruments": [<updated list of instruments>],
+        "accessories": [<updated list of accessories>],
+        "changes_made": [<list of changes applied>]
+    }
+    """
+    if not components or not components.get('llm_pro'):
+        return jsonify({"error": "LLM component is not ready."}), 503
+
+    try:
+        data = request.get_json(force=True)
+        modification_request = data.get("modification_request", "").strip()
+        current_instruments = data.get("current_instruments", [])
+        current_accessories = data.get("current_accessories", [])
+        search_session_id = data.get("search_session_id", "default")
+        
+        if not modification_request:
+            return jsonify({"error": "Modification request is required"}), 400
+
+        if not current_instruments and not current_accessories:
+            return jsonify({
+                "error": "No instruments or accessories to modify. Please identify instruments first.",
+                "response_type": "error"
+            }), 400
+
+        # Create a JSON representation of current items for the LLM
+        current_state = {
+            "instruments": current_instruments,
+            "accessories": current_accessories
+        }
+        current_state_json = json.dumps(current_state, indent=2)
+
+        modification_prompt = """
+You are Engenie - an expert assistant in Industrial Process Control Systems.
+Your task is to modify the current list of identified instruments and accessories based on the user's request.
+
+CURRENT INSTRUMENTS AND ACCESSORIES:
+{current_state}
+
+USER'S MODIFICATION REQUEST:
+"{modification_request}"
+
+INSTRUCTIONS:
+1. Carefully analyze the user's request to understand what changes they want:
+   - ADD: Add new instruments or accessories to the list
+   - REMOVE: Remove specific items from the list
+   - MODIFY: Change specifications of existing items
+   - UPDATE: Update quantities, materials, or other properties
+
+2. Apply the requested changes to the current list.
+
+3. For new items being added, include:
+   - category: Product category (e.g., "Pressure Transmitter", "Control Valve")
+   - product_name (for instruments) or accessory_name (for accessories)
+   - quantity: Number of items
+   - specifications: Detailed specs based on user request or industry standards
+   - strategy: Procurement strategy (leave empty if none specified)
+   - sample_input: A description combining category and key specifications
+
+4. Mark any inferred specifications with [INFERRED] tag.
+
+5. Provide a clear summary of changes made.
+
+Return ONLY a valid JSON object with this structure:
+{{
+    "instruments": [
+        {{
+            "category": "<category>",
+            "product_name": "<product name>",
+            "quantity": "<quantity>",
+            "specifications": {{
+                "<spec_field>": "<spec_value>"
+            }},
+            "strategy": "<strategy or empty>",
+            "sample_input": "<category> with <key specifications>"
+        }}
+    ],
+    "accessories": [
+        {{
+            "category": "<accessory category>",
+            "accessory_name": "<accessory name>",
+            "quantity": "<quantity>",
+            "specifications": {{
+                "<spec_field>": "<spec_value>"
+            }},
+            "strategy": "<strategy or empty>",
+            "sample_input": "<accessory category> for <purpose> with <key specs>"
+        }}
+    ],
+    "changes_made": [
+        "<description of change 1>",
+        "<description of change 2>"
+    ],
+    "summary": "<brief friendly summary of all modifications>"
+}}
+
+Respond ONLY with valid JSON, no additional text.
+"""
+        
+        # Invoke LLM
+        full_prompt = ChatPromptTemplate.from_template(modification_prompt)
+        response_chain = full_prompt | components['llm_pro'] | StrOutputParser()
+        llm_response = response_chain.invoke({
+            "current_state": current_state_json,
+            "modification_request": modification_request
+        })
+
+        # Clean the LLM response
+        cleaned_response = llm_response.strip()
+        if cleaned_response.startswith("```json"):
+            cleaned_response = cleaned_response[7:]
+        elif cleaned_response.startswith("```"):
+            cleaned_response = cleaned_response[3:]
+        if cleaned_response.endswith("```"):
+            cleaned_response = cleaned_response[:-3]
+        cleaned_response = cleaned_response.strip()
+
+        try:
+            result = json.loads(cleaned_response)
+            
+            # Validate response structure
+            if "instruments" not in result:
+                result["instruments"] = current_instruments
+            if "accessories" not in result:
+                result["accessories"] = current_accessories
+            if "changes_made" not in result:
+                result["changes_made"] = []
+            if "summary" not in result:
+                result["summary"] = "Modifications applied successfully."
+
+            # Ensure all required fields exist in instruments
+            for instrument in result.get("instruments", []):
+                if "strategy" not in instrument:
+                    instrument["strategy"] = ""
+                if "quantity" not in instrument:
+                    instrument["quantity"] = "1"
+
+            # Ensure all required fields exist in accessories
+            for accessory in result.get("accessories", []):
+                if "strategy" not in accessory:
+                    accessory["strategy"] = ""
+                if "quantity" not in accessory:
+                    accessory["quantity"] = "1"
+
+            # Generate a friendly message using LLM
+            changes_count = len(result.get("changes_made", []))
+            instrument_count = len(result.get("instruments", []))
+            accessory_count = len(result.get("accessories", []))
+            
+            message_prompt = """
+You are Engenie - a friendly industrial automation assistant.
+
+You have just modified the user's instrument list based on their request.
+
+Changes made: {changes_list}
+Total instruments now: {instrument_count}
+Total accessories now: {accessory_count}
+
+Generate a brief, friendly confirmation message (2-3 sentences) that:
+1. Confirms the changes were successful
+2. Summarizes what was changed
+3. Mentions the updated counts
+
+Use markdown formatting for emphasis (e.g., **bold** for counts).
+Respond ONLY with the message text, no JSON.
+"""
+            try:
+                message_chain = ChatPromptTemplate.from_template(message_prompt) | components['llm'] | StrOutputParser()
+                friendly_message = message_chain.invoke({
+                    "changes_list": ", ".join(result.get("changes_made", ["No specific changes noted"])),
+                    "instrument_count": instrument_count,
+                    "accessory_count": accessory_count
+                })
+                result["message"] = friendly_message.strip()
+            except Exception as msg_error:
+                logging.warning(f"Failed to generate friendly modification message: {msg_error}")
+                result["message"] = f"I've updated your list! You now have **{instrument_count} instruments** and **{accessory_count} accessories**."
+
+            result["response_type"] = "modification"
+            
+            logging.info(f"[MODIFY] Successfully modified instruments. Changes: {result.get('changes_made', [])}")
+            
+            return standardized_jsonify(result, 200)
+
+        except json.JSONDecodeError as e:
+            logging.error(f"Failed to parse modification LLM response as JSON: {e}")
+            logging.error(f"LLM Response: {llm_response}")
+            
+            return jsonify({
+                "response_type": "error",
+                "error": "Failed to process modification request",
+                "instruments": current_instruments,
+                "accessories": current_accessories,
+                "message": "I couldn't process your modification request. Please try rephrasing it."
+            }), 500
+
+    except Exception as e:
+        logging.exception("Instrument modification failed.")
+        return jsonify({
+            "response_type": "error",
+            "error": "Failed to modify instruments: " + str(e),
+            "instruments": [],
+            "accessories": []
         }), 500
 
 @app.route("/api/search-vendors", methods=["POST"])
