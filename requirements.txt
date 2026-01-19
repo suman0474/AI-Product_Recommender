@@ -119,3 +119,5 @@ openpyxl
 pymongo>=4.6.0
 python-docx>=1.1.0
 easyocr>=1.7.0
+fuzzywuzzy>=0.18.0
+python-Levenshtein>=0.12.2

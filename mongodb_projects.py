@@ -47,6 +47,7 @@ class MongoDBProjectManager:
                 'conversation_histories': project_data.get('conversation_histories', {}),
                 'collected_data': project_data.get('collected_data', {}),
                 'current_step': project_data.get('current_step', ''),
+                'awaiting_single_item_confirmation': project_data.get('awaiting_single_item_confirmation', False),
                 'analysis_results': project_data.get('analysis_results', {}),
                 'project_status': project_data.get('project_status', 'active'),
                 'updated_at': datetime.utcnow()
@@ -168,6 +169,7 @@ class MongoDBProjectManager:
                 'conversation_history': project.get('conversation_histories', {}),
                 'collected_data': project.get('collected_data', {}),
                 'current_step': project.get('current_step', ''),
+                'awaiting_single_item_confirmation': project.get('awaiting_single_item_confirmation', False),
                 'analysis_results': project.get('analysis_results', {}),
                 'project_status': project.get('project_status', 'active'),
                 'created_at': project.get('created_at', datetime.utcnow()).isoformat(),

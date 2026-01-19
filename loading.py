@@ -166,12 +166,20 @@ def _extract_json(text: str) -> str:
         return match.group(1)
     return text  # fallback
 
-def discover_top_vendors(product_type: str, llm=None) -> List[Dict[str, Any]]:
+def discover_top_vendors(product_type: str, llm=None, strategy: str = None) -> List[Dict[str, Any]]:
     """
     Uses LLM to discover the top 5 vendors for a specific product type,
     then queries LLM to find model families for each vendor.
+    
+    Args:
+        product_type: The product type to find vendors for
+        llm: Optional LLM instance
+        strategy: Optional procurement strategy keyword (e.g., "Cost optimization", "Quality-focused")
     """
     print(f"[DISCOVER] Discovering top 5 vendors and their model families for product_type='{product_type}'")
+    
+    if strategy:
+        print(f"[DISCOVER] Strategy provided: '{strategy}'")
 
     if llm is None:
         llm = ChatGoogleGenerativeAI(
@@ -180,8 +188,26 @@ def discover_top_vendors(product_type: str, llm=None) -> List[Dict[str, Any]]:
             google_api_key=GOOGLE_API_KEY,
         )
 
-    # First, discover the top 5 vendors for this product type using LLM
-    vendor_discovery_prompt = f"""
+    # Build vendor discovery prompt - include strategy if provided
+    if strategy and strategy.strip():
+        # If strategy is provided, use it to guide vendor selection
+        vendor_discovery_prompt = f"""
+List the top 5 vendors/manufacturers for "{product_type}" in industrial instrumentation.
+
+IMPORTANT: The user has a procurement strategy focused on: "{strategy}"
+
+Based on this strategy, prioritize vendors that are known for:
+- {strategy.lower()} approach in their products and services
+- Strong reputation in industrial instrumentation for {product_type.lower()}
+
+Return only a valid JSON array of vendor names. Do not include any other text or explanations.
+
+Example format:
+["Emerson", "ABB", "Yokogawa", "Endress+Hauser", "Honeywell"]
+"""
+    else:
+        # No strategy - use default prompt
+        vendor_discovery_prompt = f"""
 List the top 5 most prominent and widely recognized vendors/manufacturers for "{product_type}" in industrial instrumentation.
 
 Focus on established companies that are known for manufacturing high-quality {product_type.lower()} used in industrial applications.
@@ -1355,16 +1381,57 @@ def load_products_runnable(vendors_base_path: str = None):
             if vendors_collection is not None:
                 print(f"[PRODUCTS] Querying vendors collection for product categories: {search_categories}")
                 
-                # Query the vendors collection for documents matching the search categories
-                # Look for vendor JSONs that match the product type categories
-                query = {
-                    '$or': [
-                        {'product_type': {'$regex': category, '$options': 'i'}}
-                        for category in search_categories
-                    ]
-                }
+                # Get filtered vendors and model families if available
+                filtered_vendors = input_dict.get('filtered_vendors', [])
+                specified_model_families = input_dict.get('specified_model_families', [])
                 
-                print(f"[PRODUCTS] Querying vendors collection with: {query}")
+                # Build base query for product type categories
+                category_conditions = [
+                    {'product_type': {'$regex': category, '$options': 'i'}}
+                    for category in search_categories
+                ]
+                
+                # Start with product type condition
+                query = {'$or': category_conditions}
+                
+                # Add vendor filter if specified
+                if filtered_vendors:
+                    vendor_conditions = [
+                        {'vendor_name': {'$regex': vendor, '$options': 'i'}}
+                        for vendor in filtered_vendors
+                    ]
+                    # AND with vendor condition: must match product type AND vendor
+                    query = {
+                        '$and': [
+                            {'$or': category_conditions},
+                            {'$or': vendor_conditions}
+                        ]
+                    }
+                    print(f"[PRODUCTS] Filtering to vendors: {filtered_vendors}")
+                
+                # Add model family filter if specified
+                if specified_model_families:
+                    model_conditions = [
+                        {'$or': [
+                            {'model_family': {'$regex': model, '$options': 'i'}},
+                            {'product_name': {'$regex': model, '$options': 'i'}},
+                            {'data.models.model_series': {'$regex': model, '$options': 'i'}}
+                        ]}
+                        for model in specified_model_families
+                    ]
+                    # AND with model family condition
+                    if '$and' in query:
+                        query['$and'].append({'$or': model_conditions})
+                    else:
+                        query = {
+                            '$and': [
+                                {'$or': category_conditions},
+                                {'$or': model_conditions}
+                            ]
+                        }
+                    print(f"[PRODUCTS] Filtering to model families: {specified_model_families}")
+                
+                print(f"[PRODUCTS] Final MongoDB query: {query}")
                 
                 # DEBUG: Check query results before iterating
                 query_count = vendors_collection.count_documents(query)

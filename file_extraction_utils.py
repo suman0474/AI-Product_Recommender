@@ -14,33 +14,39 @@ from docx import Document  # python-docx for DOCX
 # Initialize logger first
 logger = logging.getLogger(__name__)
 
-# Make EasyOCR optional (only needed for image OCR)
-try:
-    import easyocr
-    import os
+# EasyOCR is loaded LAZILY (only when an image is uploaded)
+# This avoids the slow initialization on module import
+EASYOCR_AVAILABLE = None  # None = not checked yet, True/False after check
+easyocr_reader = None
+
+def get_easyocr_reader():
+    """Lazy initialize EasyOCR reader only when needed for image OCR"""
+    global EASYOCR_AVAILABLE, easyocr_reader
     
-    # Initialize EasyOCR reader
-    # Using English by default, can add more languages as needed: ['en', 'es', 'fr', etc.]
-    # gpu=False for CPU-only environments (Railway/most cloud deployments)
-    # download_enabled=True allows downloading models on first use
-    logger.info("Initializing EasyOCR reader...")
+    # Already initialized
+    if EASYOCR_AVAILABLE is True and easyocr_reader is not None:
+        return easyocr_reader
     
+    # Already failed
+    if EASYOCR_AVAILABLE is False:
+        return None
+    
+    # First time - try to initialize
     try:
-        # Initialize with English language support
-        # Set gpu=False for CPU-only environments
-        # The model will be downloaded on first use (~100MB for English)
+        import easyocr
+        logger.info("Initializing EasyOCR reader (first image upload)...")
         easyocr_reader = easyocr.Reader(['en'], gpu=False, verbose=False)
         EASYOCR_AVAILABLE = True
-        logger.info("✓ EasyOCR initialized successfully with English language support")
+        logger.info("✓ EasyOCR initialized successfully")
+        return easyocr_reader
+    except ImportError:
+        EASYOCR_AVAILABLE = False
+        logger.warning("⚠ easyocr not installed - image OCR will not be available")
+        return None
     except Exception as e:
         EASYOCR_AVAILABLE = False
-        logger.warning(f"⚠ Failed to initialize EasyOCR reader: {e}")
-        easyocr_reader = None
-        
-except ImportError:
-    EASYOCR_AVAILABLE = False
-    easyocr_reader = None
-    logger.warning("⚠ easyocr not installed - image OCR will not be available")
+        logger.warning(f"⚠ Failed to initialize EasyOCR: {e}")
+        return None
 
 
 def extract_text_from_pdf(file_bytes: bytes) -> str:
@@ -118,7 +124,10 @@ def extract_text_from_image(file_bytes: bytes) -> str:
     Returns:
         Extracted text via OCR
     """
-    if not EASYOCR_AVAILABLE or easyocr_reader is None:
+    # Lazy load EasyOCR (only initializes on first image upload)
+    reader = get_easyocr_reader()
+    
+    if reader is None:
         error_msg = (
             "EasyOCR is not installed or failed to initialize. "
             "To enable image text extraction:\n"
@@ -142,7 +151,7 @@ def extract_text_from_image(file_bytes: bytes) -> str:
         # readtext returns a list of tuples: (bbox, text, confidence)
         # We extract just the text from each detection
         logger.info("Performing OCR with EasyOCR...")
-        results = easyocr_reader.readtext(file_bytes)
+        results = reader.readtext(file_bytes)
         
         # Extract text from results
         # Each result is a tuple: (bbox, text, confidence)

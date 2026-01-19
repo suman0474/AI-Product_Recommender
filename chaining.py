@@ -80,7 +80,7 @@ def setup_langchain_components():
     
     # 3. Use the appropriate models for different tasks
     # Fast tasks use Flash model
-    validation_chain = validation_prompt | llm_flash | validation_parser
+    validation_chain = validation_prompt | llm_pro | validation_parser
     requirements_chain = requirements_prompt | llm_flash | str_parser
     
     # Final analysis tasks use Pro model (vendor analysis and ranking)
@@ -103,7 +103,7 @@ def setup_langchain_components():
     additional_requirements_format_instructions = additional_requirements_parser.get_format_instructions()
     
     return {
-        'llm': llm_pro,  # General LLM for conversations and simple text generation
+        'llm': llm_flash,  # General LLM for conversations and simple text generation
         'llm_flash': llm_flash,  # For conversations and simple text generation
         'llm_flash_lite': llm_flash_lite,  # For generating schema key descriptions
         'llm_pro': llm_pro,  # For complex analysis tasks
@@ -233,11 +233,25 @@ def _invoke_vendor_chain_for_payload(
     structured_requirements,
     vendor_name,
     vendor_data,
+    applicable_standards=None,
+    standards_specs=None,
 ):
     """Invoke vendor chain for a single vendor."""
     pdf_text = vendor_data.get("pdf_text")
     pdf_payload = json.dumps({vendor_name: pdf_text}, ensure_ascii=False) if pdf_text else json.dumps({})
     products_payload = json.dumps(vendor_data.get("products", []), ensure_ascii=False)
+    
+    # Format applicable standards for the prompt
+    if applicable_standards and isinstance(applicable_standards, list) and len(applicable_standards) > 0:
+        standards_list = "\n".join([f"- {std}" for std in applicable_standards])
+    else:
+        standards_list = "No applicable engineering standards specified."
+    
+    # Format standards specifications for the prompt
+    if standards_specs and isinstance(standards_specs, dict) and len(standards_specs) > 0:
+        specs_list = "\n".join([f"- {key}: {value}" for key, value in standards_specs.items()])
+    else:
+        specs_list = "No specific standards specifications provided."
 
     return vendor_chain.invoke(
         {
@@ -245,6 +259,8 @@ def _invoke_vendor_chain_for_payload(
             "products_json": products_payload,
             "pdf_content_json": pdf_payload,
             "format_instructions": format_instructions,
+            "applicable_standards": standards_list,
+            "standards_specs": specs_list,
         }
     )
 
@@ -255,6 +271,8 @@ def _run_parallel_vendor_analysis(
     pdf_content_json_str,
     vendor_chain,
     format_instructions,
+    applicable_standards=None,
+    standards_specs=None,
 ):
     """Fan out vendor analysis so each vendor hits the LLM independently."""
     payloads = _prepare_vendor_payloads(products_json_str, pdf_content_json_str)
@@ -265,6 +283,9 @@ def _run_parallel_vendor_analysis(
         return {"vendor_matches": [], "vendor_run_details": []}
 
     logging.info("[VENDOR_ANALYSIS] Preparing analysis for vendors: %s", list(payloads.keys()))
+    
+    if applicable_standards:
+        logging.info("[VENDOR_ANALYSIS] Using applicable standards: %s", applicable_standards)
 
     max_workers_env = os.getenv("VENDOR_ANALYSIS_MAX_WORKERS")
     try:
@@ -299,6 +320,8 @@ def _run_parallel_vendor_analysis(
                     structured_requirements,
                     vendor,
                     data,
+                    applicable_standards=applicable_standards,
+                    standards_specs=standards_specs,
                 )
                 result_dict = to_dict_if_pydantic(result)
                 break  # Success, exit retry loop
@@ -322,11 +345,11 @@ def _run_parallel_vendor_analysis(
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_map = {}
-        # Submit threads with 10-second gaps between each submission
+        # Submit threads with 2-second gaps between each submission
         for i, (vendor, data) in enumerate(payloads.items()):
-            if i > 0:  # Add 10-second delay before submitting each subsequent thread
-                time.sleep(10)
-                logging.info("[VENDOR_ANALYSIS] Submitting thread %d for vendor: %s (after 10s delay)", i+1, vendor)
+            if i > 0:  # Add 2-second delay before submitting each subsequent thread
+                time.sleep(2)
+                logging.info("[VENDOR_ANALYSIS] Submitting thread %d for vendor: %s (after 2s delay)", i+1, vendor)
             else:
                 logging.info("[VENDOR_ANALYSIS] Submitting thread %d for vendor: %s (no delay)", i+1, vendor)
             future = executor.submit(_worker, vendor, data)
@@ -358,85 +381,256 @@ def _run_parallel_vendor_analysis(
     return {"vendor_matches": vendor_matches, "vendor_run_details": run_details}
 
 def load_vendors_and_filter():
-    """Load vendors from database and apply CSV filtering after product type detection"""
+    """Load vendors from database and apply filtering with priority:
+    1. User-specified vendors from input (highest priority)
+    2. Strategy-based vendors from CSV/PDF
+    3. Top 5 vendors fallback (lowest priority)
+    """
     def _get_filtered_vendors(input_dict):
         # Get detected product type from previous step
         detected_product_type = input_dict.get("detected_product_type", None)
         logging.info(f"[VENDOR_LOADING] Using detected product type: {detected_product_type}")
         
-        # Get vendors that match the detected product type
+        # Get vendors that match the detected product type from database
         if detected_product_type:
-            all_vendors = get_vendors_for_product_type(detected_product_type)
-            logging.info(f"[VENDOR_LOADING] Found {len(all_vendors)} vendors for product type '{detected_product_type}': {all_vendors}")
+            all_db_vendors = get_vendors_for_product_type(detected_product_type)
+            logging.info(f"[VENDOR_LOADING] Found {len(all_db_vendors)} vendors for product type '{detected_product_type}': {all_db_vendors}")
         else:
             # Fallback to all vendors if no product type detected
-            all_vendors = get_available_vendors_from_mongodb()
-            logging.info(f"[VENDOR_LOADING] No product type detected, found {len(all_vendors)} vendors in database: {all_vendors}")
+            all_db_vendors = get_available_vendors_from_mongodb()
+            logging.info(f"[VENDOR_LOADING] No product type detected, found {len(all_db_vendors)} vendors in database: {all_db_vendors}")
         
-        # Check for CSV vendor filter in session
+        # ===========================================================================
+        # PRIORITY 1: Check for user-specified vendors from input
+        # These vendors were extracted by identify_instruments() or validation
+        # ===========================================================================
+        user_specified_vendors = input_dict.get("specified_vendors", [])
+        
+        # Also check session for specified vendors (from Project page workflow)
         from flask import session
+        session_specified_vendors = session.get('specified_vendors', [])
+        if session_specified_vendors and not user_specified_vendors:
+            user_specified_vendors = session_specified_vendors
+            logging.info(f"[VENDOR_PRIORITY] Retrieved user-specified vendors from session: {user_specified_vendors}")
+        
+        # ===========================================================================
+        # PRIORITY 2: Check for strategy-based CSV vendor filter
+        # ===========================================================================
         csv_vendor_filter = session.get('csv_vendor_filter', {})
-        allowed_vendors = csv_vendor_filter.get('vendor_names', [])
+        strategy_vendors = csv_vendor_filter.get('vendor_names', [])
         
-        if allowed_vendors:
-            logging.info(f"[CSV_FILTER] Restricting analysis to CSV vendors: {allowed_vendors}")
-            
-            # Import fuzzy matching
-            from fuzzywuzzy import process
-            from standardization_utils import standardize_vendor_name
-            
-            # Filter vendors using fuzzy matching (no LLM standardization needed!)
-            filtered_vendors = []
-            logging.info(f"[CSV_FILTER] Starting fuzzy matching with {len(all_vendors)} DB vendors against {len(allowed_vendors)} CSV vendors")
-            
+        # If no session filter, check background task results from vendor_search_tasks
+        if not strategy_vendors:
             try:
-                # Process each DB vendor against all CSV vendors using fuzzy matching
-                for i, db_vendor in enumerate(all_vendors):
-                    logging.info(f"[CSV_FILTER] Processing DB vendor {i+1}/{len(all_vendors)}: '{db_vendor}'")
-                    
-                    # Use fuzzy matching to find best match among all CSV vendors (no standardization needed)
-                    fuzzy_result = process.extractOne(db_vendor, allowed_vendors)
-                    
-                    if fuzzy_result and fuzzy_result[1] >= 70:  # 70% similarity threshold to avoid false matches
-                        best_match = fuzzy_result[0]
-                        best_score = fuzzy_result[1]
-                        filtered_vendors.append(db_vendor)
-                        logging.info(f"[CSV_FILTER] ✓ Matched DB vendor '{db_vendor}' with CSV vendor '{best_match}' (Score: {best_score}%)")
-                    else:
-                        logging.info(f"[CSV_FILTER] ✗ No match found for DB vendor '{db_vendor}' (best score: {fuzzy_result[1] if fuzzy_result else 0}%)")
-                        
+                from main import vendor_search_tasks, vendor_search_lock
+                user_id = session.get('user_id')
+                if user_id:
+                    with vendor_search_lock:
+                        task = vendor_search_tasks.get(user_id)
+                    if task and task.get('status') == 'completed' and task.get('csv_vendor_filter'):
+                        csv_vendor_filter = task['csv_vendor_filter']
+                        strategy_vendors = csv_vendor_filter.get('vendor_names', [])
+                        # Also store in session for future use
+                        session['csv_vendor_filter'] = csv_vendor_filter
+                        logging.info(f"[VENDOR_PRIORITY] Retrieved strategy vendors from background task: {len(strategy_vendors)} vendors")
+            except ImportError:
+                logging.warning("[VENDOR_PRIORITY] Could not import vendor_search_tasks from main")
             except Exception as e:
-                logging.error(f"[CSV_FILTER] Error in fuzzy matching: {e}")
-                # Fallback to all vendors if fuzzy matching fails
-                filtered_vendors = all_vendors
-                logging.warning(f"[CSV_FILTER] Falling back to all {len(filtered_vendors)} vendors due to error")
-            
-            logging.info(f"[CSV_FILTER] After fuzzy filtering, will analyze vendors: {filtered_vendors}")
-            
-            # FALLBACK: If CSV filtering resulted in 0 vendors, use all database vendors
-            if not filtered_vendors:
-                logging.warning("[FALLBACK] CSV filtering resulted in 0 vendors, falling back to all database vendors")
-                filtered_vendors = all_vendors
-                logging.info(f"[FALLBACK] Using all {len(filtered_vendors)} database vendors for analysis: {filtered_vendors}")
-        else:
-            filtered_vendors = all_vendors
-            logging.info("[CSV_FILTER] No CSV vendor filter found, analyzing all vendors")
+                logging.warning(f"[VENDOR_PRIORITY] Error checking background task: {e}")
         
-        # FINAL SAFETY CHECK: Ensure we have at least some vendors for analysis
-        if not filtered_vendors:
-            logging.warning("[SAFETY_FALLBACK] No vendors available after all filtering")
-            if all_vendors:
-                filtered_vendors = all_vendors
-                logging.info(f"[SAFETY_FALLBACK] Using {len(filtered_vendors)} product-specific vendors: {filtered_vendors}")
+        # ===========================================================================
+        # APPLY PRIORITY LOGIC
+        # ===========================================================================
+        final_vendors = []
+        priority_used = "none"
+        
+        if user_specified_vendors:
+            # PRIORITY 1: User-specified vendors take highest precedence
+            # User vendors OVERRIDE strategy (per user requirement)
+            logging.info(f"[VENDOR_PRIORITY] User specified vendors: {user_specified_vendors} - these take priority!")
+            priority_used = "user_specified"
+            
+            # Match user-specified vendors against database vendors using LLM for variations
+            final_vendors = _match_vendors_with_llm(user_specified_vendors, all_db_vendors)
+            
+            if not final_vendors:
+                # If no matches found, use user vendors as-is (LLM will handle during analysis)
+                logging.warning(f"[VENDOR_PRIORITY] No DB vendors matched user-specified vendors, using as-is: {user_specified_vendors}")
+                final_vendors = user_specified_vendors
+                
+        elif strategy_vendors:
+            # PRIORITY 2: Strategy-based filtering (no user vendors specified)
+            logging.info(f"[VENDOR_PRIORITY] Using strategy vendors: {strategy_vendors}")
+            priority_used = "strategy"
+            
+            # Match strategy vendors against database vendors using LLM
+            final_vendors = _match_vendors_with_llm(strategy_vendors, all_db_vendors)
+            
+            if not final_vendors:
+                logging.warning("[VENDOR_PRIORITY] No DB vendors matched strategy, falling back to all DB vendors")
+                final_vendors = all_db_vendors
+                
+        else:
+            # PRIORITY 3: No user vendors and no strategy - use top 5 fallback
+            logging.info("[VENDOR_PRIORITY] No user vendors or strategy - using top 5 fallback")
+            priority_used = "top_5_fallback"
+            
+            if len(all_db_vendors) <= 5:
+                final_vendors = all_db_vendors
             else:
-                logging.error("[SAFETY_FALLBACK] No vendors found for this product type - analysis cannot proceed")
+                # Use LLM to discover top 5 vendors for this product type
+                from loading import discover_top_vendors
+                try:
+                    top_vendors_result = discover_top_vendors(detected_product_type)
+                    # Extract just vendor names from result
+                    final_vendors = [v.get('vendor') if isinstance(v, dict) else v for v in top_vendors_result[:5]]
+                    logging.info(f"[VENDOR_PRIORITY] Discovered top 5 vendors: {final_vendors}")
+                except Exception as e:
+                    logging.warning(f"[VENDOR_PRIORITY] Failed to discover top vendors: {e}, using first 5 from DB")
+                    final_vendors = all_db_vendors[:5]
+        
+        # SAFETY CHECK: Ensure we have at least some vendors
+        if not final_vendors:
+            logging.warning("[VENDOR_PRIORITY] No vendors after all priority checks, using all DB vendors")
+            final_vendors = all_db_vendors if all_db_vendors else ["Emerson", "ABB", "Yokogawa", "Endress+Hauser", "Honeywell"]
+        
+        logging.info(f"[VENDOR_PRIORITY] Final vendors (priority={priority_used}): {final_vendors}")
+        
+        # ===========================================================================
+        # RETRIEVE MODEL FAMILIES from session (if specified by user)
+        # ===========================================================================
+        user_specified_model_families = input_dict.get("specified_model_families", [])
+        session_model_families = session.get('specified_model_families', [])
+        if session_model_families and not user_specified_model_families:
+            user_specified_model_families = session_model_families
+            logging.info(f"[MODEL_FAMILY] Retrieved user-specified model families from session: {user_specified_model_families}")
+        
+        if user_specified_model_families:
+            logging.info(f"[MODEL_FAMILY] Will filter products to model families: {user_specified_model_families}")
         
         enriched = dict(input_dict)
-        enriched["available_vendors"] = all_vendors
-        enriched["filtered_vendors"] = filtered_vendors
+        enriched["available_vendors"] = all_db_vendors
+        enriched["filtered_vendors"] = final_vendors
+        enriched["vendor_priority_used"] = priority_used
+        enriched["specified_model_families"] = user_specified_model_families  # Pass to product loading
         return enriched
     
     return RunnableLambda(_get_filtered_vendors)
+
+
+def _match_vendors_with_llm(target_vendors: list, db_vendors: list) -> list:
+    """Match target vendor names against database vendors using LLM for fuzzy matching.
+    
+    Args:
+        target_vendors: List of vendor names to match (from user input or strategy)
+        db_vendors: List of vendor names from the database
+        
+    Returns:
+        List of matched database vendor names
+    """
+    if not target_vendors or not db_vendors:
+        return []
+    
+    matched_vendors = []
+    
+    try:
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        from langchain_core.prompts import ChatPromptTemplate
+        from langchain_core.output_parsers import StrOutputParser
+        import concurrent.futures
+        
+        llm_flash_lite = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash-lite", 
+            temperature=0.0,  # Deterministic for matching
+            google_api_key=os.getenv("GOOGLE_API_KEY"),
+        )
+        
+        vendor_match_prompt = ChatPromptTemplate.from_template("""
+You are an expert at matching vendor/company names in industrial automation.
+
+Target Vendor Name: "{target_vendor}"
+
+Available Database Vendors:
+{db_vendors}
+
+Instructions:
+1. Find the BEST matching vendor from the database for the target vendor
+2. Consider these as MATCHING:
+   - Same company with different formatting (e.g., "Endress+Hauser" vs "Endress + Hauser")
+   - Abbreviations (e.g., "ABB" vs "ABB Ltd", "E+H" vs "Endress+Hauser")
+   - Parent/subsidiary relationships (e.g., "Siemens AG" vs "Siemens")
+   - Division names (e.g., "Honeywell" matches "Honeywell Process Solutions")
+   - Common variations (e.g., "Rosemount" matches "Emerson" as Rosemount is Emerson brand)
+3. Only report a match if they clearly refer to the SAME company
+
+Respond with ONLY a JSON object:
+{{"matched_vendor": "<exact name from database vendors or null if no match>", "confidence": "high/medium/low/none"}}
+""")
+        
+        chain = vendor_match_prompt | llm_flash_lite | StrOutputParser()
+        
+        def match_single_vendor(target_vendor):
+            try:
+                db_vendors_str = "\n".join([f"- {v}" for v in db_vendors])
+                result = chain.invoke({
+                    "target_vendor": target_vendor,
+                    "db_vendors": db_vendors_str
+                })
+                
+                # Parse JSON response
+                import json
+                result = result.strip()
+                if result.startswith("```json"):
+                    result = result[7:]
+                elif result.startswith("```"):
+                    result = result[3:]
+                if result.endswith("```"):
+                    result = result[:-3]
+                result = result.strip()
+                
+                match_data = json.loads(result)
+                matched = match_data.get("matched_vendor")
+                confidence = match_data.get("confidence", "none")
+                
+                if matched and matched != "null" and confidence in ["high", "medium"]:
+                    return target_vendor, matched, confidence
+                return target_vendor, None, confidence
+                
+            except Exception as e:
+                logging.warning(f"[VENDOR_MATCH] LLM error for vendor '{target_vendor}': {e}")
+                return target_vendor, None, "error"
+        
+        # Run matching in parallel
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {executor.submit(match_single_vendor, v): v for v in target_vendors}
+            
+            for future in concurrent.futures.as_completed(futures):
+                target_vendor, matched_vendor, confidence = future.result()
+                if matched_vendor:
+                    matched_vendors.append(matched_vendor)
+                    logging.info(f"[VENDOR_MATCH] ✓ '{target_vendor}' → '{matched_vendor}' (confidence: {confidence})")
+                else:
+                    logging.info(f"[VENDOR_MATCH] ✗ No match for '{target_vendor}' (confidence: {confidence})")
+                    
+    except Exception as e:
+        logging.error(f"[VENDOR_MATCH] Error in LLM vendor matching: {e}")
+        # Fallback: try simple case-insensitive matching
+        for target in target_vendors:
+            target_lower = target.lower()
+            for db_vendor in db_vendors:
+                if target_lower in db_vendor.lower() or db_vendor.lower() in target_lower:
+                    matched_vendors.append(db_vendor)
+                    break
+    
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_vendors = []
+    for v in matched_vendors:
+        if v not in seen:
+            seen.add(v)
+            unique_vendors.append(v)
+    
+    return unique_vendors
 
 def load_filtered_pdf_content():
     """Load PDF content only for filtered vendors"""
@@ -510,12 +704,22 @@ def create_analysis_chain(components, vendors_base_path=None):
     
     def attach_parallel_vendor_analysis(input_dict):
         enriched = dict(input_dict)
+        
+        # Extract applicable standards if provided
+        applicable_standards = enriched.get("applicable_standards", [])
+        standards_specs = enriched.get("standards_specs", {})
+        
+        if applicable_standards:
+            logging.info(f"[ANALYSIS_CHAIN] Passing applicable standards to vendor analysis: {applicable_standards}")
+        
         enriched["vendor_analysis"] = _run_parallel_vendor_analysis(
             structured_requirements=enriched.get("structured_requirements"),
             products_json_str=enriched.get("products_json"),
             pdf_content_json_str=enriched.get("pdf_content_json"),
             vendor_chain=components['vendor_chain'],
-            format_instructions=components['vendor_format_instructions']
+            format_instructions=components['vendor_format_instructions'],
+            applicable_standards=applicable_standards,
+            standards_specs=standards_specs,
         )
         return enriched
     

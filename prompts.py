@@ -189,6 +189,19 @@ For each parameter (mandatory or optional):
 ### **User Requirements**
 {structured_requirements}
 
+### **Applicable Engineering Standards (IMPORTANT)**
+{applicable_standards}
+
+**Standards Specifications from User's Standards Document:**
+{standards_specs}
+
+**STANDARDS MATCHING INSTRUCTION:**
+When analyzing products, PRIORITIZE products that meet or exceed the specifications defined in the user's applicable engineering standards. 
+- Check if the product documentation mentions compliance with any of the listed standards
+- Verify that product specifications meet or exceed the standards requirements
+- In the reasoning, explicitly note when a product meets a standard specification
+- Flag as a concern if a product does NOT meet a critical standard specification
+
 ### **Primary Source: PDF Datasheet Content**
 {pdf_content_json}
 
@@ -211,10 +224,12 @@ For each parameter (mandatory or optional):
 
 - **[e.g., Output Signal](e.g., 4-20 mA)** 
   - **Product Specification:** [e.g., "4-20mA" from Datasheet Page 1, 'Communications/Output Options']
+  - **Standards Compliance:** [If applicable, note compliance with user's standards]
   - **Explanation:** [A concise paragraph explaining the match. This requirement is met because the datasheet explicitly lists 4-20mA as an output. This ensures compatibility with the user's control system and is a critical factor for model suitability.]
 
 - **[e.g., Pressure Range](e.g., 10 inH2O span)**
   - **Product Specification:** [e.g., "URL 10 inH2O, LRL -10 inH2O" from Datasheet Page 1, 'Span & Range Limits']
+  - **Standards Compliance:** [If applicable, note compliance with user's standards]
   - **Explanation:** [Explain the match. The specified span of 10 inH2O is within the transmitter's upper and lower range limits, making it a perfect fit for the application's measurement needs.]
 
 **II. Optional Parameters Analysis**
@@ -223,16 +238,19 @@ For each parameter (mandatory or optional):
 
 - **[e.g., Wetted Parts Material](e.g., Hastelloy C276)** 
   - **Product Specification:** [e.g., "Hastelloy® C-276" available in Datasheet Page 15, 'Model Selection Guide']
+  - **Standards Compliance:** [If applicable, note compliance with user's standards]
   - **Explanation:** [Explain the match. The required material is available as a selectable option, ensuring the transmitter will have the necessary corrosion resistance for the process fluid.]
 
 
 **III. Comprehensive Analysis & Assessment**
+- **Standards Compliance Summary:** Summarize how well the product meets the user's applicable engineering standards.
 - **Reasoning for Selection:** 
   Provide a concise paragraph (2–3 sentences) that clearly states:
   1. Which **mandatory requirements** are fully met by the model.
   2. Which **optional requirements** are also satisfied.
-  3. How the combination of these matches **supports the overall suitability** for the user's application.
-  4. Reference any critical parameters explicitly, using datasheet or JSON as justification.
+  3. How the product **complies with applicable standards** (if any).
+  4. How the combination of these matches **supports the overall suitability** for the user's application.
+  5. Reference any critical parameters explicitly, using datasheet or JSON as justification.
 
 {format_instructions}
 

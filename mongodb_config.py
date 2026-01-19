@@ -118,6 +118,9 @@ class Collections:
     
     # Strategy collection
     STRATERGY = "stratergy"                  # Strategy data
+    
+    # Standards collection
+    STANDARDS = "standards"                  # Engineering standards data
 
 def get_mongodb_connection():
     """Get MongoDB connection components"""
@@ -139,6 +142,9 @@ def get_mongodb_connection():
             
             # Strategy collection
             'stratergy': mongodb_manager.get_collection(Collections.STRATERGY),
+            
+            # Standards collection
+            'standards': mongodb_manager.get_collection(Collections.STANDARDS),
         }
     }
 
@@ -226,6 +232,20 @@ def ensure_indexes():
         collections['stratergy'].create_index([
             ("user_id", 1),
             ("filename", 1)
+        ])
+        
+        # Standards collection indexes
+        collections['standards'].create_index([
+            ("user_id", 1),
+            ("uploaded_at", -1)
+        ])
+        collections['standards'].create_index([
+            ("user_id", 1),
+            ("filename", 1)
+        ])
+        collections['standards'].create_index([
+            ("user_id", 1),
+            ("data.category", 1)
         ])
         
         # GridFS indexes (fs.files and fs.chunks are auto-created by GridFS)

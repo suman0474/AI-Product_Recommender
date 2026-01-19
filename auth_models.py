@@ -16,7 +16,8 @@ class User(db.Model):
     company_name = db.Column(db.String(120), nullable=True)
     location = db.Column(db.String(100), nullable=True)
     strategy_interest = db.Column(db.String(200), nullable=True) # Renamed to avoid reserved word conflict if any
-    document_file_id = db.Column(db.String(100), nullable=True) # Linked MongoDB file ID
+    document_file_id = db.Column(db.String(100), nullable=True) # Linked MongoDB file ID for strategy documents
+    standards_file_id = db.Column(db.String(100), nullable=True) # Linked MongoDB file ID for standards documents
     
     # NEW: Add a status column for admin approval
     status = db.Column(db.String(20), default='pending', nullable=False)

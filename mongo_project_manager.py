@@ -53,9 +53,11 @@ class MongoProjectManager:
                 'project_description': project_data.get('project_description', ''),
                 'initial_requirements': project_data.get('initial_requirements', ''),
                 'product_type': product_type,
+                'source_page': project_data.get('source_page', ''),  # Track which page created this project
                 'pricing': project_data.get('pricing', {}),
                 'identified_instruments': project_data.get('identified_instruments', []),
                 'identified_accessories': project_data.get('identified_accessories', []),
+                'awaiting_single_item_confirmation': project_data.get('awaiting_single_item_confirmation', False),
                 'search_tabs': project_data.get('search_tabs', []),
                 'conversation_histories': project_data.get('conversation_histories', {}),
                 'collected_data': project_data.get('collected_data', {}),
@@ -247,6 +249,7 @@ class MongoProjectManager:
                         workflow_position = project_data.get('workflow_position', {})
                         user_interactions = project_data.get('user_interactions', {})
                         requirements = project_data.get('initial_requirements', '')
+                        source_page = project_data.get('source_page', '')
                         
                     except Exception as e:
                         self.logger.warning(f"Failed to load GridFS data for project {project['_id']}: {e}")
@@ -256,6 +259,7 @@ class MongoProjectManager:
                         workflow_position = {}
                         user_interactions = {}
                         requirements = ''
+                        source_page = ''
                 else:
                     # Legacy format - shouldn't happen with new implementation
                     identified_instruments = []
@@ -264,6 +268,7 @@ class MongoProjectManager:
                     workflow_position = {}
                     user_interactions = {}
                     requirements = project.get('initial_requirements', '')
+                    source_page = ''
                 
                 # Create requirements preview
                 requirements_preview = requirements[:200] + "..." if len(requirements) > 200 else requirements
@@ -273,6 +278,7 @@ class MongoProjectManager:
                     'project_name': project.get('project_name', ''),
                     'project_description': project.get('project_description', ''),
                     'product_type': project.get('product_type', ''),
+                    'source_page': source_page,  # Include source_page for routing
                     'instruments_count': len(identified_instruments) if isinstance(identified_instruments, list) else 0,
                     'accessories_count': len(identified_accessories) if isinstance(identified_accessories, list) else 0,
                     'search_tabs_count': len(search_tabs) if isinstance(search_tabs, list) else 0,
