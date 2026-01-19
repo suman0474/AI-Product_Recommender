@@ -838,7 +838,6 @@ def api_update_profile():
         username = data.get("username")
         company_name = data.get("company_name")
         location = data.get("location")
-        strategy_interest = data.get("strategy_interest")
         
         if first_name is not None:
             user.first_name = first_name.strip()
@@ -857,8 +856,6 @@ def api_update_profile():
             user.company_name = company_name.strip()
         if location is not None:
             user.location = location.strip()
-        if strategy_interest is not None:
-            user.strategy_interest = strategy_interest.strip()
 
         # Handle Strategy File Upload - Store in GridFS AND extract strategy data using LLM IN BACKGROUND
         strategy_file_uploaded = False
@@ -874,7 +871,6 @@ def api_update_profile():
                 }
                 # Upload to GridFS for raw file storage (immediate)
                 document_file_id = mongodb_file_manager.upload_to_mongodb(file_data, metadata)
-                user.document_file_id = document_file_id
                 logging.info(f"Uploaded strategy document for user {user.username}: {document_file_id}")
                 
                 # Extract strategy data using LLM IN BACKGROUND
@@ -903,7 +899,6 @@ def api_update_profile():
                 }
                 # Upload to GridFS for raw file storage
                 standards_doc_file_id = mongodb_file_manager.upload_to_mongodb(standards_file_data, standards_metadata)
-                user.standards_file_id = standards_doc_file_id
                 logging.info(f"Uploaded standards document for user {user.username}: {standards_doc_file_id}")
                 
                 # Extract text and store in MongoDB IN BACKGROUND for RAG
@@ -932,10 +927,7 @@ def api_update_profile():
                 "last_name": user.last_name,
                 "username": user.username,
                 "company_name": user.company_name,
-                "location": user.location,
-                "strategy_interest": user.strategy_interest,
-                "document_file_id": user.document_file_id,
-                "standards_file_id": getattr(user, 'standards_file_id', None)
+                "location": user.location
             }
         }
         
@@ -6518,7 +6510,6 @@ def register():
     # New Fields
     company_name = data.get("company_name")
     location = data.get("location")
-    strategy_interest = data.get("strategy") # Field name from frontend is 'strategy'
 
     if not username or not email or not password:
         return jsonify({"error": "Missing username, email, or password"}), 400
@@ -6565,8 +6556,6 @@ def register():
         last_name=last_name,
         company_name=company_name,
         location=location,
-        strategy_interest=strategy_interest,
-        document_file_id=document_file_id,
         status='pending',
         role='user'
     )
@@ -6623,8 +6612,7 @@ def login():
                 "email": user.email,
                 "role": user.role,
                 "companyName": user.company_name,
-                "location": user.location,
-                "strategyInterest": user.strategy_interest
+                "location": user.location
             }
         }), 200
 
@@ -6661,8 +6649,7 @@ def get_current_user():
             "email": user.email,
             "role": user.role,
             "companyName": user.company_name,
-            "location": user.location,
-            "strategyInterest": user.strategy_interest
+            "location": user.location
         }
     }), 200
 
@@ -8483,8 +8470,7 @@ def get_standards_documents():
         return jsonify({
             "success": True,
             "documents": documents,
-            "total_count": len(documents),
-            "current_file_id": getattr(user, 'standards_file_id', None)
+            "total_count": len(documents)
         }), 200
         
     except Exception as e:
@@ -8496,25 +8482,20 @@ def get_standards_documents():
 @login_required
 def delete_all_standards_documents():
     """
-    Delete standards document reference for the current user.
-    Clears the user's standards_file_id.
+    Delete all standards documents for the current user from MongoDB.
     """
     try:
         user_id = session.get('user_id')
-        user = User.query.get(user_id)
         
-        if not user:
-            return jsonify({"error": "User not found"}), 404
-        
-        # Clear the user's standards file reference
-        old_file_id = getattr(user, 'standards_file_id', None)
-        user.standards_file_id = None
-        db.session.commit()
+        # Delete from MongoDB standards collection
+        conn = get_mongodb_connection()
+        standards_collection = conn['collections']['standards']
+        result = standards_collection.delete_many({'user_id': user_id})
         
         return jsonify({
             "success": True,
-            "message": "Standards document reference cleared",
-            "previous_file_id": old_file_id
+            "message": f"Deleted {result.deleted_count} standards documents",
+            "deleted_count": result.deleted_count
         }), 200
         
     except Exception as e:
@@ -8556,10 +8537,6 @@ def upload_standards_file():
             'uploaded_at': datetime.utcnow().isoformat()
         }
         file_id = mongodb_file_manager.upload_to_mongodb(file_data, metadata)
-        
-        # Update user's standards file reference
-        user.standards_file_id = file_id
-        db.session.commit()
         
         logging.info(f"[STANDARDS_UPLOAD] Uploaded file to GridFS: {file_id}")
         
