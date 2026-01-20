@@ -172,6 +172,7 @@ else:
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 # initialize db
 db.init_app(app)
+
 # =========================================================================
 # === HELPER FUNCTIONS AND UTILITIES ===
 # =========================================================================
@@ -2340,20 +2341,20 @@ def route_classifier():
     ------
     - "solution" - Solution/Project page for identifying instruments and accessories
     - "product_info" - Product Info page for querying vendor/product database
-    - "best_match" - Best Match page for finding matching products with analysis
+    - "search" - Search page for finding matching products with analysis
     
     REQUEST:
     --------
     POST /api/route-classifier
     {
         "user_input": "<user's message>",
-        "current_page": "solution" | "product_info" | "best_match"
+        "current_page": "solution" | "product_info" | "search"
     }
     
     RESPONSE:
     ---------
     {
-        "target_page": "solution" | "product_info" | "best_match",
+        "target_page": "solution" | "product_info" | "search",
         "requires_confirmation": true/false,
         "confirmation_message": "<message to show user>" (only if requires_confirmation is true),
         "original_query": "<user's input to pass to target page>",
@@ -2371,8 +2372,8 @@ def route_classifier():
         if not user_input:
             return jsonify({"error": "user_input is required"}), 400
         
-        if current_page not in ["solution", "product_info", "best_match"]:
-            return jsonify({"error": "current_page must be 'solution', 'product_info', or 'best_match'"}), 400
+        if current_page not in ["solution", "product_info", "search"]:
+            return jsonify({"error": "current_page must be 'solution', 'product_info', or 'search'"}), 400
         
         logging.info(f"[ROUTE_CLASSIFIER] Input: '{user_input[:100]}...', Current Page: {current_page}")
         
@@ -2400,7 +2401,7 @@ PAGES AND THEIR PURPOSES:
    - Strategy and procurement information
    - Example inputs: "What vendors have flow meters?", "Tell me about Rosemount products", "What's the strategy for ABB?"
 
-3. **BEST_MATCH** - The Best Match page is for:
+3. **SEARCH** - The Search page is for:
    - Finding the best matching products from vendors
    - Detailed product analysis and comparison
    - **Standalone accessory requests** (single accessory like "I need a cable" or "I need a junction box")
@@ -2410,32 +2411,32 @@ PAGES AND THEIR PURPOSES:
 CLASSIFICATION RULES:
 --------------------
 1. MULTIPLE instruments (2+) → SOLUTION (even with "no accessories", count >= 2)
-2. SINGLE instrument WITH "no accessories" phrase → BEST_MATCH (count = 1)
+2. SINGLE instrument WITH "no accessories" phrase → SEARCH (count = 1)
 3. SINGLE instrument WITHOUT "no accessories" phrase → SOLUTION (accessories auto-inferred = count >= 2)
 4. If user input is about QUERYING DATABASE for vendor/product INFO → PRODUCT_INFO
-5. Standalone accessory request (no instrument mentioned) → BEST_MATCH (count = 1)
+5. Standalone accessory request (no instrument mentioned) → SEARCH (count = 1)
 6. If user input is a simple greeting, question, or continuation of current context → SAME as current_page
 7. If user input is ambiguous BUT relates to current page's purpose → SAME as current_page
 
 **CRITICAL - COUNT BASED ROUTING:**
 - Count the total number of ITEMS (instruments + accessories)
-- Count = 1 → BEST_MATCH
+- Count = 1 → SEARCH
 - Count >= 2 → SOLUTION
 
 **"NO ACCESSORIES" ONLY MATTERS FOR SINGLE INSTRUMENTS:**
-- "I need a PT with no accessories" → 1 instrument + 0 accessories = count 1 → BEST_MATCH
+- "I need a PT with no accessories" → 1 instrument + 0 accessories = count 1 → SEARCH
 - "I need a PT and TT with no accessories" → 2 instruments + 0 accessories = count 2 → SOLUTION
 
 **EXAMPLES:**
 - "I need a pressure transmitter" → SOLUTION (1 PT + auto-inferred accessories = count >= 2)
-- "I need a pressure transmitter without accessories" → BEST_MATCH (just 1 PT, count = 1)
-- "I need only a temperature sensor" → BEST_MATCH (just 1 sensor, count = 1)
-- "I need a control valve, no accessories" → BEST_MATCH (just 1 valve, count = 1)
+- "I need a pressure transmitter without accessories" → SEARCH (just 1 PT, count = 1)
+- "I need only a temperature sensor" → SEARCH (just 1 sensor, count = 1)
+- "I need a control valve, no accessories" → SEARCH (just 1 valve, count = 1)
 - "I need a PT and TT with no accessories" → SOLUTION (2 instruments, count = 2)
 - "I need 2 pressure transmitters" → SOLUTION (2 instruments, count = 2)
 - "I need a pressure transmitter and a flow meter" → SOLUTION (2 instruments + accessories)
-- "I need a junction box" → BEST_MATCH (standalone accessory, count = 1)
-- "I need mounting brackets" → BEST_MATCH (standalone accessory, count = 1)
+- "I need a junction box" → SEARCH (standalone accessory, count = 1)
+- "I need mounting brackets" → SEARCH (standalone accessory, count = 1)
 - "I have a project with control instruments" → SOLUTION (complex project)
 
 IMPORTANT - PREFER CURRENT PAGE:
@@ -2455,7 +2456,7 @@ User Input: "{user_input}"
 
 Respond with ONLY a JSON object in this exact format:
 {{
-  "target_page": "<solution|product_info|best_match>",
+  "target_page": "<solution|product_info|search>",
   "reasoning": "<brief explanation of why this page is best suited>"
 }}
 
@@ -2484,7 +2485,7 @@ No additional text or explanation outside the JSON.
             reasoning = result.get("reasoning", "")
             
             # Validate target_page
-            if target_page not in ["solution", "product_info", "best_match"]:
+            if target_page not in ["solution", "product_info", "search"]:
                 target_page = current_page
                 
         except Exception as e:
@@ -2505,13 +2506,13 @@ No additional text or explanation outside the JSON.
         page_descriptions = {
             "solution": "Solution page to identify instruments and accessories",
             "product_info": "Product Info page to query our vendor database",
-            "best_match": "Best Match page to find matching products"
+            "search": "Search page to find matching products"
         }
         
         page_names = {
             "solution": "Solution",
             "product_info": "Product Info",
-            "best_match": "Best Match"
+            "search": "Search"
         }
         
         if requires_confirmation:
@@ -2549,7 +2550,7 @@ Generate 4 different messages as a JSON object:
    Examples based on current page:
    - If current page is "Solution": "No problem! Please provide requirements, and I'll help you identify what you need."
    - If current page is "Product Info": "No problem. Is there anything else you would like to know about ?"
-   - If current page is "Best Match": "Understood. Let's continue finding the best matching products here. What else are you looking for?"
+   - If current page is "Search": "Understood. Let's continue finding the best matching products here. What else are you looking for?"
 
 4. "popup_blocked_message": A helpful message when the popup was blocked, telling them to click the link.
    Should be brief and include "[link]" as a placeholder for the actual link.
@@ -2618,7 +2619,7 @@ Respond ONLY with the message text."""
                     decline_messages = {
                         "solution": "No problem! Please provide your instrument or accessory requirements, and I'll help you identify what you need for your project.",
                         "product_info": "Understood! Feel free to ask me about vendors, product specifications, or procurement strategies from our database.",
-                        "best_match": "Got it! Please describe what you're looking for, and I'll find the best matching products for you."
+                        "search": "Got it! Please describe what you're looking for, and I'll find the best matching products for you."
                     }
                     decline_message = decline_messages.get(current_page, f"No problem! How can I help you with {current_page_name} functionality?")
                     popup_blocked_message = f"The popup was blocked. Please [link] to open the {target_page_name} page."
@@ -2657,8 +2658,8 @@ def route_confirm():
     Request body:
     {
         "user_input": "user's response to confirmation",
-        "current_page": "solution|product_info|best_match",
-        "target_page": "solution|product_info|best_match",
+        "current_page": "solution|product_info|search",
+        "target_page": "solution|product_info|search",
         "original_query": "the original query that triggered the routing"
     }
     
@@ -2689,13 +2690,13 @@ def route_confirm():
         page_names = {
             "solution": "Solution",
             "product_info": "Product Info",
-            "best_match": "Best Match"
+            "search": "Search"
         }
         
         page_descriptions = {
             "solution": "Solution page to identify instruments and accessories",
             "product_info": "Product Info page to query vendor database",
-            "best_match": "Best Match page to find matching products"
+            "search": "Search page to find matching products"
         }
         
         target_page_name = page_names.get(target_page, target_page)
@@ -2780,7 +2781,7 @@ Respond ONLY with the message text, no quotes or formatting."""
             # Determine instruction based on current page
             if current_page == "solution":
                 instruction = "Respond with a variation of: 'No problem! Please provide requirements, and I'll help you identify what you need.'"
-            elif current_page == "best_match":
+            elif current_page == "search":
                 instruction = "Respond with a variation of: 'Understood. Let's continue finding the best matching products here. What else are you looking for?'"
             elif current_page == "product_info":
                 instruction = "Respond with a variation of: 'No problem. Is there anything else you would like to know about ?'"
@@ -4022,7 +4023,7 @@ Validate the outputs and adherence to the output structure.
             logging.info(f"[IDENTIFY_INSTRUMENTS] Identified - instruments: {instrument_count}, accessories: {accessory_count}, total: {total_count}")
             
             # NOTE: Single item routing is handled by route classifier
-            # If user has a single item, route classifier sends to Best Match page
+            # If user has a single item, route classifier sends to Search page
             # identify_instruments only receives requests for Project page (multiple items or explicit project workflow)
             
             # Generate summary message for all items
