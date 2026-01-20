@@ -173,6 +173,7 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 # initialize db
 db.init_app(app)
 
+
 # =========================================================================
 # === HELPER FUNCTIONS AND UTILITIES ===
 # =========================================================================
@@ -2773,6 +2774,7 @@ Respond ONLY with the message text."""
             "requires_routing": False,
             "direct_response": "I'm having trouble processing your request. Please try again."
         }), 500
+
 
 # =========================================================================
 # === ROUTE CONFIRMATION API (LLM-based yes/no classification) ===
@@ -8465,7 +8467,6 @@ def delete_project(project_id):
         return jsonify({"error": "Failed to delete project: " + str(e)}), 500
 
 
-
 # =========================================================================
 # === STANDARDS DOCUMENT API ENDPOINTS ===
 # =========================================================================
@@ -8595,6 +8596,7 @@ def upload_standards_file():
     except Exception as e:
         logging.exception(f"Standards file upload failed: {e}")
         return jsonify({"error": str(e)}), 500
+        
 @app.cli.command("init-db")
 def init_db_command():
     """Creates the database tables and the default admin user."""
