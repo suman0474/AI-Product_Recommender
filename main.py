@@ -648,8 +648,20 @@ def extract_and_store_standards_text_background(file_bytes: bytes, filename: str
 @login_required
 def api_intent():
     """
-    Classifies user intent and determines next workflow step based on input and current session state.
-    Uses LLM for all classification - no hardcoded keywords.
+    Workflow-focused intent classifier for the Solution page multi-step validation flow.
+    
+    NOTE: Greeting, chitchat, questions, and out-of-scope inputs are now handled by 
+    /api/route-classifier. This API focuses ONLY on:
+    - productRequirements: User is providing technical specs/requirements
+    - workflow: User is responding to workflow prompts (yes/no, providing data)
+    
+    INTENT TYPES:
+    -------------
+    1. "productRequirements" - User is providing new industrial requirements
+    2. "workflow" - User is continuing the workflow (yes/no, additional specs)
+    
+    This API manages the workflow step progression:
+    initialInput → awaitMissingInfo → awaitAdditionalAndLatestSpecs → awaitAdvancedSpecs → showSummary → finalAnalysis
     """
     if not components or not components.get("llm"):
         return jsonify({"error": "LLM component not ready."}), 503
@@ -671,10 +683,10 @@ def api_intent():
     # Debug logging to track session state
     logging.info(f"[INTENT] Session state: step={current_step}, intent={current_intent}, user_input='{user_input[:50]}...' if len > 50 else '{user_input}'")
 
-    # === LLM-Only Classification Prompt ===
-    # The LLM handles ALL classification - no hardcoded keywords needed
+    # === Workflow-Focused Classification Prompt ===
+    # Greeting, chitchat, questions, and out-of-scope are handled by route-classifier
     prompt = f"""
-You are Engenie - a smart assistant that classifies user input for a step-based industrial product recommendation workflow.
+You are Engenie - classifying user input for a step-based industrial product validation workflow.
 
 Current workflow context:
 - Current step: {current_step or "None"}
@@ -683,60 +695,39 @@ Current workflow context:
 User message: "{user_input}"
 
 Return ONLY a JSON object with these keys:
-1. "intent": one of ["greeting", "knowledgeQuestion", "productRequirements", "workflow", "chitchat", "other"]
-2. "nextStep": one of ["greeting", "initialInput", "awaitMissingInfo", "awaitAdditionalAndLatestSpecs", "awaitAdvancedSpecs", "showSummary", "finalAnalysis", null]
-3. "resumeWorkflow": true/false (whether to resume current workflow after handling this input)
-4. "stayAtStep": true/false (optional, set to true if user wants to stay at current step to provide more data)
+1. "intent": one of ["productRequirements", "workflow"]
+2. "nextStep": one of ["initialInput", "awaitMissingInfo", "awaitAdditionalAndLatestSpecs", "awaitAdvancedSpecs", "showSummary", "finalAnalysis", null]
+3. "resumeWorkflow": true/false
+4. "stayAtStep": true/false (optional)
 
-**Classification Rules (in PRIORITY ORDER - apply first matching rule):**
+**Classification Rules:**
 
-**PRIORITY 1 - Knowledge Questions (HIGHEST):**
-- If user is ASKING a question (starts with "what", "how", "why", "can you explain", "tell me about", "define", etc.)
-- Intent: "knowledgeQuestion", nextStep: null, resumeWorkflow: true
-- Examples: "what is HART?", "what is the maximum operating temperature?", "how does this work?", "explain differential pressure"
-- Key indicator: User is SEEKING information, not PROVIDING specifications
-
-**PRIORITY 2 - Product Requirements:**
-- If user is PROVIDING/STATING technical specs, product needs, measurements, materials, standards
+**PRIORITY 1 - Product Requirements:**
+- User is PROVIDING/STATING technical specs, product needs, measurements, materials, standards
 - Look for: industrial equipment (transmitter, valve, pump, sensor, meter, gauge, controller, actuator)
 - Look for: specifications (psi, bar, mm, inch, 4-20mA, HART, 316SS, ANSI, ASME, temperature, pressure, flow)
-- Look for: materials (stainless steel, carbon steel, bronze, hastelloy)
-- Look for: standards (ANSI, ASME, DIN, ISO, API, NEMA, IEC, ATEX)
 - Intent: "productRequirements", nextStep: "initialInput"
 - Examples: "I need a pressure transmitter 0-100 psi", "valve with 316SS flanged connection"
-- Note: "I need a pressure transmitter" is productRequirements (STATING need), "what is a pressure transmitter?" is knowledgeQuestion (ASKING)
 
-**PRIORITY 3 - Workflow Continuation (YES/NO responses and confirmations):**
-- If user is responding to workflow prompts with yes/no, confirmations, or providing additional data
+**PRIORITY 2 - Workflow Continuation:**
+- User is responding to workflow prompts with yes/no, confirmations, or providing additional data
 - Determine nextStep based on current step:
 
   **At awaitMissingInfo or awaitMandatory:**
-  - User says YES/proceed/continue/skip/okay → Intent: "workflow", nextStep: "awaitAdditionalAndLatestSpecs", resumeWorkflow: true
-  - User says NO/not yet/want to add → Intent: "workflow", nextStep: "awaitMissingInfo", resumeWorkflow: true, stayAtStep: true
-  - User provides data/specs → Intent: "workflow", nextStep: "awaitMissingInfo", resumeWorkflow: true
+  - YES/proceed/continue/skip/okay → nextStep: "awaitAdditionalAndLatestSpecs"
+  - NO/not yet/want to add → nextStep: "awaitMissingInfo", stayAtStep: true
+  - User provides data/specs → nextStep: "awaitMissingInfo"
 
   **At awaitAdditionalAndLatestSpecs:**
-  - User says YES/add specs → Intent: "workflow", nextStep: "awaitAdvancedSpecs", resumeWorkflow: true
-  - User says NO/skip → Intent: "workflow", nextStep: "showSummary", resumeWorkflow: true
+  - YES/add specs → nextStep: "awaitAdvancedSpecs"
+  - NO/skip → nextStep: "showSummary"
 
   **At awaitAdvancedSpecs:**
-  - User says NO/skip/done → Intent: "workflow", nextStep: "showSummary", resumeWorkflow: true
-  - User selects specs → Intent: "workflow", nextStep: "awaitAdvancedSpecs", resumeWorkflow: true
-
-**PRIORITY 4 - Pure Greeting:**
-- ONLY standalone greetings with NO other content: "hi", "hello", "hey", "good morning"
-- Intent: "greeting", nextStep: "greeting"
-
-**PRIORITY 5 - Chitchat:**
-- Casual conversation unrelated to industrial products: "how are you?", "tell me a joke"
-- Intent: "chitchat", nextStep: null
-
-**PRIORITY 6 - Other:**
-- Everything else that doesn't fit above categories
-- Intent: "other", nextStep: null
+  - NO/skip/done → nextStep: "showSummary"
+  - User selects specs → nextStep: "awaitAdvancedSpecs"
 
 Workflow Steps:
-greeting → initialInput → awaitMissingInfo → awaitAdditionalAndLatestSpecs → awaitAdvancedSpecs → showSummary → finalAnalysis
+initialInput → awaitMissingInfo → awaitAdditionalAndLatestSpecs → awaitAdvancedSpecs → showSummary → finalAnalysis
 
 Respond ONLY with valid JSON, no additional text.
 """
@@ -760,55 +751,43 @@ Respond ONLY with valid JSON, no additional text.
         try:
             result_json = json.loads(cleaned_response)
         except json.JSONDecodeError:
-            # Simple fallback if LLM returns invalid JSON
             logging.warning(f"[INTENT] Failed to parse LLM JSON response: {llm_response[:200]}")
-            result_json = {"intent": "other", "nextStep": None, "resumeWorkflow": False}
+            result_json = {"intent": "workflow", "nextStep": current_step, "resumeWorkflow": True}
 
-        # Validate required fields
-        if "intent" not in result_json:
-            result_json["intent"] = "other"
+        # Validate required fields - default to workflow if not specified
+        if "intent" not in result_json or result_json["intent"] not in ["productRequirements", "workflow"]:
+            result_json["intent"] = "workflow"
         if "nextStep" not in result_json:
-            result_json["nextStep"] = None
+            result_json["nextStep"] = current_step
         if "resumeWorkflow" not in result_json:
-            result_json["resumeWorkflow"] = False
+            result_json["resumeWorkflow"] = True
 
         # === SAFETY CHECK: Prevent incorrect workflow regression ===
-        # If user is already in a mid-workflow step, don't go back to initialInput
-        # unless they're explicitly providing NEW product requirements
         mid_workflow_steps = ["awaitMissingInfo", "awaitAdditionalAndLatestSpecs", "awaitAdvancedSpecs", "showSummary", "finalAnalysis"]
         
         if current_step in mid_workflow_steps:
             if result_json.get("nextStep") == "initialInput" and result_json.get("intent") != "productRequirements":
-                # LLM incorrectly wants to go back to initialInput - keep current step instead
-                logging.warning(f"[INTENT] Prevented workflow regression: LLM wanted initialInput but user is at {current_step}. Keeping current step.")
+                logging.warning(f"[INTENT] Prevented workflow regression: Keeping current step {current_step}")
                 result_json["nextStep"] = current_step
                 result_json["intent"] = "workflow"
                 result_json["resumeWorkflow"] = True
-            elif result_json.get("nextStep") is None and result_json.get("intent") == "workflow":
-                # Workflow intent but no nextStep - stay at current step
+            elif result_json.get("nextStep") is None:
                 result_json["nextStep"] = current_step
 
         # Update session based on classification
-        if result_json.get("intent") == "greeting":
-            session[f'current_step_{search_session_id}'] = 'greeting'
-            session[f'current_intent_{search_session_id}'] = 'greeting'
-        elif result_json.get("intent") == "productRequirements":
+        if result_json.get("intent") == "productRequirements":
             session[f'current_step_{search_session_id}'] = 'initialInput'
             session[f'current_intent_{search_session_id}'] = 'productRequirements'
         elif result_json.get("intent") == "workflow" and result_json.get("nextStep"):
             session[f'current_step_{search_session_id}'] = result_json.get("nextStep")
             session[f'current_intent_{search_session_id}'] = 'workflow'
-        # For knowledge questions, maintain current step for resumption
-        # Don't update session for chitchat or other intents
         
-        # Debug logging
-        logging.info(f"[INTENT] LLM classification: {result_json}")
-
+        logging.info(f"[INTENT] Classification: {result_json}")
         return jsonify(result_json), 200
 
     except Exception as e:
         logging.exception("Intent classification failed.")
-        return jsonify({"error": str(e), "intent": "other", "nextStep": None, "resumeWorkflow": False}), 500
+        return jsonify({"error": str(e), "intent": "workflow", "nextStep": current_step, "resumeWorkflow": True}), 500
 
 @app.route("/api/update_profile", methods=["POST"])
 @login_required
@@ -2335,13 +2314,30 @@ Acknowledge their comment and thank them for taking the time to provide their in
 def route_classifier():
     """
     Unified Route Classifier API - Analyzes user input and determines the best routing page.
-    This API should be called on EVERY user message from ANY page to determine if routing is needed.
+    This API should be called on EVERY user message from ANY page.
     
-    PAGES:
-    ------
-    - "solution" - Solution/Project page for identifying instruments and accessories
-    - "product_info" - Product Info page for querying vendor/product database
-    - "search" - Search page for finding matching products with analysis
+    Handles TWO types of responses:
+    1. NON-ROUTING: Greetings, chitchat, questions, etc. - returns direct_response, stays on current page
+    2. ROUTING: Instrument requirements - may require navigation to different page
+    
+    INPUT CATEGORIES:
+    -----------------
+    NON-ROUTING (stay on current page, return direct_response):
+    - empty_gibberish: Invalid/meaningless input
+    - greeting: "Hi", "Hello", etc.
+    - farewell: "Bye", "Goodbye", etc.
+    - gratitude: "Thanks", "Thank you", etc.
+    - confirmation: "Yes", "No", "Okay" (let page handle)
+    - question_help: "What can you do?", "Help"
+    - chitchat: "How are you?", casual conversation
+    - out_of_scope: Weather, jokes, unrelated topics
+    - complaint: "That's wrong", negative feedback
+    - question_general: Industrial knowledge questions
+    
+    ROUTING (may navigate to different page):
+    - route_solution: Multi-instrument/project requirements
+    - route_product_info: Database/vendor queries
+    - route_search: Single item matching
     
     REQUEST:
     --------
@@ -2354,11 +2350,18 @@ def route_classifier():
     RESPONSE:
     ---------
     {
+        "category": "<input category>",
         "target_page": "solution" | "product_info" | "search",
+        "current_page": "<current page>",
         "requires_confirmation": true/false,
-        "confirmation_message": "<message to show user>" (only if requires_confirmation is true),
-        "original_query": "<user's input to pass to target page>",
-        "reasoning": "<why this classification was made>"
+        "requires_routing": true/false,
+        "direct_response": "<message for non-routing categories>",
+        "confirmation_message": "<routing confirmation prompt>",
+        "opening_message": "<message when user confirms>",
+        "decline_message": "<message when user declines>",
+        "popup_blocked_message": "<message when popup blocked>",
+        "original_query": "<user's input>",
+        "reasoning": "<classification reasoning>"
     }
     """
     if not components or not components.get('llm_flash'):
@@ -2383,84 +2386,157 @@ You are an intelligent route classifier for an industrial automation assistant c
 
 The user is currently on the **{current_page}** page and has provided input.
 
-Analyze the user's input and determine which page is BEST suited to handle their request:
+Your job is to:
+1. Classify the INPUT CATEGORY
+2. Determine if routing to a different page is needed
+3. For non-routing categories, stay on current page and provide appropriate response
 
-PAGES AND THEIR PURPOSES:
--------------------------
-1. **SOLUTION** - The Solution/Project page is for:
-   - MULTIPLE instruments/accessories or complex project requirements
-   - Processing technical specifications for industrial PROCESSES with many components
-   - Creating lists of MULTIPLE required equipment items
-   - Complex projects like "Distillation column with 5 control valves and 3 level transmitters"
-   - Example inputs: "I have a refinery project with multiple control loops", "Need instruments for a water treatment plant"
+=============================================================================
+INPUT CATEGORIES (in priority order - check from top to bottom):
+=============================================================================
 
-2. **PRODUCT_INFO** - The Product Info page is for:
-   - Querying the product/vendor DATABASE
-   - Questions about which vendors offer specific products
-   - Questions about product specifications, models, or availability
-   - Strategy and procurement information
-   - Example inputs: "What vendors have flow meters?", "Tell me about Rosemount products", "What's the strategy for ABB?"
+**CATEGORY 1: EMPTY_GIBBERISH** - Invalid or meaningless input
+- Empty strings, single characters, random letters, symbols only
+- Examples: "", "asdfgh", "???", "...", "test", "abc123", "!@#"
+- Action: Stay on current page, ask for valid input
 
-3. **SEARCH** - The Search page is for:
-   - Finding the best matching products from vendors
-   - Detailed product analysis and comparison
-   - **Standalone accessory requests** (single accessory like "I need a cable" or "I need a junction box")
-   - **SINGLE instrument WITH explicit "no accessories"** (ONLY when user mentions ONE instrument and says "no accessories")
-   - Example inputs: "Find me a junction box", "I need a pressure transmitter without accessories", "I need only a flow meter"
+**CATEGORY 2: GREETING** - Simple greetings
+- "Hi", "Hello", "Hey", "Good morning", "Hi there", "Hello Engenie"
+- Action: Stay on current page, respond with friendly greeting
 
-CLASSIFICATION RULES:
---------------------
-1. MULTIPLE instruments (2+) → SOLUTION (even with "no accessories", count >= 2)
-2. SINGLE instrument WITH "no accessories" phrase → SEARCH (count = 1)
-3. SINGLE instrument WITHOUT "no accessories" phrase → SOLUTION (accessories auto-inferred = count >= 2)
-4. If user input is about QUERYING DATABASE for vendor/product INFO → PRODUCT_INFO
-5. Standalone accessory request (no instrument mentioned) → SEARCH (count = 1)
-6. If user input is a simple greeting, question, or continuation of current context → SAME as current_page
-7. If user input is ambiguous BUT relates to current page's purpose → SAME as current_page
+**CATEGORY 3: FAREWELL** - Goodbyes
+- "Bye", "Goodbye", "Thanks, bye", "See you", "That's all"
+- Action: Stay on current page, respond with farewell
 
-**CRITICAL - COUNT BASED ROUTING:**
-- Count the total number of ITEMS (instruments + accessories)
-- Count = 1 → SEARCH
-- Count >= 2 → SOLUTION
+**CATEGORY 4: GRATITUDE** - Thank you messages
+- "Thanks", "Thank you", "Thanks a lot", "Appreciate it", "That was helpful"
+- Action: Stay on current page, acknowledge and offer more help
 
-**"NO ACCESSORIES" ONLY MATTERS FOR SINGLE INSTRUMENTS:**
-- "I need a PT with no accessories" → 1 instrument + 0 accessories = count 1 → SEARCH
-- "I need a PT and TT with no accessories" → 2 instruments + 0 accessories = count 2 → SOLUTION
+**CATEGORY 5: CONFIRMATION** - Yes/No/OK responses (to previous prompts)
+- "Yes", "No", "Okay", "Sure", "Continue", "Go ahead", "Skip", "Cancel"
+- Action: Stay on current page, let page handle the response
 
-**EXAMPLES:**
-- "I need a pressure transmitter" → SOLUTION (1 PT + auto-inferred accessories = count >= 2)
-- "I need a pressure transmitter without accessories" → SEARCH (just 1 PT, count = 1)
-- "I need only a temperature sensor" → SEARCH (just 1 sensor, count = 1)
-- "I need a control valve, no accessories" → SEARCH (just 1 valve, count = 1)
-- "I need a PT and TT with no accessories" → SOLUTION (2 instruments, count = 2)
-- "I need 2 pressure transmitters" → SOLUTION (2 instruments, count = 2)
-- "I need a pressure transmitter and a flow meter" → SOLUTION (2 instruments + accessories)
-- "I need a junction box" → SEARCH (standalone accessory, count = 1)
-- "I need mounting brackets" → SEARCH (standalone accessory, count = 1)
-- "I have a project with control instruments" → SOLUTION (complex project)
+**CATEGORY 6: QUESTION_HELP** - Questions about how to use the app
+- "What can you do?", "How do I use this?", "Help", "Show features"
+- Action: Stay on current page, explain app capabilities
 
-IMPORTANT - PREFER CURRENT PAGE:
---------------------------------
-- ALWAYS prefer to keep the user on their current page unless the input is CLEARLY better suited for a different page
-- If there's ANY reasonable way to handle the input on the current page, stay on current page
-- Only suggest routing when the input is COMPLETELY INCOMPATIBLE with the current page
+**CATEGORY 7: CHITCHAT** - Casual conversation (still acceptable)
+- "How are you?", "Are you a robot?", "Who made you?", "What's your name?"
+- Action: Stay on current page, friendly response + redirect
 
-SPECIAL CASES:
--------------
-- Greetings like "hi", "hello" → Stay on current page (no confirmation needed)
-- Follow-up questions in context of current page → Stay on current page
-- Confirmations like "yes", "no", "okay" → Stay on current page (these are responses to the current page)
+**CATEGORY 8: OUT_OF_SCOPE** - Completely irrelevant to industrial automation
+- Weather, jokes, politics, entertainment, recipes, general knowledge unrelated to industry
+- Examples: "What's the weather?", "Tell me a joke", "Who is the president?", "Write a poem"
+- Action: Stay on current page, politely decline + redirect to industrial automation
+
+**CATEGORY 9: COMPLAINT** - Negative feedback about responses
+- "That's wrong", "This isn't helpful", "You're not helping", "Try again"
+- Action: Stay on current page, apologize and ask for clarification
+
+**CATEGORY 10: QUESTION_GENERAL** - General/conceptual questions about industrial concepts
+- Educational questions that can be answered from GENERAL KNOWLEDGE (no database needed)
+- Questions about CONCEPTS, DEFINITIONS, HOW THINGS WORK, PRINCIPLES
+- NO vendor names, NO "what vendors", NO "which products", NO "tell me about [specific product]"
+- Examples:
+  - "What is a pressure transmitter?" (concept definition)
+  - "How does HART protocol work?" (how it works)
+  - "Explain 4-20mA signaling" (explanation)
+  - "What's the difference between DP and GP?" (concept comparison)
+  - "Why use stainless steel in instruments?" (principle)
+  - "What is SIL rating?" (definition)
+- Action: Stay on current page, answer using LLM knowledge
+
+**DISTINGUISH question_general vs route_product_info:**
+- "What is a pressure transmitter?" → QUESTION_GENERAL (concept)
+- "What vendors have pressure transmitters?" → ROUTE_PRODUCT_INFO (database query)
+- "How does a flow meter work?" → QUESTION_GENERAL (how it works)
+- "Which flow meters does Emerson offer?" → ROUTE_PRODUCT_INFO (vendor-specific)
+- "Explain HART protocol" → QUESTION_GENERAL (education)
+- "What products support HART?" → ROUTE_PRODUCT_INFO (database lookup)
+
+**CATEGORY 11: ROUTE_SOLUTION** - Multi-instrument/project requirements
+- MULTIPLE instruments (2+), complex projects, process requirements
+- Examples: "I need 5 control valves", "Refinery project with instruments"
+- Action: Route to SOLUTION page if not already there
+
+**CATEGORY 12: ROUTE_PRODUCT_INFO** - Database/vendor/product queries
+- Questions that require DATABASE LOOKUP (not general knowledge)
+- TRIGGER WORDS: "vendors", "which vendors", "what vendors", "tell me about [vendor]", 
+  "products from", "[vendor name] products", "strategy", "procurement", "available", "offer"
+- Questions about SPECIFIC VENDORS or their product offerings
+- Questions about what's IN YOUR DATABASE
+- Examples:
+  - "What vendors have flow meters?" (database query)
+  - "Tell me about Rosemount products" (vendor-specific)
+  - "What's the strategy for ABB?" (strategy lookup)
+  - "Which companies make pressure transmitters?" (vendor list)
+  - "Does Honeywell have temperature sensors?" (availability)
+  - "Compare Emerson vs Yokogawa offerings" (vendor comparison from DB)
+  - "List all vendors in database" (database query)
+- Action: Route to PRODUCT_INFO page if not already there
+
+**CATEGORY 13: ROUTE_SEARCH** - Single item matching
+- SINGLE instrument with "no accessories", standalone accessory
+- Examples: "I need a pressure transmitter without accessories", "Find a junction box"
+- Action: Route to SEARCH page if not already there
+
+=============================================================================
+ROUTING RULES:
+=============================================================================
+1. MULTIPLE instruments (2+) → SOLUTION (even with "no accessories")
+2. SINGLE instrument WITH "no accessories" → SEARCH
+3. SINGLE instrument WITHOUT "no accessories" → SOLUTION (accessories auto-inferred)
+4. Querying DATABASE for vendor/product INFO → PRODUCT_INFO
+5. Standalone accessory (no instrument) → SEARCH
+
+**CRITICAL - PREFER CURRENT PAGE:**
+- If input relates to current page's purpose, STAY on current page
+- Only route when input is COMPLETELY INCOMPATIBLE with current page
+
+=============================================================================
+RESPONSE FORMAT:
+=============================================================================
+Return a JSON object with these fields:
+
+{{
+  "category": "<category name from above>",
+  "target_page": "<solution|product_info|search>",
+  "requires_routing": <true if routing to different page, false otherwise>,
+  "direct_response": "<response message for non-routing categories, empty string if routing>",
+  "reasoning": "<brief explanation>"
+}}
+
+**RESPONSE GUIDELINES FOR EACH CATEGORY:**
+(Generate a response based on the user's actual input, not a fixed template)
+
+- EMPTY_GIBBERISH: Politely ask the user to provide a valid input. Mention examples of what they can ask.
+
+- GREETING: Respond warmly to their greeting. Introduce yourself as Engenie, an industrial automation assistant. Briefly mention you can help with instruments, vendors, and product questions. Ask how you can help.
+
+- FAREWELL: Respond warmly to their goodbye. Thank them for using Engenie. Invite them to return anytime.
+
+- GRATITUDE: Acknowledge their thanks warmly. Ask if there's anything else you can help with regarding instruments, vendors, or their project.
+
+- CONFIRMATION: Return an empty string - let the page workflow handle yes/no responses.
+
+- QUESTION_HELP: Explain what Engenie can do - identify instruments (Solution page), find matching products (Search page), query vendor database (Product Info page). Keep it helpful and conversational.
+
+- CHITCHAT: Respond in a friendly, conversational way to their casual question. Always redirect back to how you can help with industrial automation needs.
+
+- OUT_OF_SCOPE: Politely explain that the topic is outside your expertise. You specialize in industrial automation (transmitters, valves, sensors, vendor strategies). Redirect them to ask about industrial equipment.
+
+- COMPLAINT: Apologize sincerely. Ask them to rephrase or provide more details so you can give accurate information.
+
+- QUESTION_GENERAL: GENERATE A COMPLETE, HELPFUL ANSWER to their industrial/technical question.
+  - Be informative and educational (2-4 sentences)
+  - Provide accurate technical information
+  - Use a friendly, professional tone
+  - Offer to help further if needed
 
 User's Current Page: {current_page}
 User Input: "{user_input}"
 
-Respond with ONLY a JSON object in this exact format:
-{{
-  "target_page": "<solution|product_info|search>",
-  "reasoning": "<brief explanation of why this page is best suited>"
-}}
-
-No additional text or explanation outside the JSON.
+Respond with ONLY the JSON object, no additional text.
 """
         
         classification_chain = ChatPromptTemplate.from_template(classification_prompt) | components['llm_flash'] | StrOutputParser()
@@ -2481,21 +2557,68 @@ No additional text or explanation outside the JSON.
         
         try:
             result = json.loads(cleaned_response)
+            category = result.get("category", "").lower().strip()
             target_page = result.get("target_page", current_page).lower().strip()
+            requires_routing = result.get("requires_routing", False)
+            direct_response = result.get("direct_response", "")
             reasoning = result.get("reasoning", "")
             
             # Validate target_page
             if target_page not in ["solution", "product_info", "search"]:
                 target_page = current_page
+            
+            # List of non-routing categories (user stays on current page)
+            non_routing_categories = [
+                "empty_gibberish", "greeting", "farewell", "gratitude", 
+                "confirmation", "question_help", "chitchat", "out_of_scope", 
+                "complaint", "question_general"
+            ]
+            
+            # If category is non-routing, always stay on current page
+            if category in non_routing_categories:
+                requires_routing = False
+                target_page = current_page
                 
         except Exception as e:
             logging.warning(f"[ROUTE_CLASSIFIER] Failed to parse response, staying on current page: {e}")
+            category = "unknown"
             target_page = current_page
+            requires_routing = False
+            direct_response = ""
             reasoning = "Classification parsing failed, staying on current page"
         
-        logging.info(f"[ROUTE_CLASSIFIER] Target: {target_page}, Current: {current_page}, Reasoning: {reasoning}")
+        logging.info(f"[ROUTE_CLASSIFIER] Category: {category}, Target: {target_page}, Current: {current_page}, Requires Routing: {requires_routing}")
         
-        # Determine if confirmation is needed (only if routing to a DIFFERENT page)
+        # =========================================================================
+        # NON-ROUTING CATEGORIES: Return direct response without navigation
+        # =========================================================================
+        non_routing_categories = [
+            "empty_gibberish", "greeting", "farewell", "gratitude", 
+            "confirmation", "question_help", "chitchat", "out_of_scope", 
+            "complaint", "question_general"
+        ]
+        
+        if category in non_routing_categories:
+            logging.info(f"[ROUTE_CLASSIFIER] Non-routing category '{category}', returning direct response")
+            return jsonify({
+                "category": category,
+                "target_page": current_page,  # Stay on current page
+                "current_page": current_page,
+                "requires_confirmation": False,
+                "requires_routing": False,
+                "direct_response": direct_response,
+                "confirmation_message": "",
+                "opening_message": "",
+                "decline_message": "",
+                "popup_blocked_message": "",
+                "original_query": user_input,
+                "reasoning": reasoning
+            }), 200
+        
+        # =========================================================================
+        # ROUTING CATEGORIES: Determine if confirmation is needed
+        # =========================================================================
+        # Only need confirmation if routing to a DIFFERENT page
         requires_confirmation = target_page != current_page
         confirmation_message = ""
         opening_message = ""
@@ -2625,9 +2748,12 @@ Respond ONLY with the message text."""
                     popup_blocked_message = f"The popup was blocked. Please [link] to open the {target_page_name} page."
         
         return jsonify({
+            "category": category,
             "target_page": target_page,
             "current_page": current_page,
             "requires_confirmation": requires_confirmation,
+            "requires_routing": requires_confirmation,  # True if routing to different page
+            "direct_response": "",  # Empty for routing categories
             "confirmation_message": confirmation_message if requires_confirmation else "",
             "opening_message": opening_message if requires_confirmation else "",
             "decline_message": decline_message if requires_confirmation else "",
@@ -2640,8 +2766,12 @@ Respond ONLY with the message text."""
         logging.exception("[ROUTE_CLASSIFIER] Classification failed")
         return jsonify({
             "error": "Classification failed: " + str(e),
+            "category": "error",
             "target_page": current_page,
-            "requires_confirmation": False
+            "current_page": current_page,
+            "requires_confirmation": False,
+            "requires_routing": False,
+            "direct_response": "I'm having trouble processing your request. Please try again."
         }), 500
 
 
@@ -2828,20 +2958,21 @@ Respond ONLY with the message text, no quotes or formatting."""
 @login_required
 def project_intent():
     """
-    Central intent classification API that analyzes user input and determines
-    what the user wants to do. Returns the classified intent type so the frontend
-    can call the appropriate API.
+    Solution page intent classifier for instrument identification and modification.
+    
+    NOTE: Greeting, questions, product_info queries, and unrelated content are now handled by 
+    /api/route-classifier. This API focuses ONLY on:
+    - requirements: User is providing NEW industrial requirements
+    - modification: User wants to modify existing instruments/accessories
+    - confirm_search: User confirms to search (single item flow)
+    - add_more: User wants to add more requirements (single item flow)
     
     INTENT TYPES:
     -------------
-    1. "greeting" - User is greeting the assistant
-    2. "requirements" - User is providing new industrial requirements
-    3. "modification" - User wants to modify existing instruments/accessories
-    4. "question" - User is asking a question
-    5. "unrelated" - Content is not related to industrial automation
-    6. "confirm_search" - User confirms to search (single item flow)
-    7. "add_more" - User wants to add more requirements (single item flow)
-    8. "product_info" - User is asking about product information/database (vendors, specs, etc.)
+    1. "requirements" - User is providing new industrial requirements
+    2. "modification" - User wants to modify existing instruments/accessories
+    3. "confirm_search" - User confirms to search (single item flow)
+    4. "add_more" - User wants to add more (single item flow)
     
     REQUEST:
     --------
@@ -2859,7 +2990,7 @@ def project_intent():
         "intent": "<intent_type>",
         "confidence": "high|medium|low",
         "reasoning": "<explanation>",
-        "should_call": "<api_to_call>"  // "identify-instruments", "modify-instruments", "project-response", or null
+        "should_call": "<api_to_call>"  // "identify-instruments", "modify-instruments", or null
     }
     """
     if not components or not components.get('llm_flash'):
@@ -3068,37 +3199,15 @@ Respond ONLY with the message text, no JSON.
         # =====================================================
         # STANDARD INTENT CLASSIFICATION
         # =====================================================
-        
-        # Pre-classification heuristics for obvious cases
-        user_input_lower = user_input.lower()
-        
-        # Strong indicators of unrelated content
-        unrelated_indicators = [
-            'from:', 'to:', 'subject:', 'date:',
-            'congratulations for the selection', 'job offer', 'recruitment',
-            'campus placement', 'hr department', 'hiring', 'interview process',
-            'provisionally selected', 'offer letter', 'employment application',
-            'dear sir', 'dear madam', 'forwarded message',
-            'training and placement officer', 'campus recruitment'
-        ]
-        
-        unrelated_count = sum(1 for indicator in unrelated_indicators if indicator in user_input_lower)
-        
-        if unrelated_count >= 2:
-            logging.info(f"[PROJECT_INTENT] Pre-classification: UNRELATED (found {unrelated_count} indicators)")
-            return jsonify({
-                "intent": "unrelated",
-                "confidence": "high",
-                "reasoning": f"Contains {unrelated_count} strong indicators of non-industrial content",
-                "should_call": "project-response"
-            }), 200
+        # NOTE: Greeting, question, product_info, and unrelated are now handled by route-classifier.
+        # This API only classifies: requirements vs modification
         
         # Build dynamic classification prompt
         modification_category = ""
         modification_types = ""
         if has_existing_data:
             modification_category = """
-5. "modification" - If the user wants to MODIFY, ADD TO, or REMOVE FROM the existing list of instruments/accessories.
+2. "modification" - If the user wants to MODIFY, ADD TO, or REMOVE FROM the existing list of instruments/accessories.
    This includes:
    - Adding new items: "Add a control valve", "I also need a flow meter", "Include another sensor"
    - Removing items: "Remove the temperature transmitter", "Delete the flow meter", "Take out the valve"
@@ -3116,71 +3225,29 @@ Respond ONLY with the message text, no JSON.
             modification_types = "|modification"
         
         classification_prompt = f"""
-You are an intelligent classifier for an industrial automation and instrumentation assistant named "Engenie".
+You are an intelligent classifier for an industrial automation assistant named "Engenie".
 
-{"**CONTEXT**: The user already has an existing list of instruments and accessories identified. Consider if they want to modify this existing list." if has_existing_data else ""}
+{f"**CONTEXT**: The user already has an existing list of instruments and accessories. Consider if they want to modify this existing list." if has_existing_data else ""}
 
 Analyze the user's input and classify it into ONE of these categories:
 
-1. "greeting" - ONLY if the user is directly greeting YOU (the assistant) with a simple, standalone message like:
-   ✓ "Hi"
-   ✓ "Hello"
-   ✓ "Good morning"
-   ✓ "Hey there"
-   ✗ NOT formal email greetings like "Dear Sir/Madam" or "Greetings from Company X"
-   ✗ NOT emails that contain greetings to other people
-   ✗ NOT documents that happen to contain the word "greeting"
-   
-   **KEY RULE**: If the input is longer than 20 words OR contains email headers/signatures/formal content, it is NOT a greeting.
-
-2. "requirements" - If the user is providing NEW/FRESH technical requirements, specifications, or asking to identify instruments/equipment for an industrial process. This includes:
+1. "requirements" - If the user is providing NEW/FRESH technical requirements, specifications, or asking to identify instruments/equipment for an industrial process. This includes:
    - Process control requirements (pressure, temperature, flow, level measurements)
    - Industrial equipment specifications (valves, transmitters, controllers, actuators)
    - Automation system requirements
    - Instrumentation needs for industrial processes
    - Technical specifications with measurements, ranges, materials, standards (ANSI, ASME, DIN, ISO, API)
-   {"**NOTE**: Only use 'requirements' if it's a COMPLETELY NEW set of requirements, not changes to existing items." if has_existing_data else ""}
-
-3. "question" - If the user is asking a general question about industrial topics, processes, or how something works (e.g., "How does HART protocol work?", "Explain PID control")
-
-4. "product_info" - If the user is asking about PRODUCT DATABASE information, vendors, or product specifications.
-   This includes:
-   - Questions about available vendors: "What vendors do you have?", "Which vendors have pressure transmitters?"
-   - Questions about product models: "Tell me about Rosemount products", "What models does ABB offer?"
-   - Questions about specifications in the database: "What specs are available for flow meters?"
-   - Questions about procurement/strategy: "What's the strategy for Emerson?"
-   - Any question seeking information FROM YOUR DATABASE about products, vendors, or specifications
-   
-   **KEY INDICATORS OF "product_info"**:
-   - Mentions specific vendor names (Rosemount, ABB, Honeywell, Emerson, Siemens, Yokogawa, etc.)
-   - Asks "what vendors", "which vendors", "list vendors", "show products"
-   - Asks about product specifications, models, or availability
-   - Seeks information from the product database
-
-5. "unrelated" - If the content is NOT related to industrial automation, instrumentation, or process control. Examples:
-   - Job offers, recruitment emails, selection letters
-   - HR communications, campus recruitment emails
-   - Personal emails or messages to other people
-   - General documents unrelated to industrial processes
-   
-   **IMPORTANT INDICATORS OF "UNRELATED"**:
-   - Contains email headers (From:, To:, Subject:, Date:)
-   - Mentions job selection, recruitment, HR, campus placement
-   - Addressed to other people (not to you, the assistant)
+   {f"**NOTE**: Only use 'requirements' if it's a COMPLETELY NEW set of requirements, not changes to existing items." if has_existing_data else ""}
 {modification_category}
-**CRITICAL CLASSIFICATION RULES**:
-1. If input contains "From:", "To:", "Subject:", "Date:" → Almost always "unrelated"
-2. If input mentions job/recruitment/selection/hiring → "unrelated"
-3. If input is addressed to people other than you (the assistant) → "unrelated"
-4. Only classify as "greeting" if it's a SHORT, DIRECT greeting to YOU
-5. If user asks about VENDORS, PRODUCT DATABASE, or PRODUCT SPECS → "product_info"
-{"6. If user wants to ADD, REMOVE, CHANGE, or UPDATE existing items → 'modification'" if has_existing_data else ""}
+**CLASSIFICATION RULES**:
+1. If user provides industrial equipment specifications/requirements → "requirements"
+{f"2. If user wants to ADD, REMOVE, CHANGE, or UPDATE existing items → 'modification'" if has_existing_data else ""}
 
 User Input: {{user_input}}
 
 Respond with ONLY a JSON object in this exact format:
 {{{{
-  "type": "<greeting|requirements|question|product_info|unrelated{modification_types}>",
+  "type": "<requirements{modification_types}>",
   "confidence": "<high|medium|low>",
   "reasoning": "<brief explanation of why you chose this classification>"
 }}}}
@@ -3207,6 +3274,10 @@ No additional text or explanation outside the JSON.
             confidence = classification.get("confidence", "medium").lower()
             reasoning = classification.get("reasoning", "")
             
+            # Validate input_type is one of the supported types
+            if input_type not in ["requirements", "modification"]:
+                input_type = "requirements"  # Default to requirements
+            
             logging.info(f"[PROJECT_INTENT] Classified as '{input_type}' (confidence: {confidence})")
             logging.info(f"[PROJECT_INTENT] Reasoning: {reasoning}")
             
@@ -3216,57 +3287,13 @@ No additional text or explanation outside the JSON.
             confidence = "low"
             reasoning = "Classification parsing failed, defaulting to requirements"
         
-        # Map intent to API call
+        # Map intent to API call (simplified - only requirements and modification)
         api_mapping = {
-            "greeting": "project-response",
             "requirements": "identify-instruments",
-            "modification": "modify-instruments",
-            "question": "project-response",
-            "unrelated": "project-response",
-            "product_info": None  # Handled by frontend - navigates to Product Info page
+            "modification": "modify-instruments"
         }
         
-        should_call = api_mapping.get(input_type, "project-response")
-        
-        # Special handling for product_info - return a confirmation prompt
-        if input_type == "product_info":
-            logging.info("[PROJECT_INTENT] Product info question detected - returning confirmation prompt")
-            
-            # Generate confirmation message using LLM
-            try:
-                confirm_prompt = f"""
-You are Engenie - a friendly industrial automation assistant.
-
-The user asked a question about products, vendors, or specifications: "{user_input}"
-
-This question should be answered by our Product Information system which has access to our vendor database.
-
-Generate a brief confirmation message (2-3 sentences) that:
-1. Acknowledges their question about products/vendors
-2. Explains you'll open the Product Info page to answer this
-3. Asks for confirmation
-
-Example: "I see you're asking about product information. I can open our Product Info page which has access to our vendor database to answer this better. Would you like me to do that?"
-
-Respond ONLY with the message text, no JSON.
-"""
-                # Use HumanMessage directly to avoid template parsing issues
-                from langchain_core.messages import HumanMessage
-                confirm_response = components['llm'].invoke([HumanMessage(content=confirm_prompt)])
-                confirm_message = confirm_response.content
-            except Exception as e:
-                logging.warning(f"Failed to generate product info confirmation message: {e}")
-                confirm_message = "I see you're asking about product information. Would you like me to open the Product Info page where I can answer questions about vendors, products, and specifications from our database? (Yes/No)"
-            
-            return jsonify({
-                "intent": "product_info",
-                "confidence": confidence,
-                "reasoning": reasoning,
-                "should_call": None,
-                "awaiting_product_info_confirmation": True,
-                "message": confirm_message.strip(),
-                "original_query": user_input
-            }), 200
+        should_call = api_mapping.get(input_type, "identify-instruments")
         
         return jsonify({
             "intent": input_type,
@@ -3287,14 +3314,18 @@ Respond ONLY with the message text, no JSON.
 
 
 # =========================================================================
-# === PROJECT RESPONSE API (Greetings, Questions, Unrelated) ===
+# === PROJECT RESPONSE API (DEPRECATED - Use route-classifier instead) ===
 # =========================================================================
 @app.route("/api/project-response", methods=["POST"])
 @login_required
 def project_response():
     """
-    Handles non-instrument related responses: greetings, questions, and unrelated content.
-    This API is called after project-intent classifies the input.
+    DEPRECATED: This API is deprecated. Greetings, questions, and unrelated content
+    are now handled directly by /api/route-classifier with direct_response.
+    
+    This API is kept for backward compatibility with legacy frontend code.
+    New code should use /api/route-classifier which returns direct_response for
+    non-routing categories (greeting, question_general, chitchat, out_of_scope, etc.).
     
     REQUEST:
     --------
@@ -6808,6 +6839,12 @@ def api_validate():
             "schema": json.dumps(initial_schema, indent=2),
             "format_instructions": components['validation_format_instructions']
         })
+        
+        # Guard against LLM returning None/null
+        if temp_validation_result is None:
+            logging.warning("[VALIDATE] Wrapper: temp_validation_result is None from LLM. Defaulting product_type.")
+            temp_validation_result = {}
+
         detected_type = temp_validation_result.get('product_type', 'UnknownProduct')
         
         specific_schema = load_requirements_schema(detected_type)
@@ -6830,6 +6867,10 @@ def api_validate():
             "schema": json.dumps(specific_schema, indent=2),
             "format_instructions": components['validation_format_instructions']
         })
+
+        if validation_result is None:
+            logging.warning("[VALIDATE] Wrapper: validation_result is None from LLM. Using empty result.")
+            validation_result = {}
 
         cleaned_provided_reqs = clean_empty_values(validation_result.get("provided_requirements", {}))
 
