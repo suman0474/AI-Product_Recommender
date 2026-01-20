@@ -2369,8 +2369,8 @@ def route_classifier():
 
     try:
         data = request.get_json(force=True)
-        user_input = data.get("user_input", "").strip()
-        current_page = data.get("current_page", "solution").lower().strip()
+        user_input = (data.get("user_input") or "").strip()
+        current_page = (data.get("current_page") or "solution").lower().strip()
         
         if not user_input:
             return jsonify({"error": "user_input is required"}), 400
@@ -2557,8 +2557,8 @@ Respond with ONLY the JSON object, no additional text.
         
         try:
             result = json.loads(cleaned_response)
-            category = result.get("category", "").lower().strip()
-            target_page = result.get("target_page", current_page).lower().strip()
+            category = (result.get("category") or "").lower().strip()
+            target_page = (result.get("target_page") or current_page).lower().strip()
             requires_routing = result.get("requires_routing", False)
             direct_response = result.get("direct_response", "")
             reasoning = result.get("reasoning", "")
@@ -2773,7 +2773,6 @@ Respond ONLY with the message text."""
             "requires_routing": False,
             "direct_response": "I'm having trouble processing your request. Please try again."
         }), 500
-
 
 # =========================================================================
 # === ROUTE CONFIRMATION API (LLM-based yes/no classification) ===
