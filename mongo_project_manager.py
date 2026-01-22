@@ -71,6 +71,7 @@ class MongoProjectManager:
                 'workflow_position': project_data.get('workflow_position', {}),
                 'user_interactions': project_data.get('user_interactions', {}),
                 'embedded_media': project_data.get('embedded_media', {}),
+                'project_instance_id': project_data.get('project_instance_id', ''),  # Save project instance ID for session isolation
                 'project_metadata': {
                     'schema_version': '2.0',
                     'storage_format': 'gridfs',
