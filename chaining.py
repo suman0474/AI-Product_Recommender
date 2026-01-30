@@ -404,11 +404,13 @@ def load_vendors_and_filter():
         # PRIORITY 1: Check for user-specified vendors from input
         # These vendors were extracted by identify_instruments() or validation
         # ===========================================================================
+        from flask import session
+        search_session_id = input_dict.get("search_session_id", "default")
+        
         user_specified_vendors = input_dict.get("specified_vendors", [])
         
-        # Also check session for specified vendors (from Project page workflow)
-        from flask import session
-        session_specified_vendors = session.get('specified_vendors', [])
+        # Also check session for specified vendors (isolated by ID)
+        session_specified_vendors = session.get(f'specified_vendors_{search_session_id}', [])
         if session_specified_vendors and not user_specified_vendors:
             user_specified_vendors = session_specified_vendors
             logging.info(f"[VENDOR_PRIORITY] Retrieved user-specified vendors from session: {user_specified_vendors}")
@@ -416,23 +418,28 @@ def load_vendors_and_filter():
         # ===========================================================================
         # PRIORITY 2: Check for strategy-based CSV vendor filter
         # ===========================================================================
-        csv_vendor_filter = session.get('csv_vendor_filter', {})
-        strategy_vendors = csv_vendor_filter.get('vendor_names', [])
+        strategy_vendors = []
         
-        # If no session filter, check background task results from vendor_search_tasks
+        # Check session for targeted CSV filter data (isolated by ID)
+        csv_filter = session.get(f'csv_vendor_filter_{search_session_id}')
+        if csv_filter and (csv_filter.get('product_type') == detected_product_type or csv_filter.get('detected_product') == detected_product_type):
+            strategy_vendors = csv_filter.get('vendor_names', [])
+            logging.info(f"[VENDOR_PRIORITY] Retrieved strategy vendors from session (ID: {search_session_id}): {len(strategy_vendors)} vendors")
+            
         if not strategy_vendors:
             try:
                 from main import vendor_search_tasks, vendor_search_lock
                 user_id = session.get('user_id')
                 if user_id:
+                    task_key = f"{user_id}_{search_session_id}"
                     with vendor_search_lock:
-                        task = vendor_search_tasks.get(user_id)
+                        task = vendor_search_tasks.get(task_key)
                     if task and task.get('status') == 'completed' and task.get('csv_vendor_filter'):
                         csv_vendor_filter = task['csv_vendor_filter']
                         strategy_vendors = csv_vendor_filter.get('vendor_names', [])
                         # Also store in session for future use
-                        session['csv_vendor_filter'] = csv_vendor_filter
-                        logging.info(f"[VENDOR_PRIORITY] Retrieved strategy vendors from background task: {len(strategy_vendors)} vendors")
+                        session[f'csv_vendor_filter_{search_session_id}'] = csv_vendor_filter
+                        logging.info(f"[VENDOR_PRIORITY] Retrieved strategy vendors from background task (ID: {search_session_id}): {len(strategy_vendors)} vendors")
             except ImportError:
                 logging.warning("[VENDOR_PRIORITY] Could not import vendor_search_tasks from main")
             except Exception as e:
@@ -497,22 +504,30 @@ def load_vendors_and_filter():
         logging.info(f"[VENDOR_PRIORITY] Final vendors (priority={priority_used}): {final_vendors}")
         
         # ===========================================================================
-        # RETRIEVE MODEL FAMILIES from session (if specified by user)
+        # MODEL FAMILIES: Extract specified_model_families from input or session (isolated by ID)
         # ===========================================================================
         user_specified_model_families = input_dict.get("specified_model_families", [])
-        session_model_families = session.get('specified_model_families', [])
+        session_model_families = session.get(f'specified_model_families_{search_session_id}', [])
         if session_model_families and not user_specified_model_families:
             user_specified_model_families = session_model_families
-            logging.info(f"[MODEL_FAMILY] Retrieved user-specified model families from session: {user_specified_model_families}")
-        
-        if user_specified_model_families:
-            logging.info(f"[MODEL_FAMILY] Will filter products to model families: {user_specified_model_families}")
+            
+        applicable_standards = input_dict.get("applicable_standards", [])
+        session_standards = session.get(f'applicable_standards_{search_session_id}', [])
+        if session_standards and not applicable_standards:
+            applicable_standards = session_standards
+            
+        standards_specs = input_dict.get("standards_specs", {})
+        session_specs = session.get(f'standards_specs_{search_session_id}', {})
+        if session_specs and not standards_specs:
+            standards_specs = session_specs
         
         enriched = dict(input_dict)
         enriched["available_vendors"] = all_db_vendors
         enriched["filtered_vendors"] = final_vendors
         enriched["vendor_priority_used"] = priority_used
         enriched["specified_model_families"] = user_specified_model_families  # Pass to product loading
+        enriched["applicable_standards"] = applicable_standards
+        enriched["standards_specs"] = standards_specs
         return enriched
     
     return RunnableLambda(_get_filtered_vendors)

@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 
 
-class ProductInfoRAG:
+class ChatRAG:
     """
     RAG system for product information queries.
     
@@ -1211,10 +1211,10 @@ ANSWER:"""
 
 
 # Global instance
-product_info_rag = ProductInfoRAG()
+chat_rag = ChatRAG()
 
 
-def query_product_info(user_query: str, session_id: str = "default", user_id: Optional[int] = None) -> Dict[str, Any]:
+def query_chat(user_query: str, session_id: str = "default", user_id: Optional[int] = None) -> Dict[str, Any]:
     """
     Convenience function for querying product info.
     
@@ -1223,16 +1223,16 @@ def query_product_info(user_query: str, session_id: str = "default", user_id: Op
         session_id: Session identifier
         user_id: Optional user ID to include user-specific standards and strategy context
     """
-    return product_info_rag.query(user_query, session_id, user_id)
+    return chat_rag.query(user_query, session_id, user_id)
 
 
 def clear_pending_query(session_id: str = "default"):
     """Clear pending query for session"""
-    product_info_rag.clear_pending(session_id)
+    chat_rag.clear_pending(session_id)
 
 
 def clear_session_memory(session_id: str = "default"):
     """Clear conversation memory for a session (useful on logout or new conversation)"""
-    product_info_rag.clear_conversation_memory(session_id)
-    product_info_rag.clear_pending(session_id)
+    chat_rag.clear_conversation_memory(session_id)
+    chat_rag.clear_pending(session_id)
 

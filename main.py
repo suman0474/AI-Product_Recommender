@@ -1,178 +1,116 @@
 import asyncio
 from datetime import datetime
+from flask import Flask, request, jsonify, session, send_file
+from flask_cors import CORS
+from flask_sqlalchemy import SQLAlchemy
 import json
 import logging
 import re
 import os
 import urllib.parse
+from werkzeug.utils import secure_filename
+import requests
+from io import BytesIO
+from serpapi import GoogleSearch
 import threading
 import csv
-import tempfile
-from io import BytesIO
-from functools import wraps
-from unittest import result
- 
-# =========================
-# Flask & Extensions
-# =========================
-from flask import (
-    Flask,
-    request,
-    jsonify,
-    session,
-    send_file
-)
-from flask_cors import CORS
-from flask_sqlalchemy import SQLAlchemy
-from flask_session import Session
-from werkzeug.utils import secure_filename
- 
-# =========================
-# Environment & Config
-# =========================
-from dotenv import load_dotenv
- 
-# =========================
-# External Services & APIs
-# =========================
-import requests
-import redis
-from serpapi import GoogleSearch
-from googleapiclient.discovery import build
- 
-# =========================
-# Fuzzy Matching
-# =========================
 from fuzzywuzzy import fuzz, process
- 
-# =========================
-# Authentication & Logging
-# =========================
+
+from functools import wraps
+from dotenv import load_dotenv
+
+# --- NEW IMPORTS FOR SEARCH FUNCTIONALITY ---
+from googleapiclient.discovery import build
+
+# --- NEW IMPORTS FOR AUTHENTICATION ---
 from auth_models import db, User, Log
 from auth_utils import hash_password, check_password
- 
-# =========================
-# MongoDB & Project Management
-# =========================
+
+# --- MongoDB Project Management ---
 from mongo_project_manager import mongo_project_manager
+
+# --- LLM CHAINING IMPORTS ---
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.messages import HumanMessage
+
+from chaining import setup_langchain_components, create_analysis_chain
+from loading import load_requirements_schema, build_requirements_schema_from_web
+from flask import Flask, session
+from flask_session import Session
+
+# Import latest advanced specifications functionality
+from advanced_parameters import discover_advanced_parameters
+
+# Import MongoDB utilities
+from mongodb_utils import get_schema_from_mongodb, get_json_from_mongodb, MongoDBFileManager, mongodb_file_manager
 from mongodb_config import get_mongodb_connection
-from mongodb_utils import (
-    get_schema_from_mongodb,
-    get_json_from_mongodb,
-    MongoDBFileManager,
-    mongodb_file_manager
-)
 from mongodb_projects import (
     save_project_to_mongodb,
     get_user_projects_from_mongodb,
     get_project_details_from_mongodb,
     delete_project_from_mongodb
 )
- # Import Standard RAG functions
+
+# Import Standard RAG functions
 from standard_rag import (
     extract_and_store_standards_text,
     get_standards_for_category
 )
 
-# =========================
-# LangChain / LLM Pipeline
-# =========================
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.messages import HumanMessage
-
-from chaining import setup_langchain_components, create_analysis_chain
-from loading import (
-    load_requirements_schema,
-    build_requirements_schema_from_web
-)
- 
-# =========================
-# Advanced Parameters
-# =========================
-from advanced_parameters import discover_advanced_parameters
 # Load environment variables
 load_dotenv()
+
 # =========================================================================
 # === FLASK APP CONFIGURATION ===
 # =========================================================================
 app = Flask(__name__, static_folder="static")
-# ----------------------------
-# 1) Base secret + session defaults (use env vars; no hard-coded secrets)
-# ----------------------------
-app.secret_key = os.getenv("SECRET_KEY", "fallback-secret-key-for-development")
-# Detect production environment (Railway or FLASK_ENV=production)
-IS_PRODUCTION = (
-    os.getenv("FLASK_ENV") == "production"
-    or bool(os.getenv("RAILWAY_ENVIRONMENT"))
-    or os.getenv("ENV") == "production"
-)
-# Default sensible session config
-app.config["SESSION_PERMANENT"] = False
-# Session storage: use Redis in production (Railway), filesystem in development
-if IS_PRODUCTION:
-    app.config["SESSION_TYPE"] = "redis"
-    app.config["SESSION_PERMANENT"] = True  # sessions can expire per your session settings
-    redis_url = os.getenv("REDIS_URL")
-    if redis_url:
-        try:
-            app.config["SESSION_REDIS"] = redis.from_url(redis_url)
-        except Exception as e:
-            logging.warning(f"Failed to parse REDIS_URL or connect to Redis: {e}")
-    else:
-        logging.warning("REDIS_URL not found in environment; sessions may not be persistent in production.")
-else:
-    # development
-    app.config["SESSION_TYPE"] = "filesystem"
-    app.config["SESSION_PERMANENT"] = False
-# ----------------------------
-# 2) Cookie flags (critical for cross-site auth)
-# ----------------------------
-# In production we must set SameSite=None and Secure=True so cookies are sent from en-genie -> railway
-if IS_PRODUCTION:
-    app.config["SESSION_COOKIE_SAMESITE"] = "None"
-    app.config["SESSION_COOKIE_SECURE"] = True
-    app.config["SESSION_COOKIE_HTTPONLY"] = True
-else:
-    # Local dev: Lax or None depending on your dev flow; Lax is safer for local debugging
-    app.config["SESSION_COOKIE_SAMESITE"] = os.getenv("DEV_SESSION_COOKIE_SAMESITE", "Lax")
-    app.config["SESSION_COOKIE_SECURE"] = False
-    app.config["SESSION_COOKIE_HTTPONLY"] = True
-# Optional: expose a readable setting for debugging
-logging.info(f"IS_PRODUCTION={IS_PRODUCTION}, SESSION_COOKIE_SAMESITE={app.config.get('SESSION_COOKIE_SAMESITE')}")
-# ----------------------------
-# 3) Initialize server-side session support
-# ----------------------------
-Session(app)
-# ----------------------------
-# 4) Manual CORS handling (after session config)
-# ----------------------------
+
+# Manual CORS handling
+
+# A list of allowed origins for CORS
 allowed_origins = [
-    "https://en-genie.vercel.app",  # Your production frontend
-    "http://localhost:8080",        # Add your specific local dev port if needed
+    "https://ai-product-recommender-ui.vercel.app",  # Your production frontend
+    "https://en-genie.vercel.app",                   # Your new frontend domain
+    "http://localhost:8080",                         # Add your specific local dev port
     "http://localhost:5173",
     "http://localhost:3000"
 ]
-# Make sure supports_credentials=True so cookies are allowed in cross-origin requests
-CORS(
-    app,
-    origins=allowed_origins,
-    supports_credentials=True,
-    allow_headers=["Content-Type", "Authorization"],
-    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    expose_headers=["Content-Type", "Authorization"]
-)
-logging.basicConfig(level=logging.INFO)
-# --- DYNAMIC DATABASE CONFIGURATION (unchanged from your code) ---
-database_url = os.getenv('DATABASE_URL')
-if database_url:
-    app.config['SQLALCHEMY_DATABASE_URI'] = database_url.replace("mysql://", "mysql+pymysql://")
-else:
-    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///users.db'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-# initialize db
-db.init_app(app)
 
+# Dynamically add Vercel preview URLs to allowed_origins
+if os.environ.get("VERCEL") == "1":
+    # Add the production URL
+    prod_url = os.environ.get("VERCEL_URL")
+    if prod_url:
+        allowed_origins.append(f"https://{prod_url}")
+    # Add the preview URL for the current branch
+    branch_url = os.environ.get("VERCEL_BRANCH_URL")
+    if branch_url and branch_url != prod_url:
+        allowed_origins.append(f"https://{branch_url}")
+
+# Replace your old CORS line with this one
+CORS(app, origins=allowed_origins, supports_credentials=True)
+logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO)
+
+if os.getenv('FLASK_ENV') == 'production' or os.getenv('RAILWAY_ENVIRONMENT'):
+    # Production session settings
+    app.config["SESSION_PERMANENT"] = True
+    app.config["SESSION_TYPE"] = "filesystem"
+    app.config["SESSION_FILE_DIR"] = "/tmp/flask_session"
+    app.config["SESSION_COOKIE_SECURE"] = True
+    app.config["SESSION_COOKIE_HTTPONLY"] = True
+    app.config["SESSION_COOKIE_SAMESITE"] = "None"
+else:
+    # Development session settings
+    app.config["SESSION_PERMANENT"] = False
+    app.config["SESSION_TYPE"] = "filesystem" 
+
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///users.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.secret_key = os.getenv('SECRET_KEY', 'fallback-secret-key-for-development')
+Session(app)
+db.init_app(app)
 
 # =========================================================================
 # === HELPER FUNCTIONS AND UTILITIES ===
@@ -216,6 +154,7 @@ except Exception as e:
     logging.error(f"LangChain components initialization failed: {e}")
     components = None
     analysis_chain = None
+    analysis_graph = None
 
 def convert_keys_to_camel_case(obj):
     """Recursively converts dictionary keys from snake_case to camelCase."""
@@ -2337,7 +2276,7 @@ def route_classifier():
     
     ROUTING (may navigate to different page):
     - route_solution: Multi-instrument/project requirements
-    - route_product_info: Database/vendor queries
+    - route_chat: Database/vendor queries
     - route_search: Single item matching
     
     REQUEST:
@@ -2345,14 +2284,14 @@ def route_classifier():
     POST /api/route-classifier
     {
         "user_input": "<user's message>",
-        "current_page": "solution" | "product_info" | "search"
+        "current_page": "solution" | "chat" | "search"
     }
     
     RESPONSE:
     ---------
     {
         "category": "<input category>",
-        "target_page": "solution" | "product_info" | "search",
+        "target_page": "solution" | "chat" | "search",
         "current_page": "<current page>",
         "requires_confirmation": true/false,
         "requires_routing": true/false,
@@ -2376,8 +2315,8 @@ def route_classifier():
         if not user_input:
             return jsonify({"error": "user_input is required"}), 400
         
-        if current_page not in ["solution", "product_info", "search"]:
-            return jsonify({"error": "current_page must be 'solution', 'product_info', or 'search'"}), 400
+        if current_page not in ["solution", "chat", "search"]:
+            return jsonify({"error": "current_page must be 'solution', 'chat', or 'search'"}), 400
         
         logging.info(f"[ROUTE_CLASSIFIER] Input: '{user_input[:100]}...', Current Page: {current_page}")
         
@@ -2396,45 +2335,71 @@ Your job is to:
 INPUT CATEGORIES (in priority order - check from top to bottom):
 =============================================================================
 
-**CATEGORY 1: EMPTY_GIBBERISH** - Invalid or meaningless input
+**CATEGORY 1: ROUTE_SOLUTION** - Multi-instrument/project requirements
+- MULTIPLE instruments (2+), complex projects, process requirements
+- Examples: "I need 5 control valves", "Refinery project with instruments"
+- Action: Route to SOLUTION page if not already there
+
+**CATEGORY 2: ROUTE_CHAT** - Database/vendor/product queries
+- Questions that require DATABASE LOOKUP (not general knowledge)
+- TRIGGER WORDS: "vendors", "which vendors", "what vendors", "tell me about [vendor]",
+  "products from", "[vendor name] products", "strategy", "procurement", "available", "offer"
+- Questions about SPECIFIC VENDORS or their product offerings
+- Questions about what's IN YOUR DATABASE
+- Examples:
+  - "What vendors have flow meters?" (database query)
+  - "Tell me about Rosemount products" (vendor-specific)
+  - "What's the strategy for ABB?" (strategy lookup)
+  - "Which companies make pressure transmitters?" (vendor list)
+  - "Does Honeywell have temperature sensors?" (availability)
+  - "Compare Emerson vs Yokogawa offerings" (vendor comparison from DB)
+  - "List all vendors in database" (database query)
+- Action: Route to CHAT page if not already there
+
+**CATEGORY 3: ROUTE_SEARCH** - Single item matching
+- SINGLE instrument with "no accessories", standalone accessory
+- Examples: "I need a pressure transmitter without accessories", "Find a junction box"
+- Action: Route to SEARCH page if not already there
+
+**CATEGORY 4: EMPTY_GIBBERISH** - Invalid or meaningless input
 - Empty strings, single characters, random letters, symbols only
 - Examples: "", "asdfgh", "???", "...", "test", "abc123", "!@#"
 - Action: Stay on current page, ask for valid input
 
-**CATEGORY 2: GREETING** - Simple greetings
+**CATEGORY 5: GREETING** - Simple greetings
 - "Hi", "Hello", "Hey", "Good morning", "Hi there", "Hello Engenie"
 - Action: Stay on current page, respond with friendly greeting
 
-**CATEGORY 3: FAREWELL** - Goodbyes
+**CATEGORY 6: FAREWELL** - Goodbyes
 - "Bye", "Goodbye", "Thanks, bye", "See you", "That's all"
 - Action: Stay on current page, respond with farewell
 
-**CATEGORY 4: GRATITUDE** - Thank you messages
+**CATEGORY 7: GRATITUDE** - Thank you messages
 - "Thanks", "Thank you", "Thanks a lot", "Appreciate it", "That was helpful"
 - Action: Stay on current page, acknowledge and offer more help
 
-**CATEGORY 5: CONFIRMATION** - Yes/No/OK responses (to previous prompts)
+**CATEGORY 8: CONFIRMATION** - Yes/No/OK responses (to previous prompts)
 - "Yes", "No", "Okay", "Sure", "Continue", "Go ahead", "Skip", "Cancel"
 - Action: Stay on current page, let page handle the response
 
-**CATEGORY 6: QUESTION_HELP** - Questions about how to use the app
+**CATEGORY 9: QUESTION_HELP** - Questions about how to use the app
 - "What can you do?", "How do I use this?", "Help", "Show features"
 - Action: Stay on current page, explain app capabilities
 
-**CATEGORY 7: CHITCHAT** - Casual conversation (still acceptable)
+**CATEGORY 10: CHITCHAT** - Casual conversation (still acceptable)
 - "How are you?", "Are you a robot?", "Who made you?", "What's your name?"
 - Action: Stay on current page, friendly response + redirect
 
-**CATEGORY 8: OUT_OF_SCOPE** - Completely irrelevant to industrial automation
+**CATEGORY 11: OUT_OF_SCOPE** - Completely irrelevant to industrial automation
 - Weather, jokes, politics, entertainment, recipes, general knowledge unrelated to industry
 - Examples: "What's the weather?", "Tell me a joke", "Who is the president?", "Write a poem"
 - Action: Stay on current page, politely decline + redirect to industrial automation
 
-**CATEGORY 9: COMPLAINT** - Negative feedback about responses
+**CATEGORY 12: COMPLAINT** - Negative feedback about responses
 - "That's wrong", "This isn't helpful", "You're not helping", "Try again"
 - Action: Stay on current page, apologize and ask for clarification
 
-**CATEGORY 10: QUESTION_GENERAL** - General/conceptual questions about industrial concepts
+**CATEGORY 13: QUESTION_GENERAL** - General/conceptual questions about industrial concepts
 - Educational questions that can be answered from GENERAL KNOWLEDGE (no database needed)
 - Questions about CONCEPTS, DEFINITIONS, HOW THINGS WORK, PRINCIPLES
 - NO vendor names, NO "what vendors", NO "which products", NO "tell me about [specific product]"
@@ -2447,39 +2412,13 @@ INPUT CATEGORIES (in priority order - check from top to bottom):
   - "What is SIL rating?" (definition)
 - Action: Stay on current page, answer using LLM knowledge
 
-**DISTINGUISH question_general vs route_product_info:**
+**DISTINGUISH question_general vs route_chat:**
 - "What is a pressure transmitter?" → QUESTION_GENERAL (concept)
-- "What vendors have pressure transmitters?" → ROUTE_PRODUCT_INFO (database query)
+- "What vendors have pressure transmitters?" → ROUTE_CHAT (database query)
 - "How does a flow meter work?" → QUESTION_GENERAL (how it works)
-- "Which flow meters does Emerson offer?" → ROUTE_PRODUCT_INFO (vendor-specific)
+- "Which flow meters does Emerson offer?" → ROUTE_CHAT (vendor-specific)
 - "Explain HART protocol" → QUESTION_GENERAL (education)
-- "What products support HART?" → ROUTE_PRODUCT_INFO (database lookup)
-
-**CATEGORY 11: ROUTE_SOLUTION** - Multi-instrument/project requirements
-- MULTIPLE instruments (2+), complex projects, process requirements
-- Examples: "I need 5 control valves", "Refinery project with instruments"
-- Action: Route to SOLUTION page if not already there
-
-**CATEGORY 12: ROUTE_PRODUCT_INFO** - Database/vendor/product queries
-- Questions that require DATABASE LOOKUP (not general knowledge)
-- TRIGGER WORDS: "vendors", "which vendors", "what vendors", "tell me about [vendor]", 
-  "products from", "[vendor name] products", "strategy", "procurement", "available", "offer"
-- Questions about SPECIFIC VENDORS or their product offerings
-- Questions about what's IN YOUR DATABASE
-- Examples:
-  - "What vendors have flow meters?" (database query)
-  - "Tell me about Rosemount products" (vendor-specific)
-  - "What's the strategy for ABB?" (strategy lookup)
-  - "Which companies make pressure transmitters?" (vendor list)
-  - "Does Honeywell have temperature sensors?" (availability)
-  - "Compare Emerson vs Yokogawa offerings" (vendor comparison from DB)
-  - "List all vendors in database" (database query)
-- Action: Route to PRODUCT_INFO page if not already there
-
-**CATEGORY 13: ROUTE_SEARCH** - Single item matching
-- SINGLE instrument with "no accessories", standalone accessory
-- Examples: "I need a pressure transmitter without accessories", "Find a junction box"
-- Action: Route to SEARCH page if not already there
+- "What products support HART?" → ROUTE_CHAT (database lookup)
 
 =============================================================================
 ROUTING RULES:
@@ -2487,7 +2426,7 @@ ROUTING RULES:
 1. MULTIPLE instruments (2+) → SOLUTION (even with "no accessories")
 2. SINGLE instrument WITH "no accessories" → SEARCH
 3. SINGLE instrument WITHOUT "no accessories" → SOLUTION (accessories auto-inferred)
-4. Querying DATABASE for vendor/product INFO → PRODUCT_INFO
+4. Querying DATABASE for vendor/product INFO → CHAT
 5. Standalone accessory (no instrument) → SEARCH
 
 **CRITICAL - PREFER CURRENT PAGE:**
@@ -2501,7 +2440,7 @@ Return a JSON object with these fields:
 
 {{
   "category": "<category name from above>",
-  "target_page": "<solution|product_info|search>",
+  "target_page": "<solution|chat|search>",
   "requires_routing": <true if routing to different page, false otherwise>,
   "direct_response": "<response message for non-routing categories, empty string if routing>",
   "reasoning": "<brief explanation>"
@@ -2565,7 +2504,7 @@ Respond with ONLY the JSON object, no additional text.
             reasoning = result.get("reasoning", "")
             
             # Validate target_page
-            if target_page not in ["solution", "product_info", "search"]:
+            if target_page not in ["solution", "chat", "search"]:
                 target_page = current_page
             
             # List of non-routing categories (user stays on current page)
@@ -2629,13 +2568,13 @@ Respond with ONLY the JSON object, no additional text.
         # Page descriptions for LLM context
         page_descriptions = {
             "solution": "Solution page to identify instruments and accessories",
-            "product_info": "Product Info page to query our vendor database",
+            "chat": "Chat page to query our vendor database",
             "search": "Search page to find matching products"
         }
         
         page_names = {
             "solution": "Solution",
-            "product_info": "Product Info",
+            "chat": "Chat",
             "search": "Search"
         }
         
@@ -2742,7 +2681,7 @@ Respond ONLY with the message text."""
                     # Page-specific decline messages
                     decline_messages = {
                         "solution": "No problem! Please provide your instrument or accessory requirements, and I'll help you identify what you need for your project.",
-                        "product_info": "Understood! Feel free to ask me about vendors, product specifications, or procurement strategies from our database.",
+                        "chat": "Understood! Feel free to ask me about vendors, product specifications, or procurement strategies from our database.",
                         "search": "Got it! Please describe what you're looking for, and I'll find the best matching products for you."
                     }
                     decline_message = decline_messages.get(current_page, f"No problem! How can I help you with {current_page_name} functionality?")
@@ -2789,8 +2728,8 @@ def route_confirm():
     Request body:
     {
         "user_input": "user's response to confirmation",
-        "current_page": "solution|product_info|search",
-        "target_page": "solution|product_info|search",
+        "current_page": "solution|chat|search",
+        "target_page": "solution|chat|search",
         "original_query": "the original query that triggered the routing"
     }
     
@@ -2820,13 +2759,13 @@ def route_confirm():
         # Page name mappings
         page_names = {
             "solution": "Solution",
-            "product_info": "Product Info",
+            "chat": "Chat",
             "search": "Search"
         }
         
         page_descriptions = {
             "solution": "Solution page to identify instruments and accessories",
-            "product_info": "Product Info page to query vendor database",
+            "chat": "Chat page to query vendor database",
             "search": "Search page to find matching products"
         }
         
@@ -2914,7 +2853,7 @@ Respond ONLY with the message text, no quotes or formatting."""
                 instruction = "Respond with a variation of: 'No problem! Please provide requirements, and I'll help you identify what you need.'"
             elif current_page == "search":
                 instruction = "Respond with a variation of: 'Understood. Let's continue finding the best matching products here. What else are you looking for?'"
-            elif current_page == "product_info":
+            elif current_page == "chat":
                 instruction = "Respond with a variation of: 'No problem. Is there anything else you would like to know about ?'"
             else:
                 instruction = f"Acknowledge their choice to stay on the {current_page_name} page and ask them to provide relevant input."
@@ -2961,7 +2900,7 @@ def project_intent():
     """
     Solution page intent classifier for instrument identification and modification.
     
-    NOTE: Greeting, questions, product_info queries, and unrelated content are now handled by 
+    NOTE: Greeting, questions, chat queries, and unrelated content are now handled by 
     /api/route-classifier. This API focuses ONLY on:
     - requirements: User is providing NEW industrial requirements
     - modification: User wants to modify existing instruments/accessories
@@ -3200,7 +3139,7 @@ Respond ONLY with the message text, no JSON.
         # =====================================================
         # STANDARD INTENT CLASSIFICATION
         # =====================================================
-        # NOTE: Greeting, question, product_info, and unrelated are now handled by route-classifier.
+        # NOTE: Greeting, question, chat, and unrelated are now handled by route-classifier.
         # This API only classifies: requirements vs modification
         
         # Build dynamic classification prompt
@@ -4479,36 +4418,37 @@ def search_vendors():
         category = data.get("category", "").strip()
         product_name = data.get("product_name", "").strip() or data.get("accessory_name", "").strip()
         strategy = data.get("strategy", "").strip()
+        search_session_id = data.get("search_session_id", "default")
         
         # NEW: Handle user-specified vendors from instrument identification
         specified_vendors = data.get("specified_vendors", [])
         if specified_vendors and isinstance(specified_vendors, list) and len(specified_vendors) > 0:
-            # Store in session for analysis chain to use with priority logic
-            session['specified_vendors'] = specified_vendors
-            logging.info(f"[VENDOR_SEARCH] User-specified vendors stored in session: {specified_vendors}")
+            # Store in session for analysis chain to use with priority logic (isolated by session ID)
+            session[f'specified_vendors_{search_session_id}'] = specified_vendors
+            logging.info(f"[VENDOR_SEARCH] [{search_session_id}] User-specified vendors stored in session: {specified_vendors}")
         
         # NEW: Handle user-specified model families from instrument identification
         specified_model_families = data.get("specified_model_families", [])
         if specified_model_families and isinstance(specified_model_families, list) and len(specified_model_families) > 0:
-            # Store in session for analysis chain to use
-            session['specified_model_families'] = specified_model_families
-            logging.info(f"[VENDOR_SEARCH] User-specified model families stored in session: {specified_model_families}")
+            # Store in session for analysis chain to use (isolated by session ID)
+            session[f'specified_model_families_{search_session_id}'] = specified_model_families
+            logging.info(f"[VENDOR_SEARCH] [{search_session_id}] User-specified model families stored in session: {specified_model_families}")
         
         # NEW: Handle applicable engineering standards from Standards RAG
         applicable_standards = data.get("applicable_standards", [])
         if applicable_standards and isinstance(applicable_standards, list) and len(applicable_standards) > 0:
-            # Store in session for analysis chain to use
-            session['applicable_standards'] = applicable_standards
-            logging.info(f"[VENDOR_SEARCH] Applicable standards stored in session: {applicable_standards}")
+            # Store in session for analysis chain to use (isolated by session ID)
+            session[f'applicable_standards_{search_session_id}'] = applicable_standards
+            logging.info(f"[VENDOR_SEARCH] [{search_session_id}] Applicable standards stored in session: {applicable_standards}")
         
         # NEW: Handle standards specifications from user's standards document
         standards_specs = data.get("standards_specs", {})
         if standards_specs and isinstance(standards_specs, dict) and len(standards_specs) > 0:
-            # Store in session for analysis chain to use
-            session['standards_specs'] = standards_specs
-            logging.info(f"[VENDOR_SEARCH] Standards specifications stored in session: {len(standards_specs)} specs")
+            # Store in session for analysis chain to use (isolated by session ID)
+            session[f'standards_specs_{search_session_id}'] = standards_specs
+            logging.info(f"[VENDOR_SEARCH] [{search_session_id}] Standards specifications stored in session: {len(standards_specs)} specs")
         
-        print(f"[VENDOR_SEARCH] Received request: category='{category}', product='{product_name}', strategy='{strategy}', vendors={specified_vendors}, model_families={specified_model_families}, applicable_standards={applicable_standards}")
+        print(f"[VENDOR_SEARCH] Received request: session='{search_session_id}', category='{category}', product='{product_name}', strategy='{strategy}', vendors={specified_vendors}, model_families={specified_model_families}")
         
         if not category or not product_name:
             return jsonify({"error": "Category and product_name/accessory_name are required"}), 400
@@ -4517,11 +4457,14 @@ def search_vendors():
         if not user_id:
              return jsonify({"error": "User not authenticated"}), 401
         
+        # Unique task key per user + session tab
+        task_key = f"{user_id}_{search_session_id}"
+        
         # Start background task for LLM matching
-        def run_vendor_search_background(user_id, category, product_name, strategy):
+        def run_vendor_search_background(user_id, task_key, category, product_name, strategy, search_session_id):
             """Background worker for LLM-based vendor matching"""
             try:
-                print(f"[VENDOR_SEARCH_BG] Starting background search for user {user_id}")
+                print(f"[VENDOR_SEARCH_BG] Starting background search for key {task_key}")
                 
                 conn = get_mongodb_connection()
                 stratergy_collection = conn['collections']['stratergy']
@@ -4677,9 +4620,9 @@ If no good match exists, respond with: {{"matched": null, "confidence": "none"}}
                 
                 vendor_names_only = [v.get('vendor_name', '').strip() for v in filtered_vendors]
                 
-                # Store results for later retrieval by analysis chain
+                # Store results for later retrieval by analysis chain (isolated by task_key)
                 with vendor_search_lock:
-                    vendor_search_tasks[user_id] = {
+                    vendor_search_tasks[task_key] = {
                         'status': 'completed',
                         'vendors': vendor_names_only,
                         'total_count': len(filtered_vendors),
@@ -4694,12 +4637,12 @@ If no good match exists, respond with: {{"matched": null, "confidence": "none"}}
                         'completed_at': datetime.now().isoformat()
                     }
                 
-                print(f"[VENDOR_SEARCH_BG] Completed for user {user_id}: {len(filtered_vendors)} vendors found")
+                print(f"[VENDOR_SEARCH_BG] Completed for key {task_key}: {len(filtered_vendors)} vendors found")
                 
             except Exception as e:
-                logging.exception(f"[VENDOR_SEARCH_BG] Error for user {user_id}")
+                logging.exception(f"[VENDOR_SEARCH_BG] Error for key {task_key}")
                 with vendor_search_lock:
-                    vendor_search_tasks[user_id] = {
+                    vendor_search_tasks[task_key] = {
                         'status': 'error',
                         'error': str(e),
                         'completed_at': datetime.now().isoformat()
@@ -4708,17 +4651,16 @@ If no good match exists, respond with: {{"matched": null, "confidence": "none"}}
         # Start background thread (fire and forget)
         thread = threading.Thread(
             target=run_vendor_search_background,
-            args=(user_id, category, product_name, strategy),
+            args=(user_id, task_key, category, product_name, strategy, search_session_id),
             daemon=True
         )
         thread.start()
         
         # Return immediately - don't wait for LLM matching
         return jsonify({
-            "status": "processing",
-            "message": "Vendor search started. Results will be used by analysis.",
-            "category": category,
-            "product_name": product_name
+            "status": "started",
+            "message": "Vendor search started in background",
+            "search_session_id": search_session_id
         }), 202
         
     except Exception as e:
@@ -6954,10 +6896,77 @@ Write a short, clear response (1–2 sentences):
                 "missingFields": missing_mandatory_fields
             }
 
-        # NOTE: Vendor extraction is handled by identify_instruments endpoint
-        # The Project page workflow uses identify_instruments which already extracts
-        # specified_vendors and specified_model_families from user input.
-        # No duplicate extraction needed here.
+        # =========================================================================
+        # === VENDOR/STRATEGY EXTRACTION (for standalone Search page) ===
+        # =========================================================================
+        # Extract vendor names, strategy, and model families from user input
+        # This enables the Search page to also prioritize user-specified vendors
+        vendor_extraction_prompt = ChatPromptTemplate.from_template(
+            """Analyze the user's product requirements and extract vendor/procurement preferences.
+
+User Input: {user_input}
+Detected Product Type: {product_type}
+
+Extract the following information:
+1. **specified_vendors**: List of vendor/manufacturer names mentioned by the user (e.g., "Emerson", "Honeywell", "Siemens", "ABB", "Yokogawa", "Endress+Hauser", "Rosemount", etc.)
+   - Only include vendors explicitly mentioned by the user
+   - If no vendors mentioned, return empty array []
+
+2. **specified_model_families**: List of model/series numbers mentioned by the user (e.g., "3051", "STT850", "644", etc.)
+   - Extract model numbers, series numbers, or product families
+   - If no model families mentioned, return empty array []
+
+3. **strategy**: Procurement strategy identified from user requirements:
+   - "Cost optimization" - if user mentions budget constraints, cost savings, cheapest
+   - "Life-cycle cost evaluation" - if user emphasizes quality, reliability, long-term
+   - "Sustainability and green procurement" - if user mentions environmental, green, sustainable
+   - "Dual sourcing" - if user mentions backup vendors, multiple suppliers
+   - "Framework agreement" - if user mentions contracts, agreements
+   - "" (empty string) - if no clear strategy preference
+
+Return ONLY valid JSON:
+{{
+    "specified_vendors": ["vendor1", "vendor2"],
+    "specified_model_families": ["model1", "model2"],
+    "strategy": "strategy or empty string"
+}}"""
+        )
+        
+        try:
+            vendor_extraction_chain = vendor_extraction_prompt | components['llm'] | StrOutputParser()
+            vendor_extraction_raw = vendor_extraction_chain.invoke({
+                "user_input": user_input,
+                "product_type": response_data["productType"]
+            })
+            
+            # Parse the JSON response
+            import re
+            # Clean up the response - remove markdown code blocks if present
+            cleaned_response = vendor_extraction_raw.strip()
+            if cleaned_response.startswith("```"):
+                cleaned_response = re.sub(r'^```(?:json)?\s*', '', cleaned_response)
+                cleaned_response = re.sub(r'\s*```$', '', cleaned_response)
+            
+            vendor_data = json.loads(cleaned_response)
+            
+            # Add extracted vendor data to response
+            response_data["specifiedVendors"] = vendor_data.get("specified_vendors", [])
+            response_data["specifiedModelFamilies"] = vendor_data.get("specified_model_families", [])
+            response_data["strategy"] = vendor_data.get("strategy", "")
+            
+            if response_data["specifiedVendors"]:
+                logging.info(f"[VALIDATE] Extracted vendors from user input: {response_data['specifiedVendors']}")
+            if response_data["specifiedModelFamilies"]:
+                logging.info(f"[VALIDATE] Extracted model families from user input: {response_data['specifiedModelFamilies']}")
+            if response_data["strategy"]:
+                logging.info(f"[VALIDATE] Extracted strategy from user input: {response_data['strategy']}")
+                
+        except Exception as vendor_ex:
+            logging.warning(f"[VALIDATE] Vendor extraction failed (non-critical): {vendor_ex}")
+            # Default to empty values if extraction fails
+            response_data["specifiedVendors"] = []
+            response_data["specifiedModelFamilies"] = []
+            response_data["strategy"] = ""
 
         # Store product_type in session for later use in advanced parameters (session-isolated)
         session[f'product_type_{search_session_id}'] = response_data["productType"]
@@ -7348,10 +7357,11 @@ def api_analyze():
         product_type = data.get("product_type", "")
         detected_product = data.get("detected_product", "")
         user_input = data.get("user_input")
+        search_session_id = data.get("search_session_id", "default")
         
         # Handle CSV vendor filtering for existing analysis process
         if csv_vendors and len(csv_vendors) > 0:
-            logging.info(f"[CSV_VENDOR_FILTER] Applying CSV vendor filter with {len(csv_vendors)} vendors")
+            logging.info(f"[CSV_VENDOR_FILTER] [{search_session_id}] Applying CSV vendor filter with {len(csv_vendors)} vendors")
             
             # Standardize CSV vendor names for filtering
             csv_vendor_names = []
@@ -7364,15 +7374,15 @@ def api_analyze():
                     logging.warning(f"Failed to standardize CSV vendor {csv_vendor.get('vendor_name', '')}: {e}")
                     csv_vendor_names.append(csv_vendor.get("vendor_name", "").lower())
             
-            # Store CSV filter in session for analysis chain to use
-            session[f'csv_vendor_filter_{session.get("user_id", "default")}'] = {
+            # Store CSV filter in session for analysis chain to use (isolated by session ID)
+            session[f'csv_vendor_filter_{search_session_id}'] = {
                 'vendor_names': csv_vendor_names,
                 'csv_vendors': csv_vendors,
                 'product_type': product_type,
                 'detected_product': detected_product
             }
             
-            logging.info(f"[CSV_VENDOR_FILTER] Applied filter for vendors: {csv_vendor_names}")
+            logging.info(f"[CSV_VENDOR_FILTER] [{search_session_id}] Applied filter for vendors: {csv_vendor_names}")
         
         # Handle regular analysis (with or without CSV vendor filtering)
         elif user_input is not None:
@@ -7388,52 +7398,53 @@ def api_analyze():
                 return jsonify({"error": "user_input must be a dict or JSON string representing a dict"}), 400
 
             # ===========================================================================
-            # VENDOR PRIORITY: Extract specified_vendors from input or session
-            # Priority: 1) From request data, 2) From session
+            # VENDOR PRIORITY: Extract specified_vendors from input or session (isolated by ID)
             # ===========================================================================
             specified_vendors = data.get("specified_vendors", [])
             
             # If not in request, check session (set by identify-instruments or validation)
             if not specified_vendors:
-                specified_vendors = session.get('specified_vendors', [])
+                specified_vendors = session.get(f'specified_vendors_{search_session_id}', [])
                 if specified_vendors:
-                    logging.info(f"[VENDOR_PRIORITY] Retrieved specified_vendors from session: {specified_vendors}")
+                    logging.info(f"[VENDOR_PRIORITY] [{search_session_id}] Retrieved specified_vendors from session: {specified_vendors}")
             
             # Also store in session for analysis chain to use (if provided in request)
             if specified_vendors:
-                session['specified_vendors'] = specified_vendors
-                logging.info(f"[VENDOR_PRIORITY] User-specified vendors for analysis: {specified_vendors}")
+                session[f'specified_vendors_{search_session_id}'] = specified_vendors
+                logging.info(f"[VENDOR_PRIORITY] [{search_session_id}] User-specified vendors for analysis: {specified_vendors}")
             
             # ===========================================================================
-            # APPLICABLE STANDARDS: Extract standards from input for analysis
-            # These come from the Standards RAG applied during instrument identification
+            # APPLICABLE STANDARDS: Extract standards from input for analysis (isolated by ID)
             # ===========================================================================
             applicable_standards = data.get("applicable_standards", [])
             standards_specs = data.get("standards_specs", {})
             
             # If not in request, check session (set by search-vendors from instrument)
             if not applicable_standards:
-                applicable_standards = session.get('applicable_standards', [])
+                applicable_standards = session.get(f'applicable_standards_{search_session_id}', [])
                 if applicable_standards:
-                    logging.info(f"[STANDARDS_PRIORITY] Retrieved applicable_standards from session: {applicable_standards}")
+                    logging.info(f"[STANDARDS_PRIORITY] [{search_session_id}] Retrieved applicable_standards from session: {applicable_standards}")
             
             if not standards_specs:
-                standards_specs = session.get('standards_specs', {})
+                standards_specs = session.get(f'standards_specs_{search_session_id}', {})
                 if standards_specs:
-                    logging.info(f"[STANDARDS_PRIORITY] Retrieved standards_specs from session: {len(standards_specs)} specs")
+                    logging.info(f"[STANDARDS_PRIORITY] [{search_session_id}] Retrieved standards_specs from session: {len(standards_specs)} specs")
             
             if applicable_standards:
-                logging.info(f"[STANDARDS_PRIORITY] Applicable standards for analysis: {applicable_standards}")
+                logging.info(f"[STANDARDS_PRIORITY] [{search_session_id}] Applicable standards for analysis: {applicable_standards}")
             
             # Pass user_input, specified_vendors, AND applicable_standards to the analysis chain
-            chain_input = {"user_input": user_input}
+            chain_input = {
+                "user_input": user_input,
+                "search_session_id": search_session_id
+            }
             if specified_vendors:
                 chain_input["specified_vendors"] = specified_vendors
             if applicable_standards:
                 chain_input["applicable_standards"] = applicable_standards
             if standards_specs:
                 chain_input["standards_specs"] = standards_specs
-                
+
             analysis_result = analysis_chain.invoke(chain_input)
         
         else:
@@ -8249,9 +8260,9 @@ def serve_project_file(file_id):
 # === PRODUCT INFO RAG ENDPOINTS ===
 # =========================================================================
 
-@app.route("/api/product-info/query", methods=["POST"])
+@app.route("/api/chat/query", methods=["POST"])
 @login_required
-def api_product_info_query():
+def api_chat_query():
     """
     RAG-powered product information query endpoint.
     
@@ -8279,7 +8290,7 @@ def api_product_info_query():
     }
     """
     try:
-        from product_info_rag import query_product_info
+        from chat_rag import query_chat
         
         data = request.get_json(force=True)
         query = data.get("query", "").strip()
@@ -8292,12 +8303,12 @@ def api_product_info_query():
         user_id_str = str(user_id) if user_id else 'anonymous'
         session_id = data.get("session_id", f"user_{user_id_str}")
         
-        logging.info(f"[PRODUCT_INFO_RAG] Query from user {user_id_str}: {query[:100]}...")
+        logging.info(f"[CHAT_RAG] Query from user {user_id_str}: {query[:100]}...")
         
         # Execute RAG query with user_id for user-specific context (standards, strategy)
-        result = query_product_info(query, session_id, user_id)
+        result = query_chat(query, session_id, user_id)
         
-        logging.info(f"[PRODUCT_INFO_RAG] Source: {result.get('source')}, Found: {result.get('found_in_database')}, User context: {result.get('user_context_used', False)}")
+        logging.info(f"[CHAT_RAG] Source: {result.get('source')}, Found: {result.get('found_in_database')}, User context: {result.get('user_context_used', False)}")
         
         return jsonify({
             "success": True,
@@ -8312,7 +8323,7 @@ def api_product_info_query():
         }), 200
         
     except Exception as e:
-        logging.exception(f"[PRODUCT_INFO_RAG] Error processing query: {e}")
+        logging.exception(f"[CHAT_RAG] Error processing query: {e}")
         return jsonify({
             "success": False,
             "error": str(e),
@@ -8320,15 +8331,15 @@ def api_product_info_query():
         }), 500
 
 
-@app.route("/api/product-info/clear-session", methods=["POST"])
+@app.route("/api/chat/clear-session", methods=["POST"])
 @login_required
-def api_product_info_clear_session():
+def api_chat_clear_session():
     """
     Clear any pending confirmation state for a session.
     Call this when user navigates away or starts a new conversation.
     """
     try:
-        from product_info_rag import clear_pending_query
+        from chat_rag import clear_pending_query
         
         data = request.get_json(force=True) if request.data else {}
         user_id = str(session.get('user_id', 'anonymous'))
@@ -8339,13 +8350,13 @@ def api_product_info_clear_session():
         return jsonify({"success": True, "message": "Session cleared"}), 200
         
     except Exception as e:
-        logging.exception(f"[PRODUCT_INFO_RAG] Error clearing session: {e}")
+        logging.exception(f"[CHAT_RAG] Error clearing session: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 
-@app.route("/api/product-info/init", methods=["GET"])
+@app.route("/api/chat/init", methods=["GET"])
 @login_required
-def api_product_info_init():
+def api_chat_init():
     """
     Initialize product info page with UI labels.
     All text is generated by LLM - no hardcoded messages in frontend.
@@ -8413,7 +8424,7 @@ Return ONLY the JSON object, no additional text."""
             
             ui_labels = json.loads(cleaned_labels)
         except Exception as e:
-            logging.warning(f"[PRODUCT_INFO] Failed to parse UI labels, using defaults: {e}")
+            logging.warning(f"[CHAT] Failed to parse UI labels, using defaults: {e}")
             ui_labels = {
                 "loading_text": "Searching database...",
                 "confirmation_hint": "Type 'Yes' for AI answer, or 'No' to skip",
@@ -8430,7 +8441,7 @@ Return ONLY the JSON object, no additional text."""
         }), 200
         
     except Exception as e:
-        logging.exception(f"[PRODUCT_INFO] Error initializing: {e}")
+        logging.exception(f"[CHAT] Error initializing: {e}")
         return jsonify({
             "success": False,
             "error": str(e),
@@ -8596,14 +8607,15 @@ def upload_standards_file():
     except Exception as e:
         logging.exception(f"Standards file upload failed: {e}")
         return jsonify({"error": str(e)}), 500
-        
-@app.cli.command("init-db")
-def init_db_command():
-    """Creates the database tables and the default admin user."""
-    db.create_all()
-    if not User.query.filter_by(role='admin').first():
-        hashed_pw = hash_password("Daman@123")  # Use an environment variable for this password in a real app
-        admin = User(
+
+
+
+def create_db():
+    with app.app_context():
+        db.create_all()
+        if not User.query.filter_by(role='admin').first():
+            hashed_pw = hash_password("Daman@123")
+            admin = User(
                 username="Daman", 
                 email="reddydaman04@gmail.com", 
                 password_hash=hashed_pw, 
@@ -8612,15 +8624,13 @@ def init_db_command():
                 status='active', 
                 role='admin'
             )
-        db.session.add(admin)
-        db.session.commit()
-        print("Admin user created with username 'Daman'.")
-    else:
-        print("Admin user already exists.")
-    print("Database initialized.")
+            db.session.add(admin)
+            db.session.commit()
+            print("Admin user created with username 'Daman' and password 'Daman@123'.")
+
 if __name__ == "__main__":
     create_db()
     import os
-    port = int(os.environ.get("PORT", 5000))
-    app.run(debug=True, host="0.0.0.0", port=port, threaded=True, use_reloader=False)
- 
+
+    app.run(debug=True, host="0.0.0.0", port=5000, threaded=True, use_reloader=False)
+

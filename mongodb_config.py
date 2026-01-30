@@ -46,7 +46,7 @@ class MongoDBManager:
             #     logger.warning("MONGODB_URI not found in environment, using local MongoDB")
             
             # Database name
-            db_name = os.getenv('MONGODB_DATABASE', 'product-recommender')
+            db_name = os.getenv('MONGODB_DATABASE', 'product_recommender')
             
             # Create MongoDB client with timeout settings
             self._client = MongoClient(
