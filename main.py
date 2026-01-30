@@ -1,115 +1,173 @@
 import asyncio
 from datetime import datetime
-from flask import Flask, request, jsonify, session, send_file
-from flask_cors import CORS
-from flask_sqlalchemy import SQLAlchemy
 import json
 import logging
 import re
 import os
 import urllib.parse
-from werkzeug.utils import secure_filename
-import requests
-from io import BytesIO
-from serpapi import GoogleSearch
 import threading
 import csv
-from fuzzywuzzy import fuzz, process
-
+import tempfile
+from io import BytesIO
 from functools import wraps
+from unittest import result
+ 
+# =========================
+# Flask & Extensions
+# =========================
+from flask import (
+    Flask,
+    request,
+    jsonify,
+    session,
+    send_file
+)
+from flask_cors import CORS
+from flask_sqlalchemy import SQLAlchemy
+from flask_session import Session
+from werkzeug.utils import secure_filename
+ 
+# =========================
+# Environment & Config
+# =========================
 from dotenv import load_dotenv
-
-# --- NEW IMPORTS FOR SEARCH FUNCTIONALITY ---
+ 
+# =========================
+# External Services & APIs
+# =========================
+import requests
+import redis
+from serpapi import GoogleSearch
 from googleapiclient.discovery import build
-
-# --- NEW IMPORTS FOR AUTHENTICATION ---
+ 
+# =========================
+# Fuzzy Matching
+# =========================
+from fuzzywuzzy import fuzz, process
+ 
+# =========================
+# Authentication & Logging
+# =========================
 from auth_models import db, User, Log
 from auth_utils import hash_password, check_password
-
-# --- MongoDB Project Management ---
+ 
+# =========================
+# MongoDB & Project Management
+# =========================
 from mongo_project_manager import mongo_project_manager
-
-# --- LLM CHAINING IMPORTS ---
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.messages import HumanMessage
-
-from chaining import setup_langchain_components, create_analysis_chain
-from loading import load_requirements_schema, build_requirements_schema_from_web
-from flask import Flask, session
-from flask_session import Session
-
-# Import latest advanced specifications functionality
-from advanced_parameters import discover_advanced_parameters
-
-# Import MongoDB utilities
-from mongodb_utils import get_schema_from_mongodb, get_json_from_mongodb, MongoDBFileManager, mongodb_file_manager
 from mongodb_config import get_mongodb_connection
+from mongodb_utils import (
+    get_schema_from_mongodb,
+    get_json_from_mongodb,
+    MongoDBFileManager,
+    mongodb_file_manager
+)
 from mongodb_projects import (
     save_project_to_mongodb,
     get_user_projects_from_mongodb,
     get_project_details_from_mongodb,
     delete_project_from_mongodb
 )
-
-# Import Standard RAG functions
+ # Import Standard RAG functions
 from standard_rag import (
     extract_and_store_standards_text,
     get_standards_for_category
 )
-
+# =========================
+# LangChain / LLM Pipeline
+# =========================
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from chaining import setup_langchain_components, create_analysis_chain
+from loading import (
+    load_requirements_schema,
+    build_requirements_schema_from_web
+)
+ 
+# =========================
+# Advanced Parameters
+# =========================
+from advanced_parameters import discover_advanced_parameters
 # Load environment variables
 load_dotenv()
-
 # =========================================================================
 # === FLASK APP CONFIGURATION ===
 # =========================================================================
 app = Flask(__name__, static_folder="static")
-
-# Manual CORS handling
-
-# A list of allowed origins for CORS
+# ----------------------------
+# 1) Base secret + session defaults (use env vars; no hard-coded secrets)
+# ----------------------------
+app.secret_key = os.getenv("SECRET_KEY", "fallback-secret-key-for-development")
+# Detect production environment (Railway or FLASK_ENV=production)
+IS_PRODUCTION = (
+    os.getenv("FLASK_ENV") == "production"
+    or bool(os.getenv("RAILWAY_ENVIRONMENT"))
+    or os.getenv("ENV") == "production"
+)
+# Default sensible session config
+app.config["SESSION_PERMANENT"] = False
+# Session storage: use Redis in production (Railway), filesystem in development
+if IS_PRODUCTION:
+    app.config["SESSION_TYPE"] = "redis"
+    app.config["SESSION_PERMANENT"] = True  # sessions can expire per your session settings
+    redis_url = os.getenv("REDIS_URL")
+    if redis_url:
+        try:
+            app.config["SESSION_REDIS"] = redis.from_url(redis_url)
+        except Exception as e:
+            logging.warning(f"Failed to parse REDIS_URL or connect to Redis: {e}")
+    else:
+        logging.warning("REDIS_URL not found in environment; sessions may not be persistent in production.")
+else:
+    # development
+    app.config["SESSION_TYPE"] = "filesystem"
+    app.config["SESSION_PERMANENT"] = False
+# ----------------------------
+# 2) Cookie flags (critical for cross-site auth)
+# ----------------------------
+# In production we must set SameSite=None and Secure=True so cookies are sent from en-genie -> railway
+if IS_PRODUCTION:
+    app.config["SESSION_COOKIE_SAMESITE"] = "None"
+    app.config["SESSION_COOKIE_SECURE"] = True
+    app.config["SESSION_COOKIE_HTTPONLY"] = True
+else:
+    # Local dev: Lax or None depending on your dev flow; Lax is safer for local debugging
+    app.config["SESSION_COOKIE_SAMESITE"] = os.getenv("DEV_SESSION_COOKIE_SAMESITE", "Lax")
+    app.config["SESSION_COOKIE_SECURE"] = False
+    app.config["SESSION_COOKIE_HTTPONLY"] = True
+# Optional: expose a readable setting for debugging
+logging.info(f"IS_PRODUCTION={IS_PRODUCTION}, SESSION_COOKIE_SAMESITE={app.config.get('SESSION_COOKIE_SAMESITE')}")
+# ----------------------------
+# 3) Initialize server-side session support
+# ----------------------------
+Session(app)
+# ----------------------------
+# 4) Manual CORS handling (after session config)
+# ----------------------------
 allowed_origins = [
-    "https://ai-product-recommender-ui.vercel.app",  # Your production frontend
-    "https://en-genie.vercel.app",                   # Your new frontend domain
-    "http://localhost:8080",                         # Add your specific local dev port
+    "https://en-genie.vercel.app",  # Your production frontend
+    "http://localhost:8080",        # Add your specific local dev port if needed
     "http://localhost:5173",
     "http://localhost:3000"
 ]
-
-# Dynamically add Vercel preview URLs to allowed_origins
-if os.environ.get("VERCEL") == "1":
-    # Add the production URL
-    prod_url = os.environ.get("VERCEL_URL")
-    if prod_url:
-        allowed_origins.append(f"https://{prod_url}")
-    # Add the preview URL for the current branch
-    branch_url = os.environ.get("VERCEL_BRANCH_URL")
-    if branch_url and branch_url != prod_url:
-        allowed_origins.append(f"https://{branch_url}")
-
-# Replace your old CORS line with this one
-CORS(app, origins=allowed_origins, supports_credentials=True)
+# Make sure supports_credentials=True so cookies are allowed in cross-origin requests
+CORS(
+    app,
+    origins=allowed_origins,
+    supports_credentials=True,
+    allow_headers=["Content-Type", "Authorization"],
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    expose_headers=["Content-Type", "Authorization"]
+)
 logging.basicConfig(level=logging.INFO)
-logging.basicConfig(level=logging.INFO)
-
-if os.getenv('FLASK_ENV') == 'production' or os.getenv('RAILWAY_ENVIRONMENT'):
-    # Production session settings
-    app.config["SESSION_PERMANENT"] = True
-    app.config["SESSION_TYPE"] = "filesystem"
-    app.config["SESSION_FILE_DIR"] = "/tmp/flask_session"
-    app.config["SESSION_COOKIE_SECURE"] = True
-    app.config["SESSION_COOKIE_HTTPONLY"] = True
-    app.config["SESSION_COOKIE_SAMESITE"] = "None"
+# --- DYNAMIC DATABASE CONFIGURATION (unchanged from your code) ---
+database_url = os.getenv('DATABASE_URL')
+if database_url:
+    app.config['SQLALCHEMY_DATABASE_URI'] = database_url.replace("mysql://", "mysql+pymysql://")
 else:
-    # Development session settings
-    app.config["SESSION_PERMANENT"] = False
-    app.config["SESSION_TYPE"] = "filesystem" 
-
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///users.db'
+    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///users.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.secret_key = os.getenv('SECRET_KEY', 'fallback-secret-key-for-development')
-Session(app)
+# initialize db
 db.init_app(app)
 
 # =========================================================================
@@ -8610,12 +8668,13 @@ def upload_standards_file():
 
 
 
-def create_db():
-    with app.app_context():
-        db.create_all()
-        if not User.query.filter_by(role='admin').first():
-            hashed_pw = hash_password("Daman@123")
-            admin = User(
+@app.cli.command("init-db")
+def init_db_command():
+    """Creates the database tables and the default admin user."""
+    db.create_all()
+    if not User.query.filter_by(role='admin').first():
+        hashed_pw = hash_password("Daman@123")  # Use an environment variable for this password in a real app
+        admin = User(
                 username="Daman", 
                 email="reddydaman04@gmail.com", 
                 password_hash=hashed_pw, 
@@ -8624,13 +8683,15 @@ def create_db():
                 status='active', 
                 role='admin'
             )
-            db.session.add(admin)
-            db.session.commit()
-            print("Admin user created with username 'Daman' and password 'Daman@123'.")
-
+        db.session.add(admin)
+        db.session.commit()
+        print("Admin user created with username 'Daman'.")
+    else:
+        print("Admin user already exists.")
+    print("Database initialized.")
 if __name__ == "__main__":
     create_db()
     import os
-
-    app.run(debug=True, host="0.0.0.0", port=5000, threaded=True, use_reloader=False)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(debug=True, host="0.0.0.0", port=port, threaded=True, use_reloader=False)
 
