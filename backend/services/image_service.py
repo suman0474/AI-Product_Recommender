@@ -379,12 +379,14 @@ class ImageService:
             Cached logo document with SAS URL
         """
         normalized = self._normalize_name(vendor_name)
-        blob_path = f"{azure_blob_file_manager.base_path}/vendor_logos/{normalized}_logo.png"
+        container_name = azure_blob_file_manager.CONTAINERS['vendor_logos']
+        blob_path = f"{normalized}_logo.png"
 
         blob_url = azure_blob_file_manager.upload_file(
             file_bytes=image_bytes,
             blob_path=blob_path,
-            content_type=content_type
+            content_type=content_type,
+            container_name=container_name
         )
 
         cache_doc = {
@@ -393,6 +395,7 @@ class ImageService:
             "vendor_name_normalized": normalized,
             "image": {
                 "storage": "azure_blob",
+                "container": container_name,
                 "blobName": blob_path,
                 "blobUrl": blob_url
             },

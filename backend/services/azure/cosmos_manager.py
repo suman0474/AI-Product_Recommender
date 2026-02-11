@@ -28,18 +28,25 @@ class CosmosProjectManager:
         
     @property
     def container_client(self):
-        return self.blob_manager.container_client
+        """Get the user-projects container client"""
+        container_name = self.blob_manager.CONTAINERS['user_projects']
+        return self.blob_manager._get_container_client(container_name)
 
     @property
     def base_path(self):
-        return self.blob_manager.base_path
+        """Base path is empty since we're using dedicated container"""
+        return ""
 
     def _get_project_blob_path(self, user_id: str, project_id: str) -> str:
-        """Construct the blob path: projects/{user_id}/{project_id}.json"""
+        """Construct the blob path: {user_id}/{project_id}.json (no base path needed)"""
         # Ensure user_id is clean
         safe_user_id = str(user_id).strip()
         safe_project_id = str(project_id).strip()
-        return f"{self.base_path}/projects/{safe_user_id}/{safe_project_id}.json"
+        # No base_path prefix since we're using dedicated user-projects container
+        if self.base_path:
+            return f"{self.base_path}/{safe_user_id}/{safe_project_id}.json"
+        else:
+            return f"{safe_user_id}/{safe_project_id}.json"
 
     def save_project(self, user_id: str, project_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -157,8 +164,11 @@ class CosmosProjectManager:
     def get_user_projects(self, user_id: str) -> List[Dict[str, Any]]:
         """Get all projects for a user by listing blobs in their folder"""
         try:
-            # Prefix: projects/{user_id}/
-            prefix = f"{self.base_path}/projects/{user_id}/"
+            # Prefix: {user_id}/ (since we're in dedicated user-projects container)
+            if self.base_path:
+                prefix = f"{self.base_path}/{user_id}/"
+            else:
+                prefix = f"{user_id}/"
             
             blobs = self.container_client.list_blobs(
                 name_starts_with=prefix,

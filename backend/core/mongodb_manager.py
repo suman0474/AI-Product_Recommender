@@ -295,7 +295,7 @@ def get_mongodb_connection() -> Dict[str, Any]:
             'vendor_logos': db['vendor_logos'],
             'advanced_parameters': db['advanced_parameters'],
             'user_projects': db['user_projects'],
-            'stratergy': db['stratergy'],  # Note: typo preserved for compatibility
+            'stratergy': db['stratergy'],  # Note: Collection name in database
             'standards': db['standards'],
             'documents': db['documents']
         },

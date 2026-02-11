@@ -41,9 +41,12 @@ try:
         generate_blob_sas,
         BlobSasPermissions
     )
+    from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
     AZURE_SDK_AVAILABLE = True
 except ImportError:
     AZURE_SDK_AVAILABLE = False
+    ResourceExistsError = Exception
+    ResourceNotFoundError = Exception
     print("⚠️ azure-storage-blob not installed. Run: pip install azure-storage-blob>=12.19.0")
 
 
@@ -67,12 +70,12 @@ class AzureBlobFileManager:
         'product_images': 'product-images',
         'generic_images': 'generic-images',
         'vendor_logos': 'vendor-logos',
-        'strategy_documents': 'strategy-documents',
-        'standards_documents': 'standards-documents',
-        'user_projects': 'user-projects',
+        'strategy_documents': 'strategy-documents',  # Strategy docs in their own container
+        'standards_documents': 'standards-documents',  # Standards docs in their own container
+        'user_projects': 'user-projects',  # User projects in their own container
         'product_documents': 'product-documents',
-        'files': 'files',  # General file storage
-        'default': 'product-documents'  # Main container
+        'files': 'files',  # General file storage in files container
+        'default': 'product-documents'  # Main container for backward compatibility
     }
 
     def __new__(cls):
@@ -168,9 +171,15 @@ class AzureBlobFileManager:
             try:
                 if not container_client.exists():
                     container_client.create_container()
-                    print(f"✅ Created container: {container_name}")
+                    print(f"✅ Auto-created container: {container_name}")
+                else:
+                    print(f"✓ Container exists: {container_name}")
+            except ResourceExistsError:
+                # Container was created by another process
+                print(f"✓ Container already exists: {container_name}")
             except Exception as e:
-                print(f"⚠️ Container check failed: {e}")
+                print(f"⚠️ Container check/create failed for '{container_name}': {e}")
+                # Try to continue anyway - the container might exist despite the error
 
             self._container_clients[container_name] = container_client
 
@@ -202,6 +211,8 @@ class AzureBlobFileManager:
             Blob URL
         """
         container_name = container_name or self.container_name
+
+        # This will auto-create the container if it doesn't exist
         container_client = self._get_container_client(container_name)
 
         if container_client is None:
@@ -426,7 +437,7 @@ class AzureBlobFileManager:
             file_id (UUID string)
         """
         file_id = str(uuid.uuid4())
-        blob_path = f"{self.base_path}/files/{file_id}_{filename}"
+        blob_path = f"files/{file_id}_{filename}"
 
         full_metadata = metadata or {}
         full_metadata.update({
@@ -455,7 +466,7 @@ class AzureBlobFileManager:
         """
         # Search for blob with file_id prefix
         blobs = self.list_files(
-            prefix=f"{self.base_path}/files/{file_id}_",
+            prefix=f"files/{file_id}_",
             include_metadata=True
         )
 
@@ -464,7 +475,7 @@ class AzureBlobFileManager:
 
         # Try searching by metadata
         all_files = self.list_files(
-            prefix=f"{self.base_path}/files/",
+            prefix=f"files/",
             include_metadata=True
         )
 
@@ -485,7 +496,7 @@ class AzureBlobFileManager:
             File info dict or None
         """
         files = self.list_files(
-            prefix=f"{self.base_path}/files/",
+            prefix=f"files/",
             include_metadata=True
         )
 
@@ -523,9 +534,10 @@ class AzureBlobFileManager:
         user_id: Union[int, str],
         content_type: str = 'application/pdf'
     ) -> Dict[str, str]:
-        """Upload strategy document"""
+        """Upload strategy document to strategy-documents container"""
+        container_name = self.CONTAINERS['strategy_documents']
         timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        blob_path = f"{self.base_path}/strategy_documents/user_{user_id}/{timestamp}_{filename}"
+        blob_path = f"user_{user_id}/{timestamp}_{filename}"
 
         blob_url = self.upload_file(
             file_bytes=file_bytes,
@@ -534,13 +546,15 @@ class AzureBlobFileManager:
             metadata={
                 'user_id': str(user_id),
                 'filename': filename,
+                'document_type': 'strategy',
                 'upload_date': datetime.utcnow().isoformat()
-            }
+            },
+            container_name=container_name
         )
 
         return {
             "storage": "azure_blob",
-            "container": self.container_name,
+            "container": container_name,
             "blob_path": blob_path,
             "blob_url": blob_url
         }
@@ -552,9 +566,10 @@ class AzureBlobFileManager:
         user_id: Union[int, str],
         content_type: str = 'application/pdf'
     ) -> Dict[str, str]:
-        """Upload standards document"""
+        """Upload standards document to standards-documents container"""
+        container_name = self.CONTAINERS['standards_documents']
         timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        blob_path = f"{self.base_path}/standards_documents/user_{user_id}/{timestamp}_{filename}"
+        blob_path = f"user_{user_id}/{timestamp}_{filename}"
 
         blob_url = self.upload_file(
             file_bytes=file_bytes,
@@ -563,13 +578,15 @@ class AzureBlobFileManager:
             metadata={
                 'user_id': str(user_id),
                 'filename': filename,
+                'document_type': 'standards',
                 'upload_date': datetime.utcnow().isoformat()
-            }
+            },
+            container_name=container_name
         )
 
         return {
             "storage": "azure_blob",
-            "container": self.container_name,
+            "container": container_name,
             "blob_path": blob_path,
             "blob_url": blob_url
         }
@@ -580,9 +597,10 @@ class AzureBlobFileManager:
         user_id: str,
         project_id: str
     ) -> Dict[str, str]:
-        """Upload project JSON data"""
+        """Upload project JSON data to user-projects container"""
+        container_name = self.CONTAINERS['user_projects']
         timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        blob_path = f"{self.base_path}/user_projects/{user_id}/{project_id}_{timestamp}.json"
+        blob_path = f"{user_id}/{project_id}_{timestamp}.json"
 
         blob_url = self.upload_file(
             file_bytes=project_json_bytes,
@@ -592,12 +610,13 @@ class AzureBlobFileManager:
                 'user_id': user_id,
                 'project_id': project_id,
                 'upload_date': datetime.utcnow().isoformat()
-            }
+            },
+            container_name=container_name
         )
 
         return {
             "storage": "azure_blob",
-            "container": self.container_name,
+            "container": container_name,
             "blob_path": blob_path,
             "blob_url": blob_url
         }
@@ -609,12 +628,13 @@ class AzureBlobFileManager:
         vendor_name: str,
         model_family: str
     ) -> Dict[str, str]:
-        """Upload product image"""
+        """Upload product image to product-images container"""
+        container_name = self.CONTAINERS['product_images']
         product_normalized = product_type.lower().replace(' ', '_')
         vendor_normalized = vendor_name.lower().replace(' ', '_')
         model_normalized = model_family.lower().replace(' ', '_')
 
-        blob_path = f"{self.base_path}/images/{product_normalized}/{vendor_normalized}/{model_normalized}.jpeg"
+        blob_path = f"{product_normalized}/{vendor_normalized}/{model_normalized}.jpeg"
 
         blob_url = self.upload_file(
             file_bytes=image_bytes,
@@ -625,12 +645,13 @@ class AzureBlobFileManager:
                 'vendor_name': vendor_name,
                 'model_family': model_family,
                 'upload_date': datetime.utcnow().isoformat()
-            }
+            },
+            container_name=container_name
         )
 
         return {
             "storage": "azure_blob",
-            "container": self.container_name,
+            "container": container_name,
             "blob_path": blob_path,
             "blob_url": blob_url
         }
@@ -640,9 +661,10 @@ class AzureBlobFileManager:
         image_bytes: bytes,
         product_type: str
     ) -> Dict[str, str]:
-        """Upload generic product image"""
+        """Upload generic product image to generic-images container"""
+        container_name = self.CONTAINERS['generic_images']
         product_normalized = product_type.lower().replace(' ', '_')
-        blob_path = f"{self.base_path}/generic_images/generic_{product_normalized}.png"
+        blob_path = f"generic_{product_normalized}.png"
 
         blob_url = self.upload_file(
             file_bytes=image_bytes,
@@ -651,12 +673,13 @@ class AzureBlobFileManager:
             metadata={
                 'product_type': product_type,
                 'upload_date': datetime.utcnow().isoformat()
-            }
+            },
+            container_name=container_name
         )
 
         return {
             "storage": "azure_blob",
-            "container": self.container_name,
+            "container": container_name,
             "blob_path": blob_path,
             "blob_url": blob_url
         }

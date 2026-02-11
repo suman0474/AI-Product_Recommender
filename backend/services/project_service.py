@@ -250,7 +250,8 @@ class ProjectService:
                     blob_path = blob_info.get('blob_path')
 
                     if blob_path:
-                        blob_data = azure_blob_file_manager.download_file(blob_path)
+                        container_name = blob_info.get('container')
+                        blob_data = azure_blob_file_manager.download_file(blob_path, container_name=container_name)
                         project_data = json.loads(blob_data.decode('utf-8'))
 
                         # Add metadata fields
@@ -307,9 +308,10 @@ class ProjectService:
                 if project_meta.get('storage_format') == 'azure_blob':
                     blob_info = project_meta.get('blob_info', {})
                     blob_path = blob_info.get('blob_path')
+                    container_name = blob_info.get('container')
                     if blob_path:
                         try:
-                            azure_blob_file_manager.delete_file(blob_path)
+                            azure_blob_file_manager.delete_file(blob_path, container_name=container_name)
                         except Exception as e:
                             print(f"Blob delete error: {e}")
 

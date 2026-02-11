@@ -50,6 +50,7 @@ except ImportError:
 from core.mongodb_manager import mongodb_manager, is_mongodb_available
 from core.azure_blob_file_manager import azure_blob_file_manager
 from core.sas_utils import add_sas_to_documents, generate_sas_url
+from cosmosdb_config import CosmosDBConnection, CosmosContainers
 
 
 class DocumentService:
@@ -65,20 +66,68 @@ class DocumentService:
     def __init__(self):
         self._strategy_collection = None
         self._standards_collection = None
+        self._cosmos_strategy_container = None
+        self._cosmos_standards_container = None
 
     @property
     def strategy_collection(self):
         """Lazy strategy collection access"""
         if self._strategy_collection is None:
-            self._strategy_collection = mongodb_manager.get_collection('stratergy')
+            try:
+                self._strategy_collection = mongodb_manager.get_collection('stratergy')
+                if self._strategy_collection:
+                    print("✓ MongoDB strategy collection connected")
+            except Exception as e:
+                print(f"⚠️ Failed to get strategy collection: {e}")
+                self._strategy_collection = None
         return self._strategy_collection
 
     @property
     def standards_collection(self):
         """Lazy standards collection access"""
         if self._standards_collection is None:
-            self._standards_collection = mongodb_manager.get_collection('standards')
+            try:
+                self._standards_collection = mongodb_manager.get_collection('standards')
+                if self._standards_collection:
+                    print("✓ MongoDB standards collection connected")
+            except Exception as e:
+                print(f"⚠️ Failed to get standards collection: {e}")
+                self._standards_collection = None
         return self._standards_collection
+
+    @property
+    def cosmos_strategy_container(self):
+        """Lazy CosmosDB strategy container access"""
+        if self._cosmos_strategy_container is None:
+            try:
+                cosmos_conn = CosmosDBConnection.get_instance()
+                if cosmos_conn.client:
+                    self._cosmos_strategy_container = cosmos_conn.get_or_create_container(
+                        CosmosContainers.STRATEGY_DOCUMENTS.value
+                    )
+                    if self._cosmos_strategy_container:
+                        print("✓ CosmosDB strategy container connected")
+            except Exception as e:
+                print(f"⚠️ Failed to get CosmosDB strategy container: {e}")
+                self._cosmos_strategy_container = None
+        return self._cosmos_strategy_container
+
+    @property
+    def cosmos_standards_container(self):
+        """Lazy CosmosDB standards container access"""
+        if self._cosmos_standards_container is None:
+            try:
+                cosmos_conn = CosmosDBConnection.get_instance()
+                if cosmos_conn.client:
+                    self._cosmos_standards_container = cosmos_conn.get_or_create_container(
+                        CosmosContainers.STANDARDS_DOCUMENTS.value
+                    )
+                    if self._cosmos_standards_container:
+                        print("✓ CosmosDB standards container connected")
+            except Exception as e:
+                print(f"⚠️ Failed to get CosmosDB standards container: {e}")
+                self._cosmos_standards_container = None
+        return self._cosmos_standards_container
 
     # ============================================================
     # Strategy Documents
@@ -135,12 +184,39 @@ class DocumentService:
         }
 
         document_id = None
+        metadata_stored = False
+
+        # Try MongoDB first
         if self.strategy_collection:
             try:
                 result = self.strategy_collection.insert_one(document)
                 document_id = str(result.inserted_id)
+                print(f"✓ Strategy document metadata stored in MongoDB: {document_id}")
+                metadata_stored = True
             except Exception as e:
-                print(f"MongoDB strategy insert error: {e}")
+                print(f"❌ MongoDB strategy insert error: {e}")
+                import traceback
+                traceback.print_exc()
+
+        # Try CosmosDB as fallback
+        if not metadata_stored and self.cosmos_strategy_container:
+            try:
+                # Add id field for CosmosDB
+                cosmos_doc = {
+                    "id": str(ObjectId()),
+                    **document
+                }
+                result = self.cosmos_strategy_container.create_item(body=cosmos_doc)
+                document_id = result.get('id')
+                print(f"✓ Strategy document metadata stored in CosmosDB: {document_id}")
+                metadata_stored = True
+            except Exception as e:
+                print(f"❌ CosmosDB strategy insert error: {e}")
+                import traceback
+                traceback.print_exc()
+
+        if not metadata_stored:
+            print(f"⚠️ Neither MongoDB nor CosmosDB available - metadata not stored (file is in blob storage)")
 
         # 3. Generate SAS URL
         sas_url = generate_sas_url(blob_info['blob_url'], expiry_hours=24)
@@ -212,9 +288,10 @@ class DocumentService:
             # Delete blob
             blob_info = doc.get('storage', {})
             blob_path = blob_info.get('blob_path')
+            container_name = blob_info.get('container')
             if blob_path:
                 try:
-                    azure_blob_file_manager.delete_file(blob_path)
+                    azure_blob_file_manager.delete_file(blob_path, container_name=container_name)
                 except Exception as e:
                     print(f"Blob delete error: {e}")
 
@@ -273,12 +350,39 @@ class DocumentService:
         }
 
         document_id = None
+        metadata_stored = False
+
+        # Try MongoDB first
         if self.standards_collection:
             try:
                 result = self.standards_collection.insert_one(document)
                 document_id = str(result.inserted_id)
+                print(f"✓ Standards document metadata stored in MongoDB: {document_id}")
+                metadata_stored = True
             except Exception as e:
-                print(f"MongoDB standards insert error: {e}")
+                print(f"❌ MongoDB standards insert error: {e}")
+                import traceback
+                traceback.print_exc()
+
+        # Try CosmosDB as fallback
+        if not metadata_stored and self.cosmos_standards_container:
+            try:
+                # Add id field for CosmosDB
+                cosmos_doc = {
+                    "id": str(ObjectId()),
+                    **document
+                }
+                result = self.cosmos_standards_container.create_item(body=cosmos_doc)
+                document_id = result.get('id')
+                print(f"✓ Standards document metadata stored in CosmosDB: {document_id}")
+                metadata_stored = True
+            except Exception as e:
+                print(f"❌ CosmosDB standards insert error: {e}")
+                import traceback
+                traceback.print_exc()
+
+        if not metadata_stored:
+            print(f"⚠️ Neither MongoDB nor CosmosDB available - metadata not stored (file is in blob storage)")
 
         # 3. Generate SAS URL
         sas_url = generate_sas_url(blob_info['blob_url'], expiry_hours=24)
@@ -330,9 +434,10 @@ class DocumentService:
             # Delete blob
             blob_info = doc.get('storage', {})
             blob_path = blob_info.get('blob_path')
+            container_name = blob_info.get('container')
             if blob_path:
                 try:
-                    azure_blob_file_manager.delete_file(blob_path)
+                    azure_blob_file_manager.delete_file(blob_path, container_name=container_name)
                 except Exception as e:
                     print(f"Blob delete error: {e}")
 

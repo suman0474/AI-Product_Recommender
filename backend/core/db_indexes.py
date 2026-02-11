@@ -212,20 +212,20 @@ def ensure_indexes():
         print("   ✅ Created: idx_user_product_type")
 
         # ============================================================
-        # COLLECTION 8: stratergy (Strategy Documents)
+        # COLLECTION 8: strategy (Strategy Documents)
         # ============================================================
-        print("\n📦 stratergy collection:")
-        stratergy = db['stratergy']
+        print("\n📦 strategy collection:")
+        strategy = db['stratergy']
 
         # Index for user's documents
-        stratergy.create_index(
+        strategy.create_index(
             [("user_id", 1), ("uploaded_at", -1)],
             name="idx_strategy_user_date"
         )
         print("   ✅ Created: idx_strategy_user_date")
 
         # Index for filename search
-        stratergy.create_index(
+        strategy.create_index(
             [("user_id", 1), ("filename", 1)],
             name="idx_strategy_filename"
         )
