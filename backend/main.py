@@ -254,6 +254,14 @@ else:
     app.config["SESSION_TYPE"] = "filesystem" 
 
 def get_mysql_uri():
+    """Get MySQL URI, returns None if MySQL is not configured"""
+    required_vars = ['MYSQLUSER', 'MYSQLPASSWORD', 'MYSQLHOST', 'MYSQLPORT', 'MYSQLDATABASE']
+    missing = [var for var in required_vars if not os.getenv(var)]
+
+    if missing:
+        logging.warning(f"⚠️ MySQL not configured - missing: {', '.join(missing)}")
+        return None
+
     return (
         f"mysql+pymysql://{os.getenv('MYSQLUSER')}:"
         f"{os.getenv('MYSQLPASSWORD')}@"
@@ -261,8 +269,16 @@ def get_mysql_uri():
         f"{os.getenv('MYSQLPORT')}/"
         f"{os.getenv('MYSQLDATABASE')}"
     )
-# Database configuration
-app.config["SQLALCHEMY_DATABASE_URI"] = get_mysql_uri()
+
+# Database configuration (use SQLite fallback if MySQL not available)
+mysql_uri = get_mysql_uri()
+if mysql_uri:
+    app.config["SQLALCHEMY_DATABASE_URI"] = mysql_uri
+    logging.info("✅ Using MySQL database")
+else:
+    # Fallback to SQLite for development/testing
+    app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///fallback.db"
+    logging.warning("⚠️ Using SQLite fallback database (MySQL not configured)")
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.secret_key = os.getenv('SECRET_KEY', 'fallback-secret-key-for-development')
 
@@ -6929,8 +6945,14 @@ def create_db():
 # =========================================================================
 # This section runs when the module is imported (e.g., by gunicorn main:app)
 
-# Create database tables and admin user
-create_db()
+# Create database tables and admin user (non-blocking - allows startup even if MySQL unavailable)
+try:
+    create_db()
+    logging.info("✅ Database tables created and admin user initialized")
+except Exception as e:
+    logging.warning(f"⚠️ Database initialization failed (MySQL may not be available): {e}")
+    logging.warning("⚠️ Application will continue but database-dependent features may not work")
+    logging.warning("⚠️ To fix: Ensure MySQL database is running and connection string is correct")
 
 # Initialize automatic checkpoint cleanup (Phase 1 improvement)
 # Prevents unbounded memory growth from checkpoint accumulation
