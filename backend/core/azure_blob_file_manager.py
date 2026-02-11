@@ -134,7 +134,13 @@ class AzureBlobFileManager:
             )
 
             # Test connection by listing containers
-            containers = list(self._blob_service_client.list_containers(max_results=1))
+            try:
+                # Just try to get the first container to test connection
+                container_iter = self._blob_service_client.list_containers(results_per_page=1)
+                next(iter(container_iter), None)
+            except StopIteration:
+                pass  # No containers yet, but connection works
+
             self._connected = True
             self._connection_error = None
 

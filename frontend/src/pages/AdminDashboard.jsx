@@ -117,8 +117,14 @@ const AdminDashboard = () => {
       <div className="relative w-full max-w-4xl transition-all duration-300 hover:scale-[1.02]">
         <div className="acrylic-glass-pill backdrop-blur-3xl p-8 relative transition-all duration-300 hover:shadow-2xl">
           <div className="text-center space-y-4">
-            <div className="w-20 h-20 mx-auto">
-              <img src="/ChatGPT Image Nov 11, 2025, 11_58_30 AM.png" alt="Logo" className="w-full h-full rounded-full object-cover shadow-lg" />
+            <div className="w-20 h-20 mx-auto rounded-full overflow-hidden shadow-lg">
+              <video
+                muted
+                playsInline
+                className="w-full h-full object-cover"
+              >
+                <source src="/animation.mp4" type="video/mp4" />
+              </video>
             </div>
             <div>
               <h1 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-[#0F6CBD] to-[#004E8C]">

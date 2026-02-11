@@ -177,8 +177,26 @@ if os.environ.get("VERCEL") == "1":
     if branch_url and branch_url != prod_url:
         allowed_origins.append(f"https://{branch_url}")
 
-# Replace your old CORS line with this one
-CORS(app, origins=allowed_origins, supports_credentials=True)
+# CORS Configuration with full headers support
+CORS(app,
+     origins=allowed_origins,
+     supports_credentials=True,
+     allow_headers=['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+     methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+     expose_headers=['Content-Type', 'Authorization'],
+     max_age=3600)
+
+# Ensure CORS headers are added to all responses
+@app.after_request
+def after_request(response):
+    origin = request.headers.get('Origin')
+    if origin in allowed_origins:
+        response.headers['Access-Control-Allow-Origin'] = origin
+        response.headers['Access-Control-Allow-Credentials'] = 'true'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS, PATCH'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Requested-With, Accept'
+    return response
+
 logging.basicConfig(level=logging.INFO)
 def is_redis_available():
     """Check if Redis environment variables are properly configured."""
