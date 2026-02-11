@@ -69,7 +69,7 @@ const AdminDashboard = () => {
     setApprovingIds(prev => new Set(prev).add(userId));
     setModalOpen(false);
     try {
-      const response = await fetch(`${API_BASE_URL}/admin/approve_user`, {
+      const response = await fetch(`${API_BASE_URL}/api/admin/approve_user`, {
         method: 'POST',
         credentials: 'include',
         headers: {
