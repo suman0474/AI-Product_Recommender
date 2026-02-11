@@ -186,6 +186,20 @@ CORS(app,
      expose_headers=['Content-Type', 'Authorization'],
      max_age=3600)
 
+# Handle OPTIONS preflight requests explicitly
+@app.before_request
+def handle_preflight():
+    if request.method == 'OPTIONS':
+        response = app.make_response(('', 200))
+        origin = request.headers.get('Origin')
+        if origin in allowed_origins:
+            response.headers['Access-Control-Allow-Origin'] = origin
+            response.headers['Access-Control-Allow-Credentials'] = 'true'
+            response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS, PATCH'
+            response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Requested-With, Accept'
+            response.headers['Access-Control-Max-Age'] = '3600'
+        return response
+
 # Ensure CORS headers are added to all responses
 @app.after_request
 def after_request(response):
@@ -4379,25 +4393,33 @@ def register():
     if not username or not email or not password:
         return jsonify({"error": "Missing username, email, or password"}), 400
 
-    if User.query.filter_by(username=username).first():
-        return jsonify({"error": "Username already exists"}), 409
-    if User.query.filter_by(email=email).first():
-        return jsonify({"error": "Email already registered"}), 409
+    try:
+        if User.query.filter_by(username=username).first():
+            return jsonify({"error": "Username already exists"}), 409
+        if User.query.filter_by(email=email).first():
+            return jsonify({"error": "Email already registered"}), 409
 
-    hashed_pw = hash_password(password)
-    new_user = User(
-        username=username,
-        email=email,
-        password_hash=hashed_pw,
-        first_name=first_name,
-        last_name=last_name,
-        status='pending',
-        role='user'
-    )
-    db.session.add(new_user)
-    db.session.commit()
+        hashed_pw = hash_password(password)
+        new_user = User(
+            username=username,
+            email=email,
+            password_hash=hashed_pw,
+            first_name=first_name,
+            last_name=last_name,
+            status='pending',
+            role='user'
+        )
+        db.session.add(new_user)
+        db.session.commit()
 
-    return jsonify({"message": "User registration submitted. Awaiting admin approval."}), 201
+        return jsonify({"message": "User registration submitted. Awaiting admin approval."}), 201
+
+    except Exception as e:
+        logging.error(f"Registration failed - database error: {e}")
+        return jsonify({
+            "error": "Registration service temporarily unavailable. Please ensure database is connected.",
+            "details": "Database connection failed" if "mysql" in str(e).lower() else "Registration error"
+        }), 503
 
 @app.route("/login", methods=["POST"])
 @limiter.limit("5 per minute;20 per hour;100 per day")
@@ -4469,41 +4491,49 @@ def login():
     username = data.get("username")
     password = data.get("password")
 
-    user = User.query.filter_by(username=username).first()
-    if user and check_password(user.password_hash, password):
-        # Allow both 'active' and 'approved' statuses
-        if user.status not in ['active', 'approved']:
-            return jsonify({"error": f"Account not active. Current status: {user.status}."}), 403
-        
-        # Ensure new login creates a fresh agentic workflow session
-        # Previous sessions remain saved in DB but are not automatically resumed
-        session.pop('agentic_session_id', None)
-        
-        session['user_id'] = user.id
-        # Construct full name from first_name and last_name
-        full_name = ""
-        if user.first_name and user.last_name:
-            full_name = f"{user.first_name} {user.last_name}"
-        elif user.first_name:
-            full_name = user.first_name
-        elif user.last_name:
-            full_name = user.last_name
-        else:
-            full_name = user.username
-        
-        return jsonify({
-            "message": "Login successful",
-            "user": {
-                "username": user.username,
-                "name": full_name,
-                "first_name": user.first_name,
-                "last_name": user.last_name,
-                "email": user.email,
-                "role": user.role
-            }
-        }), 200
+    try:
+        user = User.query.filter_by(username=username).first()
+        if user and check_password(user.password_hash, password):
+            # Allow both 'active' and 'approved' statuses
+            if user.status not in ['active', 'approved']:
+                return jsonify({"error": f"Account not active. Current status: {user.status}."}), 403
 
-    return jsonify({"error": "Invalid username or password"}), 401
+            # Ensure new login creates a fresh agentic workflow session
+            # Previous sessions remain saved in DB but are not automatically resumed
+            session.pop('agentic_session_id', None)
+
+            session['user_id'] = user.id
+            # Construct full name from first_name and last_name
+            full_name = ""
+            if user.first_name and user.last_name:
+                full_name = f"{user.first_name} {user.last_name}"
+            elif user.first_name:
+                full_name = user.first_name
+            elif user.last_name:
+                full_name = user.last_name
+            else:
+                full_name = user.username
+
+            return jsonify({
+                "message": "Login successful",
+                "user": {
+                    "username": user.username,
+                    "name": full_name,
+                    "first_name": user.first_name,
+                    "last_name": user.last_name,
+                    "email": user.email,
+                    "role": user.role
+                }
+            }), 200
+
+        return jsonify({"error": "Invalid username or password"}), 401
+
+    except Exception as e:
+        logging.error(f"Login failed - database error: {e}")
+        return jsonify({
+            "error": "Authentication service temporarily unavailable. Please ensure database is connected.",
+            "details": "Database connection failed" if "mysql" in str(e).lower() else "Authentication error"
+        }), 503
 
 @app.route("/logout", methods=["POST"])
 def logout():

@@ -129,6 +129,11 @@ def is_exempt() -> bool:
     Returns:
         bool: True if request should be exempt
     """
+    # CRITICAL: Exempt OPTIONS requests (CORS preflight)
+    # OPTIONS requests must not be rate-limited to allow proper CORS
+    if request.method == 'OPTIONS':
+        return True
+
     # Check if IP is in exemption list
     remote_addr = get_remote_address()
     if remote_addr in RateLimitConfig.EXEMPT_IPS:
