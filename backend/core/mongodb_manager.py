@@ -95,9 +95,7 @@ class MongoDBManager:
                 self._mongodb_uri,
                 serverSelectionTimeoutMS=5000,
                 connectTimeoutMS=10000,
-                socketTimeoutMS=30000,
-                retryWrites=True,
-                w='majority'
+                socketTimeoutMS=30000
             )
 
             # Test connection
