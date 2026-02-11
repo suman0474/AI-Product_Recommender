@@ -87,8 +87,22 @@ class DocumentService:
                 self._standards_collection = mongodb_manager.get_collection('standards')
                 if self._standards_collection:
                     print("✓ MongoDB standards collection connected")
+                    # Verify collection is accessible by checking collection name
+                    try:
+                        coll_name = self._standards_collection.name
+                        print(f"   - Collection name: {coll_name}")
+                        # Try a simple operation to verify connection
+                        count = self._standards_collection.count_documents({})
+                        print(f"   - Current document count: {count}")
+                    except Exception as verify_error:
+                        print(f"⚠️ Collection verification failed: {verify_error}")
+                        self._standards_collection = None
+                else:
+                    print("❌ MongoDB standards collection is None")
             except Exception as e:
                 print(f"⚠️ Failed to get standards collection: {e}")
+                import traceback
+                traceback.print_exc()
                 self._standards_collection = None
         return self._standards_collection
 
@@ -297,18 +311,56 @@ class DocumentService:
         document_id = None
 
         # Store metadata in MongoDB (Cosmos DB for MongoDB API)
-        if self.standards_collection:
+        # CRITICAL: MongoDB storage is MANDATORY - fail if it doesn't work
+        if not self.standards_collection:
+            error_msg = "MongoDB standards collection not available. Cannot save document metadata."
+            print(f"❌ {error_msg}")
+            # Optionally delete the blob file if metadata storage fails
             try:
-                result = self.standards_collection.insert_one(document)
-                document_id = str(result.inserted_id)
-                print(f"✓ Standards document metadata stored in MongoDB: {document_id}")
-            except Exception as e:
-                print(f"❌ MongoDB standards insert error: {e}")
-                import traceback
-                traceback.print_exc()
-                print(f"⚠️ Metadata not stored in MongoDB (file is in blob storage)")
-        else:
-            print(f"⚠️ MongoDB not available - metadata not stored (file is in blob storage)")
+                azure_blob_file_manager.delete_file(
+                    blob_info['blob_path'],
+                    container_name=blob_info.get('container')
+                )
+                print(f"🗑️ Cleaned up blob file: {blob_info['blob_path']}")
+            except Exception as cleanup_error:
+                print(f"⚠️ Failed to cleanup blob: {cleanup_error}")
+
+            return {
+                "success": False,
+                "error": error_msg,
+                "details": "MongoDB connection not available. Please contact administrator."
+            }
+
+        try:
+            # Attempt MongoDB insertion
+            result = self.standards_collection.insert_one(document)
+            document_id = str(result.inserted_id)
+            print(f"✓ Standards document metadata stored in MongoDB: {document_id}")
+            print(f"   - Collection: standards")
+            print(f"   - User ID: {user_id}")
+            print(f"   - Filename: {filename}")
+            print(f"   - Blob URL: {blob_info['blob_url']}")
+        except Exception as e:
+            error_msg = f"Failed to store document metadata in MongoDB: {str(e)}"
+            print(f"❌ MongoDB standards insert error: {e}")
+            import traceback
+            traceback.print_exc()
+
+            # Cleanup: Delete the blob file since metadata storage failed
+            try:
+                azure_blob_file_manager.delete_file(
+                    blob_info['blob_path'],
+                    container_name=blob_info.get('container')
+                )
+                print(f"🗑️ Cleaned up blob file after MongoDB failure: {blob_info['blob_path']}")
+            except Exception as cleanup_error:
+                print(f"⚠️ Failed to cleanup blob: {cleanup_error}")
+
+            return {
+                "success": False,
+                "error": error_msg,
+                "details": str(e)
+            }
 
         # 3. Generate SAS URL
         sas_url = generate_sas_url(blob_info['blob_url'], expiry_hours=24)
