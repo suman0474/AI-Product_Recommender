@@ -967,7 +967,8 @@ const EnGenieChat = () => {
 
         try {
             // ============================================================================
-            // SMART ROUTING: Use backend routing classifier to detect target screen
+            // SMART ROUTING: Use backend routing classifier to detect target workflow
+            // If query belongs to different workflow (Solution/Search), show navigation button
             // ============================================================================
             const routingResult = await classifyRoute(query);
             const targetWorkflow = routingResult.target_workflow;
@@ -978,53 +979,60 @@ const EnGenieChat = () => {
                 confidence: routingResult.confidence
             });
 
-            // Map backend target_workflow to page names
-            const targetPageMap: Record<string, string> = {
-                'solution': 'solution',
-                'instrument_identifier': 'search',
-                'engenie_chat': 'chat'
+            // Map backend target_workflow to page names and create action buttons
+            const workflowPageMap: Record<string, { page: string; label: string; icon: string; description: string }> = {
+                'solution': {
+                    page: 'solution',
+                    label: '📋 Open Solution Page',
+                    icon: '🔧',
+                    description: 'This looks like a **complex solution** requiring multiple instruments.\n\nFor better results, I recommend using our **Solution** page.'
+                },
+                'instrument_identifier': {
+                    page: 'search',
+                    label: '🔍 Open Search Page',
+                    icon: '📦',
+                    description: 'This looks like a **product search** query.\n\nFor better results, I recommend using our **Search** page.'
+                }
             };
 
-            const targetPage = targetPageMap[targetWorkflow];
+            const targetInfo = workflowPageMap[targetWorkflow];
 
-            // If backend suggests different page, show navigation link
-            if (targetPage && targetPage !== 'chat') {
+            // If backend suggests different page, show navigation button with actionButtons
+            if (targetInfo) {
                 setShowThinking(false);
 
                 const sessionKey = `chat_nav_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-                const targetUrl = `/${targetPage}?sessionKey=${sessionKey}`;
-                const windowName = `${targetPage}_window_${sessionKey}`;
+                const targetUrl = `/${targetInfo.page}?sessionKey=${sessionKey}`;
 
-                // Store context
+                // Store context for the target page
                 try {
                     localStorage.setItem(sessionKey, JSON.stringify({ query: query }));
                 } catch (e) {
                     console.error('[CHAT_ROUTING] Failed to store context:', e);
                 }
 
-                const pageName = targetPage === 'solution' ? 'Solution' : 'Search';
-                const navigationMessage = targetPage === 'solution'
-                    ? `This looks like a **complex solution** requiring multiple instruments.\n\n` +
-                    `For better results, I recommend using our **Solution** page.\n\n` +
-                    `<a href="${targetUrl}" target="${windowName}" style="display: inline-block; background: #0F6CBD; color: white; padding: 10px 20px; border-radius: 6px; text-decoration: none; font-weight: 500; margin: 10px 0; box-shadow: 0 4px 15px rgba(15, 108, 189, 0.4);">📋 Open Solution Page</a>\n\n` +
-                    `_Or, if you'd like to ask a knowledge question instead, please rephrase your query._`
-                    : `This looks like a **product search** query.\n\n` +
-                    `For better results, I recommend using our **Search** page.\n\n` +
-                    `<a href="${targetUrl}" target="${windowName}" style="display: inline-block; background: #0F6CBD; color: white; padding: 10px 20px; border-radius: 6px; text-decoration: none; font-weight: 500; margin: 10px 0; box-shadow: 0 4px 15px rgba(15, 108, 189, 0.4);">🔍 Open Search Page</a>\n\n` +
-                    `_Or, if you'd like to ask a knowledge question instead, please rephrase your query._`;
-
+                // Create assistant message with action button
                 const assistantMessage: ChatMessage = {
                     id: `assistant_${Date.now()}`,
                     type: "assistant",
-                    content: navigationMessage,
-                    timestamp: new Date()
+                    content: `${targetInfo.description}\n\n_Or, if you'd like to ask a knowledge question instead, please rephrase your query._`,
+                    timestamp: new Date(),
+                    actionButtons: [
+                        {
+                            label: targetInfo.label,
+                            action: 'openNewWindow',
+                            url: targetUrl,
+                            icon: targetInfo.icon,
+                            contextData: { query: query }
+                        }
+                    ]
                 };
                 setMessages(prev => [...prev, assistantMessage]);
                 setIsLoading(false);
                 return;
             }
 
-            // Target is chat - continue with normal query
+            // Target is chat - continue with normal EnGenie Chat query
             const response = await queryEnGenieChat(query);
             setShowThinking(false);
 

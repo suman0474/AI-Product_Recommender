@@ -401,6 +401,7 @@ const Project = () => {
     const [activeTab, setActiveTab] = useState<string>('project');
     const [previousTab, setPreviousTab] = useState<string>('project');
     const [searchTabs, setSearchTabs] = useState<{ id: string; title: string; input: string; isDirectSearch?: boolean; productType?: string; itemThreadId?: string; workflowThreadId?: string; mainThreadId?: string }[]>([]);
+    const [currentWorkflowType, setCurrentWorkflowType] = useState<'solution' | 'search' | null>(null); // Track current workflow
     // Session Manager instance
     const sessionManager = SessionManager.getInstance();
 
@@ -1240,6 +1241,58 @@ const Project = () => {
                 return;
             }
 
+            // CASE 2.6: Cross-workflow navigation (Search ↔ Solution)
+            // If user is in one workflow and asks for another, show navigation button
+            const incomingWorkflowType = isSolution ? 'solution' : (responseType === 'requirements' ? 'search' : null);
+
+            if (currentWorkflowType && incomingWorkflowType && currentWorkflowType !== incomingWorkflowType) {
+                console.log(`[WORKFLOW_SWITCH] Detected switch from ${currentWorkflowType} to ${incomingWorkflowType}`);
+
+                const sessionKey = `workflow_nav_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+                const targetPage = incomingWorkflowType === 'solution' ? 'solution' : 'search';
+                const targetUrl = `/${targetPage}?sessionKey=${sessionKey}`;
+
+                // Store context for the target page
+                try {
+                    localStorage.setItem(sessionKey, JSON.stringify({ query: finalRequirements }));
+                } catch (e) {
+                    console.error('[WORKFLOW_SWITCH] Failed to store context:', e);
+                }
+
+                const workflowMessages: Record<string, { label: string; icon: string; description: string }> = {
+                    'solution': {
+                        label: '📋 Open Solution Page',
+                        icon: '🔧',
+                        description: 'This looks like a **complex solution** requiring multiple instruments.\n\nFor better results, I recommend opening this in our **Solution** page.'
+                    },
+                    'search': {
+                        label: '🔍 Open Search Page',
+                        icon: '📦',
+                        description: 'This looks like a **single product search** query.\n\nFor better results, I recommend opening this in our **Search** page.'
+                    }
+                };
+
+                const targetInfo = workflowMessages[incomingWorkflowType];
+
+                // Show message with action button
+                addChatMessage(
+                    'assistant',
+                    `${targetInfo.description}\n\n_Or, continue here to work with both workflows._`,
+                    [
+                        {
+                            label: targetInfo.label,
+                            action: 'openNewWindow',
+                            url: targetUrl,
+                            icon: targetInfo.icon,
+                            contextData: { query: finalRequirements }
+                        }
+                    ]
+                );
+
+                setShowResults(true);
+                return;
+            }
+
             // CASE 3: Modification response - Update the list with changes
             if (responseType === 'modification') {
                 const modMessage = response.message || 'I\'ve updated your instrument list based on your request.';
@@ -1284,6 +1337,9 @@ const Project = () => {
                 if (isSolution) {
                     console.log('[SOLUTION] Processing solution workflow response');
                 }
+
+                // Update current workflow type
+                setCurrentWorkflowType(isSolution ? 'solution' : 'search');
 
                 setInstruments(response.instruments || []);
                 setAccessories(response.accessories || []);
