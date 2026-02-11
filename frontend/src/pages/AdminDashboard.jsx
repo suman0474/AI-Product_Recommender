@@ -1,9 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { Button } from '../components/ui/button';
-import { Brain, CheckCircle, XCircle, ArrowLeft } from 'lucide-react';
-import { GlassCard, GlassCardContent, GlassCardHeader, GlassCardTitle } from '../components/ui/glass-card';
+import { CheckCircle, XCircle, ArrowLeft } from 'lucide-react';
 import { BASE_URL } from '../components/AIRecommender/api';
 const API_BASE_URL = BASE_URL;
 
@@ -31,7 +30,7 @@ const AdminDashboard = () => {
     setDataLoading(true);
     setError(null);
     try {
-      const response = await fetch(`${API_BASE_URL}/admin/pending_users`, {
+      const response = await fetch(`${API_BASE_URL}/api/admin/pending_users`, {
         method: 'GET',
         credentials: 'include',
         headers: {
@@ -117,7 +116,7 @@ const AdminDashboard = () => {
       <div className="relative w-full max-w-4xl transition-all duration-300 hover:scale-[1.02]">
         <div className="acrylic-glass-pill backdrop-blur-3xl p-8 relative transition-all duration-300 hover:shadow-2xl">
           <div className="text-center space-y-4">
-            <div className="w-20 h-20 mx-auto rounded-full overflow-hidden shadow-lg">
+            <div className="w-14 h-14 mx-auto rounded-full overflow-hidden shadow-lg">
               <video
                 muted
                 playsInline
