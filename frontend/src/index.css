@@ -1,0 +1,543 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* 
+      1. Primary Copilot Blue (Headlines/Text/Emphasis) -> #0F6CBD
+      HSL Approx: 208, 86%, 42%
+    */
+    --primary: 208 86% 42%;
+    --primary-foreground: 0 0% 100%;
+
+    /* 
+      2. Secondary Soft Blue (UI Elements/Buttons) -> #5FB3E6
+      HSL Approx: 205 74% 64% 
+    */
+    --secondary: 205 74% 64%;
+    --secondary-foreground: 208 86% 20%;
+
+    /* Background Colors */
+    --background: 200 64% 98%;
+    /* Very light blue tint #F5FAFC */
+    --foreground: 208 86% 20%;
+    /* Dark blue text */
+
+    --card: 0 0% 100%;
+    --card-foreground: 208 86% 20%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 208 86% 20%;
+
+    --muted: 210 20% 96%;
+    --muted-foreground: 210 10% 46%;
+    /* #5E6A75 */
+
+    --accent: 205 74% 64%;
+    --accent-foreground: 208 86% 20%;
+
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 210 20% 90%;
+    --input: 210 20% 90%;
+    --ring: 208 86% 42%;
+
+    --radius: 1.25rem;
+    /* 20px */
+
+    /* Glassmorphism Variables */
+    --glass-bg: rgba(255, 255, 255, 0.55);
+    --glass-border: rgba(255, 255, 255, 0.4);
+    --glass-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.35);
+    --glass-blur: 20px;
+
+    /* Gradients */
+    --gradient-copilot-accent: linear-gradient(135deg, #0F6CBD, #5FB3E6);
+
+    /* Main Canvas Background Gradient - Dark -> Wide Light Middle -> Dark */
+    --gradient-app-bg: linear-gradient(to bottom left,
+        #7AB2D6 0%,
+        #C5E5F5 35%,
+        #C5E5F5 65%,
+        #7AB2D6 100%);
+  }
+
+  .dark {
+    /* Dark Theme - Deep Blue/Slate */
+    --background: 215 28% 10%;
+    --foreground: 210 40% 98%;
+
+    --card: 217 33% 15%;
+    --card-foreground: 210 40% 98%;
+
+    --popover: 217 33% 15%;
+    --popover-foreground: 210 40% 98%;
+
+    --primary: 205 74% 64%;
+    /* Lighter blue for dark mode */
+    --primary-foreground: 208 86% 20%;
+
+    --secondary: 217 33% 20%;
+    --secondary-foreground: 210 40% 98%;
+
+    --muted: 217 33% 20%;
+    --muted-foreground: 215 20% 65%;
+
+    --accent: 217 33% 20%;
+    --accent-foreground: 210 40% 98%;
+
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 217 33% 20%;
+    --input: 217 33% 20%;
+    --ring: 205 74% 64%;
+
+    --gradient-app-bg: linear-gradient(to top right, #0f172a 0%, #1e3a8a 100%);
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply text-foreground antialiased;
+    background: var(--gradient-app-bg);
+    min-height: 100vh;
+    background-attachment: fixed;
+  }
+
+  /* Custom Scrollbar Styles */
+  html,
+  body {
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  #root {
+    height: 100vh;
+    overflow-y: auto;
+    overflow-x: hidden;
+  }
+
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: white;
+    /* White scrollbar thumb */
+    border-radius: 4px;
+    transition: background 0.3s ease;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: white;
+  }
+
+  ::-webkit-scrollbar-button {
+    display: none;
+  }
+
+  html {
+    font-family: "Segoe UI Variable", "Segoe UI", "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    color: #0F6CBD;
+    /* Copilot Primary Blue */
+    @apply font-semibold tracking-tight;
+  }
+
+  .dark h1,
+  .dark h2,
+  .dark h3,
+  .dark h4,
+  .dark h5,
+  .dark h6 {
+    @apply text-foreground;
+  }
+
+  /* Hide default password toggle in Edge/IE to avoid duplicate icons */
+  input[type="password"]::-ms-reveal,
+  input[type="password"]::-ms-clear {
+    display: none;
+  }
+}
+
+.custom-no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.custom-no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Visible scrollbar with only thumb showing (no background track) */
+.custom-visible-scrollbar::-webkit-scrollbar {
+  width: 18px;
+  height: 0px;
+  /* Hide horizontal scrollbar */
+}
+
+.custom-visible-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.custom-visible-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.8);
+  border-radius: 9px;
+  transition: background 0.3s ease;
+}
+
+.custom-visible-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 1);
+}
+
+.custom-visible-scrollbar::-webkit-scrollbar-button {
+  display: none;
+}
+
+/* Hide horizontal scrollbar completely */
+.custom-visible-scrollbar::-webkit-scrollbar:horizontal {
+  display: none;
+  height: 0;
+}
+
+/* Firefox support - vertical only */
+.custom-visible-scrollbar {
+  scrollbar-width: auto;
+  scrollbar-color: rgba(255, 255, 255, 0.8) transparent;
+  overflow-x: hidden;
+  /* Prevent horizontal overflow */
+}
+
+@layer components {
+
+  /* 
+    2. Background Styling
+  */
+  .app-glass-gradient {
+    background: var(--gradient-app-bg);
+    min-height: 100vh;
+    background-attachment: fixed;
+    position: relative;
+    z-index: 0;
+  }
+
+  .app-glass-gradient::before {
+    content: "";
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: var(--gradient-app-bg);
+    z-index: -1;
+  }
+
+  /* 
+    3. Glass Panels (Cards / UI Surfaces)
+  */
+  .glass-card {
+    background: rgba(255, 255, 255, 0.55);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border-radius: 20px;
+    /* 16-24px rounded corners */
+    border: 1px solid rgba(255, 255, 255, 0.4);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.35);
+    /* Inner glow */
+    transition: all 0.3s ease;
+  }
+
+  .glass-card:hover {
+    background: rgba(255, 255, 255, 0.65);
+    transform: translateY(-2px);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.5), 0 8px 32px rgba(0, 0, 0, 0.05);
+  }
+
+  .dark .glass-card {
+    background: rgba(30, 41, 59, 0.5);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    box-shadow: none;
+  }
+
+  /* 
+    Glass Header 
+  */
+  .glass-header {
+    @apply sticky top-0 z-50 w-full transition-all duration-300;
+    background: rgba(255, 255, 255, 0.4);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.3);
+  }
+
+  .dark .glass-header {
+    background: rgba(15, 23, 42, 0.6);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  }
+
+  /* 
+    Glass Sidebar 
+  */
+  .glass-sidebar {
+    background: rgba(255, 255, 255, 0.1);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border-right: 1px solid rgba(255, 255, 255, 0.2);
+    border-left: 1px solid rgba(255, 255, 255, 0.2);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+  }
+
+  .dark .glass-sidebar {
+    background: rgba(15, 23, 42, 0.6);
+    border-right: 1px solid rgba(255, 255, 255, 0.05);
+    border-left: 1px solid rgba(255, 255, 255, 0.05);
+  }
+
+  /* 
+    Buttons 
+    Primary: Soft Blue #5FB3E6
+  */
+  .btn-glass-primary {
+    @apply text-white font-semibold rounded-lg transition-all duration-300 shadow-sm relative overflow-hidden;
+    background: #2B95D6;
+    /* Darker Blue default */
+    border: 1px solid rgba(255, 255, 255, 0.3);
+  }
+
+  .btn-glass-primary:hover {
+    background: #0F6CBD;
+    /* Full Dark Primary Blue on hover */
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(15, 108, 189, 0.5);
+  }
+
+  .btn-glass-secondary {
+    @apply font-medium rounded-lg transition-all duration-300;
+    background: rgba(255, 255, 255, 0.4);
+    border: 1px solid rgba(255, 255, 255, 0.5);
+    color: #0F6CBD;
+    /* Primary Text Color */
+    backdrop-filter: blur(10px);
+  }
+
+  .btn-glass-secondary:hover {
+    background: rgba(255, 255, 255, 0.6);
+    border-color: #0F6CBD;
+  }
+
+  /* 
+    Inputs 
+  */
+  .form-glass-input {
+    @apply w-full rounded-xl text-foreground placeholder:text-muted-foreground outline-none transition-all duration-300 hover:scale-[1.02];
+    background: rgba(255, 255, 255, 0.5);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.5);
+  }
+
+  .form-glass-input:focus {
+    background: rgba(255, 255, 255, 0.8);
+    border-color: #5FB3E6;
+    box-shadow: 0 0 0 3px rgba(95, 179, 230, 0.2);
+  }
+
+  /* 
+    7. Pills (e.g. date badges) 
+  */
+  .glass-pill {
+    background: rgba(255, 255, 255, 0.6);
+    backdrop-filter: blur(12px);
+    border-radius: 999px;
+    padding: 8px 14px;
+    color: #4A5D73;
+    font-size: 0.875rem;
+    font-weight: 500;
+    border: 1px solid rgba(255, 255, 255, 0.3);
+  }
+
+  /* 
+    Text Gradient (Copilot style)
+  */
+  .text-gradient-copilot {
+    background: linear-gradient(135deg, #0F6CBD, #5FB3E6);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  /* Transparent panel for auth pages (no blur) */
+  .glass-panel-transparent {
+    background: rgba(255, 255, 255, 0.15);
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+  }
+
+  /* 
+    Double Glass Sandwich (Text/Content between layers)
+  */
+  .acrylic-glass-pill {
+    position: relative;
+    /* 1. Back Glass Layer */
+    background: rgba(255, 255, 255, 0.1);
+    /* Stronger base to prevent dark background bleed */
+    backdrop-filter: blur(40px);
+    /* Heavy blur for background integration */
+    -webkit-backdrop-filter: blur(40px);
+    border-radius: 50px;
+    box-shadow:
+      0 20px 50px rgba(0, 0, 0, 0.15),
+      /* Deep outer shadow */
+      inset 0 0 0 1px rgba(255, 255, 255, 0.2);
+    /* Edge definition */
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    isolation: isolate;
+    /* Create stacking context */
+    overflow: hidden;
+  }
+
+  /* 2. Front Glass Layer (The "Top Glass") */
+  .acrylic-glass-pill::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 10;
+    /* Sits on top of content */
+    pointer-events: none;
+    /* Allows interaction with form */
+    border-radius: 50px;
+
+    /* Reflective Sheen - Softer Textures */
+    background: linear-gradient(125deg,
+        rgba(255, 255, 255, 0.3) 0%,
+        rgba(255, 255, 255, 0.1) 40%,
+        rgba(255, 255, 255, 0.05) 60%,
+        rgba(255, 255, 255, 0.15) 100%);
+
+    /* Glass Hightlight/Refraction Border */
+    box-shadow: inset 1px 1px 0 rgba(255, 255, 255, 0.5), inset -1px -1px 0 rgba(255, 255, 255, 0.1);
+  }
+
+  /* 
+    Smooth Entry Animation 
+  */
+  @keyframes smoothFloatUp {
+    0% {
+      opacity: 0;
+      transform: translateY(30px) scale(0.95);
+    }
+
+    100% {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+
+  @keyframes float {
+
+    0%,
+    100% {
+      transform: translateY(0);
+    }
+
+    50% {
+      transform: translateY(-10px);
+    }
+  }
+
+  .animate-float {
+    animation: float 6s ease-in-out infinite;
+  }
+
+  .animation-delay-2000 {
+    animation-delay: 2s;
+  }
+
+  .animation-delay-4000 {
+    animation-delay: 4s;
+  }
+
+  .animate-item {
+    animation: smoothFloatUp 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
+    opacity: 0;
+  }
+
+  .stagger-1 {
+    animation-delay: 0.1s;
+  }
+
+  .stagger-2 {
+    animation-delay: 0.2s;
+  }
+
+  .stagger-3 {
+    animation-delay: 0.3s;
+  }
+
+  .stagger-4 {
+    animation-delay: 0.4s;
+  }
+
+  .stagger-5 {
+    animation-delay: 0.5s;
+  }
+
+  .stagger-6 {
+    animation-delay: 0.6s;
+  }
+
+  /* Chat Bubbles Glass Styles */
+  .glass-bubble-user {
+    background: linear-gradient(135deg, rgba(255, 255, 255, 0.4), rgba(255, 255, 255, 0.15));
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.4);
+    border-radius: 18px 4px 18px 18px;
+    padding: 12px 18px;
+    color: #0F6CBD;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.05), inset 0 0 0 1px rgba(255, 255, 255, 0.2);
+  }
+
+  .glass-bubble-assistant {
+    background: linear-gradient(135deg, rgba(255, 255, 255, 0.35), rgba(255, 255, 255, 0.1));
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    border-radius: 4px 18px 18px 18px;
+    padding: 12px 18px;
+    color: #1e293b;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.05), inset 0 0 0 1px rgba(255, 255, 255, 0.2);
+  }
+
+  .dark .glass-bubble-user {
+    background: linear-gradient(135deg, rgba(15, 108, 189, 0.3), rgba(15, 108, 189, 0.1));
+    border-color: rgba(95, 179, 230, 0.3);
+    color: #fff;
+  }
+
+  .dark .glass-bubble-assistant {
+    background: linear-gradient(135deg, rgba(30, 41, 59, 0.6), rgba(30, 41, 59, 0.3));
+    border-color: rgba(255, 255, 255, 0.1);
+    color: #e2e8f0;
+  }
+}

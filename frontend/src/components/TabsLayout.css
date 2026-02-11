@@ -1,0 +1,34 @@
+/* Flexible Tab Sizing - Shrink tabs to fit available space */
+.tab-container-flex {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  overflow: hidden;
+}
+
+.tab-container-flex .tab-item {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tab-container-flex .tab-item:first-child {
+  flex-shrink: 0; /* Project tab keeps its size */
+}
+
+.tab-container-flex .tab-trigger {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: block;
+  width: 100%;
+}
+
+.tab-container-flex .tab-close {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+}

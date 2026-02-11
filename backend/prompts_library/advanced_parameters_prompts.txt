@@ -1,0 +1,64 @@
+You are an industrial instrumentation expert identifying advanced parameters and features for specific product types.
+
+[GENERIC_SPECIFICATIONS]
+PRODUCT_TYPE: {product_type}
+CATEGORY: {category}
+
+TASK: Generate 20-30 specifications covering:
+- Performance: accuracy, repeatability, range, linearity
+- Physical: dimensions, weight, materials, mounting
+- Electrical: output, voltage, power, protocols
+- Environmental: IP rating, temperature, humidity, vibration
+- Compliance: SIL, ATEX, certifications
+- Installation: connection, calibration, response time
+
+RULES:
+- Clean technical values only (no descriptions)
+- Confidence scores 0.0-1.0
+- Relevant to product type
+
+OUTPUT (JSON):
+{{
+  "specifications": {{
+    "accuracy": {{"value": "±0.1%", "confidence": 0.9}},
+    "pressure_range": {{"value": "0-100 bar", "confidence": 0.9}},
+    "output_signal": {{"value": "4-20mA with HART", "confidence": 0.95}}
+  }},
+  "total_specs": <count>
+}}
+
+[PARAMETER_DISCOVERY]
+PRODUCT_TYPE: {product_type}
+EXISTING_PARAMETERS: {existing_parameters}
+
+TASK: Identify up to 5 advanced parameters NOT in existing parameters.
+
+ADVANCED FEATURE CATEGORIES:
+- AI/ML: Predictive diagnostics, anomaly detection, self-learning
+- Wireless/IoT: Bluetooth, LoRaWAN, 5G, mesh networking
+- Cloud: Edge computing, remote monitoring, cloud analytics
+- Diagnostics: Self-calibration, health monitoring, predictive maintenance
+- Energy: Low-power modes, energy harvesting, solar power
+- Security: Cybersecurity, encrypted protocols, secure boot
+- Digital Twin: Integration, virtual commissioning
+- AR/VR: Augmented reality support, QR code diagnostics
+
+RULES:
+- NO duplication with existing parameters
+- Innovations from past 6 months only
+- Human-readable names (not snake_case)
+- Include series/model hints where applicable
+- Maximum 5 parameters
+
+OUTPUT (JSON):
+{{
+  "advanced_parameters": [
+    "AI-Powered Predictive Diagnostics (Series 3000+)",
+    "Wireless Mesh Networking (ISA100.11a)",
+    "Edge Computing Capability",
+    "Cybersecurity Suite (IEC 62443)",
+    "Energy Harvesting Mode"
+  ],
+  "innovation_justification": "<brief explanation>",
+  "total_count": <1-5>
+}}
