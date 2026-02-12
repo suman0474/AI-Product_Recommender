@@ -38,7 +38,7 @@ logging.getLogger("azure.identity").setLevel(logging.WARNING)
 from googleapiclient.discovery import build
 
 # --- NEW IMPORTS FOR AUTHENTICATION ---
-from core.auth.auth_models import db, User, Log, StandardsDocument
+from core.auth.auth_models import db, User
 from core.auth.auth_utils import hash_password, check_password
 
 # --- Cosmos DB Project Management ---
@@ -299,7 +299,7 @@ app.secret_key = os.getenv('SECRET_KEY', 'fallback-secret-key-for-development')
 # Initialize database and session (SESSION_TYPE is now properly set)
 db.init_app(app)
 
-# Note: Database tables (User, Log) are created by create_db() at end of file.
+# Note: Database tables (User) are created by create_db() at end of file.
 # This operation is SAFE: it only creates tables if they don't exist.
 # Existing tables and data are preserved across redeploys.
 
