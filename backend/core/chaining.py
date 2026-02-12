@@ -1,0 +1,868 @@
+# chaining.py
+# Contains AI components setup and analysis chain creation (LangChain removed)
+import json
+import logging
+import os
+import time
+import random
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from core.models import VendorAnalysis, OverallRanking, RequirementValidation
+from core.loading import load_requirements_schema, load_products_runnable, load_pdf_content_runnable
+
+# Create the actual load_products_data function from the runnable
+_load_products_runnable_instance = load_products_runnable()
+# Access the inner function from the RunnableLambda
+load_products_data = _load_products_runnable_instance.func
+
+# Create load_pdf_content function similarly
+_load_pdf_content_runnable_instance = load_pdf_content_runnable()
+load_pdf_content = _load_pdf_content_runnable_instance.func
+from services.azure.blob_utils import get_available_vendors, get_vendors_for_product_type
+
+# Import standardization utilities
+from services.products.standardization import standardize_ranking_result
+
+# Import LLM fallback utilities
+from config import AgenticConfig
+from services.llm.fallback import FallbackLLMClient
+
+# Import LangChain Runnable base class for compatibility
+from langchain_core.runnables import RunnableLambda
+from langchain_core.prompts import ChatPromptTemplate
+
+# PHASE 1 FIX: load_dotenv() removed - initialized once in initialization.py
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+class GeminiClient(RunnableLambda):
+    """LangChain-compatible wrapper for Google Generative AI client with OpenAI fallback"""
+    def __init__(self, model_name, temperature=0.1, api_key=None, openai_api_key=None):
+        self.model_name = model_name
+        self.temperature = temperature
+
+        # Use FallbackLLMClient for automatic fallback
+        self.client = FallbackLLMClient(
+            model_name=model_name,
+            temperature=temperature,
+            api_key=api_key,
+            openai_api_key=openai_api_key
+        )
+
+        # Initialize RunnableLambda with the invoke_impl method
+        super().__init__(self.invoke_impl)
+
+    def invoke_impl(self, input_data, config=None):
+        """Internal invoke implementation (LangChain-compatible)"""
+        try:
+            # Handle different input types
+            if isinstance(input_data, dict):
+                # If input is a dict, format it as a prompt
+                prompt = str(input_data)
+            elif isinstance(input_data, ChatPromptTemplate):
+                # If input is a ChatPromptTemplate, format it
+                prompt = input_data.format()
+            else:
+                # Otherwise use as-is
+                prompt = str(input_data)
+
+            return self.client.invoke(prompt)
+        except Exception as e:
+            logging.error(f"Error invoking LLM (both Gemini and OpenAI failed): {e}")
+            raise
+
+
+def _normalize_ranking_fields(parsed):
+    """Normalize LLM output field names to match Pydantic RankedProduct model."""
+    # Handle top-level key variations
+    if 'ranked_products' not in parsed and 'rankedProducts' in parsed:
+        parsed['ranked_products'] = parsed.pop('rankedProducts')
+    
+    if 'ranked_products' in parsed:
+        for product in parsed['ranked_products']:
+            # Map common field variations to expected snake_case keys
+            mappings = {
+                'product_name': ['name', 'productName', 'product', 'model', 'modelName'],
+                'overall_score': ['score', 'overallScore', 'matchScore', 'match_score', 'rating'],
+                'requirements_match': ['requirementsMatch', 'matches', 'isMatch', 'matchesRequirements', 'exactMatch'],
+                'key_strengths': ['keyStrengths', 'strengths', 'pros', 'advantages'],
+                'concerns': ['limitations', 'weaknesses', 'cons', 'issues'],
+                'model_family': ['modelFamily', 'family', 'series'],
+                'vendor': ['vendor', 'manufacturer', 'brand'],
+                'rank': ['rank', 'position', 'order']
+            }
+            for target_key, source_keys in mappings.items():
+                if target_key not in product or product.get(target_key) in [None, '', 0, False]:
+                    for source in source_keys:
+                        if source in product and product.get(source) not in [None, '']:
+                            product[target_key] = product[source]
+                            break
+            
+            # Ensure numeric fields are integers
+            if 'overall_score' in product:
+                try:
+                    product['overall_score'] = int(product['overall_score'])
+                except (ValueError, TypeError):
+                    product['overall_score'] = 0
+            
+            # Ensure requirements_match is boolean
+            if 'requirements_match' in product:
+                val = product['requirements_match']
+                if isinstance(val, str):
+                    product['requirements_match'] = val.lower() in ['true', 'yes', '1']
+                elif isinstance(val, (int, float)):
+                    product['requirements_match'] = val >= 80
+    
+    return parsed
+
+
+def parse_json_response(text, pydantic_model=None):
+    """Parse JSON response from LLM, with optional Pydantic validation"""
+    try:
+        # Clean the response
+        text = text.strip()
+        if text.startswith("```json"):
+            text = text[7:]
+        if text.startswith("```"):
+            text = text[3:]
+        if text.endswith("```"):
+            text = text[:-3]
+        text = text.strip()
+
+        # Parse JSON
+        parsed = json.loads(text)
+        
+        # Log raw parsed structure for debugging
+        if pydantic_model and pydantic_model.__name__ == 'OverallRanking':
+            logging.info(f"[RANKING_DEBUG] Parsed JSON keys: {list(parsed.keys())}")
+            if 'ranked_products' in parsed or 'rankedProducts' in parsed:
+                products = parsed.get('ranked_products', parsed.get('rankedProducts', []))
+                if products and len(products) > 0:
+                    logging.info(f"[RANKING_DEBUG] First product keys: {list(products[0].keys())}")
+                    logging.info(f"[RANKING_DEBUG] First product sample: {str(products[0])[:300]}")
+        
+        # Normalize field names for ranking results
+        if pydantic_model and pydantic_model.__name__ == 'OverallRanking':
+            parsed = _normalize_ranking_fields(parsed)
+
+        # Validate with Pydantic if model provided
+        if pydantic_model:
+            validated = pydantic_model(**parsed)
+            return validated.dict() if hasattr(validated, 'dict') else validated
+
+        return parsed
+    except json.JSONDecodeError as e:
+        logging.error(f"Failed to parse JSON: {e}")
+        logging.error(f"Raw text: {text[:500]}")
+        raise
+    except Exception as e:
+        logging.error(f"Error parsing response: {e}")
+        raise
+
+
+def get_format_instructions(pydantic_model):
+    """Generate format instructions from Pydantic model"""
+    if not pydantic_model:
+        return "Return a valid JSON object."
+
+    schema = pydantic_model.schema()
+    properties = schema.get('properties', {})
+
+    instructions = f"Return a JSON object with the following structure:\n{{\n"
+    for key, value in properties.items():
+        field_type = value.get('type', 'any')
+        instructions += f'  "{key}": <{field_type}>,\n'
+    instructions += "}"
+
+    return instructions
+
+
+def setup_ai_components():
+    """Setup AI components with OpenAI fallback support"""
+
+    # Get OpenAI API key for fallback
+    openai_key = os.getenv("OPENAI_API_KEY")
+
+    # Create different models for different purposes with fallback
+    # Multi-tier approach: DEFAULT for standard tasks, PRO for quality-critical tasks, LITE for lightweight tasks
+    llm_flash = GeminiClient(
+        model_name="gemini-2.5-flash",
+        temperature=0.1,
+        api_key=os.getenv("GOOGLE_API_KEY"),
+        openai_api_key=openai_key
+    )
+
+    llm_flash_lite = GeminiClient(
+        model_name="gemini-2.5-flash",
+        temperature=0.1,
+        api_key=os.getenv("GOOGLE_API_KEY"),
+        openai_api_key=openai_key
+    )
+
+    llm_pro = GeminiClient(
+        model_name=AgenticConfig.FLASH_MODEL,
+        temperature=0.1,
+        api_key=os.getenv("GOOGLE_API_KEY1"),
+        openai_api_key=openai_key
+    )
+
+    # Get format instructions for different tasks
+    validation_format_instructions = get_format_instructions(RequirementValidation)
+    vendor_format_instructions = get_format_instructions(VendorAnalysis)
+    ranking_format_instructions = get_format_instructions(OverallRanking)
+    additional_requirements_format_instructions = get_format_instructions(RequirementValidation)
+
+    return {
+        'llm': llm_flash,  # Alias for backward compatibility with main.py endpoints
+        'llm_flash': llm_flash,
+        'llm_flash_lite': llm_flash_lite,
+        'llm_pro': llm_pro,
+        'validation_format_instructions': validation_format_instructions,
+        'vendor_format_instructions': vendor_format_instructions,
+        'ranking_format_instructions': ranking_format_instructions,
+        'additional_requirements_format_instructions': additional_requirements_format_instructions,
+    }
+
+
+
+# Maintain backward compatibility
+def setup_langchain_components():
+    """Backward compatibility wrapper"""
+    return setup_ai_components()
+
+
+def invoke_validation_chain(components, user_input, schema, format_instructions):
+    """Invoke validation chain"""
+    from prompts import get_validation_prompt
+
+    prompt = get_validation_prompt(user_input, schema, format_instructions)
+    llm = components['llm_flash']
+    response = llm.invoke(prompt)
+
+    return parse_json_response(response, RequirementValidation)
+
+
+def invoke_requirements_chain(components, user_input):
+    """Invoke requirements chain"""
+    from prompts import get_requirements_prompt
+
+    prompt = get_requirements_prompt(user_input)
+    llm = components['llm_flash']
+    response = llm.invoke(prompt)
+
+    return response
+
+
+def invoke_vendor_chain(
+    components, 
+    vendor: str,
+    structured_requirements, 
+    products_json, 
+    pdf_content_json, 
+    format_instructions,
+    applicable_standards=None,
+    standards_specs=None
+):
+    """
+    Invoke vendor analysis chain.
+    
+    Args:
+        components: LLM and other component references
+        vendor: Name of vendor being analyzed
+        structured_requirements: User requirements string
+        products_json: Product catalog data
+        pdf_content_json: PDF datasheet content
+        format_instructions: Output format instructions
+        applicable_standards: List of applicable engineering standards
+        standards_specs: Standards specifications from documents
+    
+    Returns:
+        Vendor analysis result dict
+    """
+    from prompts import get_vendor_prompt
+
+    prompt = get_vendor_prompt(
+        vendor=vendor,
+        structured_requirements=structured_requirements,
+        products_json=products_json,
+        pdf_content_json=pdf_content_json,
+        format_instructions=format_instructions,
+        applicable_standards=applicable_standards,
+        standards_specs=standards_specs
+    )
+    llm = components['llm_pro']
+    response = llm.invoke(prompt)
+
+    parsed_json = parse_json_response(response, pydantic_model=None)
+
+    # Robustly handle malformed structure (e.g. missing 'vendor_matches' wrapper)
+    # Use the vendor parameter passed to this function
+    normalized_json = parse_vendor_analysis_response(parsed_json, vendor=vendor)
+
+    # FIX: Don't validate as VendorAnalysis - that's for a single match, not the wrapper
+    # The normalized_json already has the correct structure: {"vendor_matches": [...]}
+    # Individual matches inside vendor_matches are already validated by the LLM prompt
+    logging.debug(f"[VendorChain] Returning normalized response with {len(normalized_json.get('vendor_matches', []))} matches")
+    return normalized_json
+
+
+def invoke_ranking_chain(components, vendor_analysis, format_instructions):
+    """Invoke ranking chain"""
+    from prompts import get_ranking_prompt
+
+    prompt = get_ranking_prompt(vendor_analysis, format_instructions)
+    llm = components['llm_pro']
+    response = llm.invoke(prompt)
+    
+    # Debug: Log first part of raw response
+    logging.info(f"[RANKING_DEBUG] Raw response type: {type(response)}, length: {len(str(response))}")
+    logging.info(f"[RANKING_DEBUG] Raw response (first 300 chars): {str(response)[:300]}")
+
+    # Robust parsing sequence
+    # 1. Parse JSON without strict model
+    parsed_json = parse_json_response(response, pydantic_model=None)
+    
+    # 2. Fix structure (wrap list if needed) - using helper defined below
+    normalized_json = parse_ranking_response(parsed_json)
+    
+    # 3. Normalize field names
+    normalized_json = _normalize_ranking_fields(normalized_json)
+
+    # 4. Pydantic validation
+    try:
+        validated = OverallRanking(**normalized_json)
+        return validated.dict() if hasattr(validated, 'dict') else validated
+    except Exception as e:
+         logging.warning(f"[RankingChain] Pydantic validation failed: {e}")
+         return normalized_json
+
+
+def invoke_additional_requirements_chain(components, user_input, product_type, schema, format_instructions):
+    """Invoke additional requirements chain"""
+    from prompts import get_additional_requirements_prompt
+
+    prompt = get_additional_requirements_prompt(user_input, product_type, schema, format_instructions)
+    llm = components['llm_flash']
+    response = llm.invoke(prompt)
+
+    return parse_json_response(response, RequirementValidation)
+
+
+def invoke_schema_description_chain(components, field_name, product_type):
+    """Invoke schema description chain"""
+    from prompts import get_schema_description_prompt
+
+    prompt = get_schema_description_prompt(field_name, product_type)
+    llm = components['llm_flash_lite']
+    response = llm.invoke(prompt)
+
+    return response
+
+
+def get_final_ranking(vendor_analysis_dict):
+    """
+    Processes a dictionary of vendor analysis to create a final ranked list.
+    Takes a dictionary, not a Pydantic object.
+    """
+    products = []
+    # Use .get() for safe access in case vendor_matches is missing
+    if not vendor_analysis_dict or not vendor_analysis_dict.get('vendor_matches'):
+        return {'ranked_products': []}
+
+    for product in vendor_analysis_dict['vendor_matches']:
+        product_score = product.get('match_score', 0)
+        product_name = product.get('product_name', '')
+
+        # Extract model_family from the vendor analysis
+        model_family = product.get('model_family', '')
+
+        # Fallback: if model_family is empty, use product_name
+        if not model_family:
+            model_family = product_name
+
+        # Compute requirements_match from score if not set (≥80% = exact match)
+        computed_match = product_score >= 80
+        
+        # Ensure requirements_match is a boolean
+        products.append({
+            'product_name': product_name,
+            'vendor': product.get('vendor', ''),
+            'model_family': model_family,
+            'match_score': product_score,
+            'requirements_match': product.get('requirements_match', computed_match),
+            'reasoning': product.get('reasoning', ''),
+            'limitations': product.get('limitations', ''),
+            # Additional data fields for enhanced product cards
+            'matched_requirements': product.get('matched_requirements', {}),
+            'unmatched_requirements': product.get('unmatched_requirements', []),
+            'standards_compliance': product.get('standards_compliance', {}),
+            'key_strengths': product.get('key_strengths', []),
+            'recommendation': product.get('recommendation', '')
+        })
+
+    products_sorted = sorted(products, key=lambda x: x['match_score'], reverse=True)
+
+    final_ranking = []
+    rank = 1
+    for product in products_sorted:
+        final_ranking.append({
+            'rank': rank,
+            'product_name': product['product_name'],
+            'vendor': product['vendor'],
+            'model_family': product['model_family'],
+            'overall_score': product['match_score'],
+            'requirements_match': product['requirements_match'],
+            'key_strengths': product['reasoning'],
+            'concerns': product['limitations'],
+            # Additional data fields for enhanced product cards
+            'matched_requirements': product.get('matched_requirements', {}),
+            'unmatched_requirements': product.get('unmatched_requirements', []),
+            'standards_compliance': product.get('standards_compliance', {}),
+            'key_strengths_list': product.get('key_strengths', []),
+            'recommendation': product.get('recommendation', '')
+        })
+        rank += 1
+
+    # Apply standardization to the ranking result
+    ranking_result = {'ranked_products': final_ranking}
+    standardized_ranking = standardize_ranking_result(ranking_result)
+    return standardized_ranking
+
+
+def to_dict_if_pydantic(obj):
+    """Helper function to safely convert Pydantic object to dict."""
+    if hasattr(obj, 'dict'):
+        return obj.dict()
+    return obj
+
+
+def parse_vendor_analysis_response(raw_response, vendor: str = "Unknown"):
+    """
+    Parse vendor analysis response with robust fallback for malformed responses.
+    
+    This handles cases where the LLM returns:
+    - A single vendor match (not wrapped in vendor_matches)
+    - A list of matches (not wrapped in vendor_matches)
+    - Prose/text instead of JSON (returns empty with error)
+    - Properly formatted response (returned as-is)
+    """
+    result = to_dict_if_pydantic(raw_response)
+    
+    # If response already has vendor_matches, return as-is
+    if isinstance(result, dict) and 'vendor_matches' in result:
+        return result
+    
+    # If response is a single vendor match dict, wrap it
+    if isinstance(result, dict) and any(k in result for k in ['vendor', 'product_name', 'match_score']):
+        logging.info(f"[VendorAnalysisParse] Wrapping single match response for {vendor}")
+        return {'vendor_matches': [result]}
+    
+    # If response is a list, assume it's a list of matches
+    if isinstance(result, list):
+        logging.info(f"[VendorAnalysisParse] Converting list response to vendor_matches for {vendor}")
+        return {'vendor_matches': result}
+    
+    # Fallback: return empty result with error
+    logging.warning(f"[VendorAnalysisParse] Could not parse response for {vendor}: {type(result)}")
+    return {'vendor_matches': [], 'error': f'Response parsing failed for {vendor}'}
+
+
+def parse_ranking_response(raw_response):
+    """
+    Parse ranking response with robust fallback.
+    Handles cases where LLM returns a list of products directly instead of wrapped object.
+    """
+    result = to_dict_if_pydantic(raw_response)
+    
+    # If response has ranked_products key, return as-is
+    if isinstance(result, dict) and ('ranked_products' in result or 'rankedProducts' in result):
+        return result
+        
+    # If response is a list, wrap it
+    if isinstance(result, list):
+        logging.info("[RankingParse] Wrapping list response into ranked_products")
+        return {'ranked_products': result}
+        
+    # If response is a dict but has obscure keys, try to find a list value
+    if isinstance(result, dict):
+        for key, value in result.items():
+            if isinstance(value, list) and len(value) > 0 and isinstance(value[0], dict):
+                 logging.info(f"[RankingParse] Found candidate list in key '{key}'")
+                 return {'ranked_products': value}
+                 
+    # Fallback
+    logging.warning(f"[RankingParse] Could not parse ranking response: {type(result)}")
+    return {'ranked_products': [], 'error': 'Ranking parsing failed'}
+
+
+def _prepare_vendor_payloads(products_json_str, pdf_content_json_str):
+    """Split combined vendor data into per-vendor payloads."""
+    try:
+        products = json.loads(products_json_str) if products_json_str else []
+    except (json.JSONDecodeError, TypeError):
+        logging.warning("Failed to parse products_json; defaulting to empty list.")
+        products = []
+
+    try:
+        pdf_content = json.loads(pdf_content_json_str) if pdf_content_json_str else {}
+    except (json.JSONDecodeError, TypeError):
+        logging.warning("Failed to parse pdf_content_json; defaulting to empty dict.")
+        pdf_content = {}
+
+    logging.info(f"[VENDOR_PAYLOADS] Processing {len(pdf_content)} vendors from filtered PDF content")
+
+    vendor_payloads = {}
+
+    # First, seed payloads from PDF content
+    for vendor_name, text in pdf_content.items():
+        vendor_payloads[vendor_name] = {"products": [], "pdf_text": text}
+
+    # Then, attach products to the corresponding PDF vendors
+    for product in products:
+        if not isinstance(product, dict):
+            continue
+        vendor_name = product.get("vendor") or product.get("vendor_name") or "Unknown Vendor"
+        if vendor_name in vendor_payloads:
+            vendor_payloads[vendor_name]["products"].append(product)
+
+    # Final filtering: keep only vendors with non-empty PDF text
+    vendor_payloads = {
+        vendor: data
+        for vendor, data in vendor_payloads.items()
+        if data.get("pdf_text") and str(data["pdf_text"]).strip()
+    }
+
+    return vendor_payloads
+
+
+def _invoke_vendor_chain_for_payload(
+    components,
+    format_instructions,
+    structured_requirements,
+    vendor_name,
+    vendor_data,
+):
+    """Invoke vendor chain for a single vendor."""
+    pdf_text = vendor_data.get("pdf_text")
+    pdf_payload = json.dumps({vendor_name: pdf_text}, ensure_ascii=False) if pdf_text else json.dumps({})
+    products_payload = json.dumps(vendor_data.get("products", []), ensure_ascii=False)
+
+    return invoke_vendor_chain(
+        components,
+        structured_requirements,
+        products_payload,
+        pdf_payload,
+        format_instructions
+    )
+
+
+def _run_parallel_vendor_analysis(
+    structured_requirements,
+    products_json_str,
+    pdf_content_json_str,
+    components,
+    format_instructions,
+):
+    """Fan out vendor analysis so each vendor hits the LLM independently."""
+    payloads = _prepare_vendor_payloads(products_json_str, pdf_content_json_str)
+
+    if not payloads:
+        logging.warning("[VENDOR_ANALYSIS] No vendor payloads available for analysis.")
+        return {"vendor_matches": [], "vendor_run_details": []}
+
+    logging.info("[VENDOR_ANALYSIS] Preparing analysis for vendors: %s", list(payloads.keys()))
+
+    max_workers_env = os.getenv("VENDOR_ANALYSIS_MAX_WORKERS")
+    try:
+        max_workers = int(max_workers_env) if max_workers_env else 5
+    except ValueError:
+        max_workers = 5
+
+    max_workers = max(1, min(len(payloads), max_workers))
+
+    logging.info(
+        "[VENDOR_ANALYSIS] Using max_workers=%s for %s vendors",
+        max_workers,
+        len(payloads),
+    )
+
+    vendor_matches = []
+    run_details = []
+
+    def _worker(vendor, data):
+        result_dict = None
+        error = None
+        max_retries = 3
+        base_retry_delay = 15
+
+        logging.info("[VENDOR_ANALYSIS] START vendor=%s", vendor)
+
+        for attempt in range(max_retries):
+            try:
+                result = _invoke_vendor_chain_for_payload(
+                    components,
+                    format_instructions,
+                    structured_requirements,
+                    vendor,
+                    data,
+                )
+                result_dict = to_dict_if_pydantic(result)
+                break
+
+            except Exception as exc:
+                error_msg = str(exc)
+                is_rate_limit = "429" in error_msg or "Resource has been exhausted" in error_msg or "quota" in error_msg.lower()
+
+                if is_rate_limit and attempt < max_retries - 1:
+                    wait_time = base_retry_delay * (2 ** attempt)
+                    logging.warning(f"[VENDOR_ANALYSIS] Rate limit hit for {vendor}, retry {attempt + 1}/{max_retries} after {wait_time}s")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logging.error(f"Vendor analysis failed for {vendor}: {error_msg}")
+                    error = error_msg
+                    break
+
+        logging.info("[VENDOR_ANALYSIS] END   vendor=%s error=%s", vendor, error)
+        return vendor, result_dict, error
+
+    from agentic.infrastructure.state.context.managers import managed_thread_pool
+    with managed_thread_pool("chaining_ops", max_workers=max_workers) as pool:
+        executor = pool._executor
+        future_map = {}
+        for i, (vendor, data) in enumerate(payloads.items()):
+            if i > 0:
+                time.sleep(10)
+                logging.info("[VENDOR_ANALYSIS] Submitting thread %d for vendor: %s (after 10s delay)", i+1, vendor)
+            else:
+                logging.info("[VENDOR_ANALYSIS] Submitting thread %d for vendor: %s (no delay)", i+1, vendor)
+            future = executor.submit(_worker, vendor, data)
+            future_map[future] = vendor
+
+        for future in as_completed(future_map):
+            vendor = future_map[future]
+            vendor_result = None
+            error = None
+            try:
+                vendor, vendor_result, error = future.result()
+            except Exception as exc:
+                error = str(exc)
+                logging.error(f"Unexpected failure joining future for {vendor}: {exc}")
+
+            if vendor_result and isinstance(vendor_result.get("vendor_matches"), list):
+                for match in vendor_result["vendor_matches"]:
+                    vendor_matches.append(to_dict_if_pydantic(match))
+                run_details.append({"vendor": vendor, "status": "success"})
+            else:
+                entry = {
+                    "vendor": vendor,
+                    "status": "failed" if error else "empty",
+                }
+                if error:
+                    entry["error"] = error
+                run_details.append(entry)
+
+    return {"vendor_matches": vendor_matches, "vendor_run_details": run_details}
+
+
+def load_vendors_and_filter(input_dict):
+    """Load vendors from database and apply CSV filtering after product type detection"""
+    # Get detected product type from previous step
+    detected_product_type = input_dict.get("detected_product_type", None)
+    logging.info(f"[VENDOR_LOADING] Using detected product type: {detected_product_type}")
+
+    # Get vendors that match the detected product type
+    if detected_product_type:
+        all_vendors = get_vendors_for_product_type(detected_product_type)
+        logging.info(f"[VENDOR_LOADING] Found {len(all_vendors)} vendors for product type '{detected_product_type}': {all_vendors}")
+    else:
+        all_vendors = get_available_vendors()
+        logging.info(f"[VENDOR_LOADING] No product type detected, found {len(all_vendors)} vendors in database: {all_vendors}")
+
+    # Check for CSV vendor filter in session
+    from flask import session
+    csv_vendor_filter = session.get('csv_vendor_filter', {})
+    allowed_vendors = csv_vendor_filter.get('vendor_names', [])
+
+    if allowed_vendors:
+        logging.info(f"[CSV_FILTER] Restricting analysis to CSV vendors: {allowed_vendors}")
+
+        from services.products.standardization import standardize_vendor_name
+
+        filtered_vendors = []
+        logging.info(f"[CSV_FILTER] Starting exact matching (case-insensitive) with {len(all_vendors)} DB vendors against {len(allowed_vendors)} CSV vendors")
+
+        # Create normalized vendor lookup for exact matching
+        allowed_vendors_lower = {v.lower().strip(): v for v in allowed_vendors}
+
+        try:
+            for i, db_vendor in enumerate(all_vendors):
+                logging.info(f"[CSV_FILTER] Processing DB vendor {i+1}/{len(all_vendors)}: '{db_vendor}'")
+
+                db_vendor_lower = db_vendor.lower().strip()
+
+                if db_vendor_lower in allowed_vendors_lower:
+                    matched_csv_vendor = allowed_vendors_lower[db_vendor_lower]
+                    filtered_vendors.append(db_vendor)
+                    logging.info(f"[CSV_FILTER] ✓ Matched DB vendor '{db_vendor}' with CSV vendor '{matched_csv_vendor}' (Exact match)")
+                else:
+                    logging.info(f"[CSV_FILTER] ✗ No exact match found for DB vendor '{db_vendor}'")
+
+        except Exception as e:
+            logging.error(f"[CSV_FILTER] Error in vendor matching: {e}")
+            filtered_vendors = all_vendors
+            logging.warning(f"[CSV_FILTER] Falling back to all {len(filtered_vendors)} vendors due to error")
+
+        logging.info(f"[CSV_FILTER] After fuzzy filtering, will analyze vendors: {filtered_vendors}")
+
+        if not filtered_vendors:
+            logging.warning("[FALLBACK] CSV filtering resulted in 0 vendors, falling back to all database vendors")
+            filtered_vendors = all_vendors
+            logging.info(f"[FALLBACK] Using all {len(filtered_vendors)} database vendors for analysis: {filtered_vendors}")
+    else:
+        filtered_vendors = all_vendors
+        logging.info("[CSV_FILTER] No CSV vendor filter found, analyzing all vendors")
+
+    if not filtered_vendors:
+        logging.warning("[SAFETY_FALLBACK] No vendors available after all filtering")
+        if all_vendors:
+            filtered_vendors = all_vendors
+            logging.info(f"[SAFETY_FALLBACK] Using {len(filtered_vendors)} product-specific vendors: {filtered_vendors}")
+        else:
+            logging.error("[SAFETY_FALLBACK] No vendors found for this product type - analysis cannot proceed")
+
+    enriched = dict(input_dict)
+    enriched["available_vendors"] = all_vendors
+    enriched["filtered_vendors"] = filtered_vendors
+    return enriched
+
+
+def load_filtered_pdf_content(input_dict):
+    """Load PDF content only for filtered vendors"""
+    filtered_vendors = input_dict.get("filtered_vendors", [])
+
+    if not filtered_vendors:
+        logging.warning("[PDF_LOADING] No filtered vendors available for PDF loading")
+        enriched = dict(input_dict)
+        enriched["pdf_content_json"] = json.dumps({})
+        return enriched
+
+    logging.info(f"[PDF_LOADING] Loading PDFs for {len(filtered_vendors)} vendors: {filtered_vendors}")
+
+    # Use the module-level load_pdf_content function (already imported from runnable)
+    pdf_result = load_pdf_content(input_dict)
+    all_pdf_content = json.loads(pdf_result.get("pdf_content_json", "{}"))
+
+    # Filter PDF content to only include filtered vendors
+    filtered_pdf_content = {}
+    for vendor in filtered_vendors:
+        if vendor in all_pdf_content:
+            filtered_pdf_content[vendor] = all_pdf_content[vendor]
+            logging.info(f"[PDF_LOADING] Loaded PDF for vendor: {vendor}")
+        else:
+            # Try exact matching (case-insensitive)
+            matched_key = None
+            vendor_lower = vendor.lower().strip()
+
+            for pdf_vendor_key in all_pdf_content.keys():
+                pdf_vendor_lower = pdf_vendor_key.lower().strip()
+
+                if vendor_lower == pdf_vendor_lower:
+                    matched_key = pdf_vendor_key
+                    break
+
+            if matched_key:
+                filtered_pdf_content[vendor] = all_pdf_content[matched_key]
+                logging.info(f"[PDF_LOADING] Loaded PDF for vendor: {vendor} (matched with: {matched_key})")
+            else:
+                logging.warning(f"[PDF_LOADING] No PDF found for vendor: {vendor}")
+
+    logging.info(f"[PDF_LOADING] Successfully loaded PDFs for {len(filtered_pdf_content)} vendors")
+
+    enriched = dict(pdf_result)
+    enriched["pdf_content_json"] = json.dumps(filtered_pdf_content)
+    enriched["filtered_vendors"] = filtered_vendors
+    return enriched
+
+
+def create_analysis_chain(components, vendors_base_path=None):
+    """Create analysis chain without LangChain"""
+
+    def run_analysis(input_dict):
+        """Run the analysis pipeline"""
+        user_input = input_dict.get("user_input", "")
+        
+        try:
+            # Step 1: Generate structured requirements
+            logging.info("[PIPELINE] Step 1: Generating structured requirements")
+            structured_requirements = invoke_requirements_chain(components, user_input)
+            input_dict["structured_requirements"] = structured_requirements
+        except Exception as e:
+            logging.error(f"[PIPELINE] Step 1 FAILED: {e}")
+            raise Exception(f"Failed to generate structured requirements: {e}")
+
+        try:
+            # Step 2: Detect product type
+            logging.info("[PIPELINE] Step 2: Detecting product type")
+            schema = load_requirements_schema()
+            validation_result = invoke_validation_chain(
+                components,
+                user_input,
+                json.dumps(schema, indent=2),
+                components['validation_format_instructions']
+            )
+            input_dict["detected_product_type"] = validation_result.get('product_type', None)
+        except Exception as e:
+            logging.error(f"[PIPELINE] Step 2 FAILED: {e}")
+            raise Exception(f"Failed to detect product type: {e}")
+
+        try:
+            # Step 3: Load product data
+            logging.info("[PIPELINE] Step 3: Loading product data")
+            input_dict = load_products_data(input_dict)
+        except Exception as e:
+            logging.error(f"[PIPELINE] Step 3 FAILED: {e}")
+            raise Exception(f"Failed to load product data: {e}")
+
+        try:
+            # Step 4: Load and filter vendors
+            logging.info("[PIPELINE] Step 4: Loading and filtering vendors")
+            input_dict = load_vendors_and_filter(input_dict)
+        except Exception as e:
+            logging.error(f"[PIPELINE] Step 4 FAILED: {e}")
+            raise Exception(f"Failed to load and filter vendors: {e}")
+
+        try:
+            # Step 5: Load filtered PDF content
+            logging.info("[PIPELINE] Step 5: Loading filtered PDF content")
+            input_dict = load_filtered_pdf_content(input_dict)
+        except Exception as e:
+            logging.error(f"[PIPELINE] Step 5 FAILED: {e}")
+            raise Exception(f"Failed to load PDF content: {e}")
+
+        try:
+            # Step 6: Run parallel vendor analysis
+            logging.info("[PIPELINE] Step 6: Running parallel vendor analysis")
+            input_dict["vendor_analysis"] = _run_parallel_vendor_analysis(
+                structured_requirements=input_dict.get("structured_requirements"),
+                products_json_str=input_dict.get("products_json"),
+                pdf_content_json_str=input_dict.get("pdf_content_json"),
+                components=components,
+                format_instructions=components['vendor_format_instructions']
+            )
+        except Exception as e:
+            logging.error(f"[PIPELINE] Step 6 FAILED: {e}")
+            raise Exception(f"Failed to run vendor analysis: {e}")
+
+        try:
+            # Step 7: Generate final ranking
+            logging.info("[PIPELINE] Step 7: Generating final ranking")
+            input_dict["overall_ranking"] = get_final_ranking(
+                to_dict_if_pydantic(input_dict.get("vendor_analysis", {}))
+            )
+        except Exception as e:
+            logging.error(f"[PIPELINE] Step 7 FAILED: {e}")
+            raise Exception(f"Failed to generate final ranking: {e}")
+
+        return input_dict
+
+    return run_analysis
