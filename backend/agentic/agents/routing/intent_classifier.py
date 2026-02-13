@@ -16,7 +16,8 @@ Usage:
 
 import logging
 import time
-from typing import Dict, Optional, Any
+import random  # Added for greeting responses
+from typing import Dict, Optional, Any, Tuple
 from enum import Enum
 from dataclasses import dataclass
 from datetime import datetime
@@ -34,6 +35,18 @@ try:
 except ImportError:
     _REGISTRY_AVAILABLE = False
     logger.debug("[Router] WorkflowRegistry not available - using IntentConfig fallback")
+
+# PATH 2: Import validation and metrics modules
+try:
+    from .domain_validator import get_domain_validator
+    from .classification_metrics import get_classification_metrics
+    DOMAIN_VALIDATOR_AVAILABLE = True
+    METRICS_AVAILABLE = True
+    logger.info("[INTENT_ROUTER] PATH 2 modules available")
+except ImportError as e:
+    logger.warning(f"[INTENT_ROUTER] PATH 2 modules not available: {e}")
+    DOMAIN_VALIDATOR_AVAILABLE = False
+    METRICS_AVAILABLE = False
 
 
 # =============================================================================
@@ -185,6 +198,8 @@ class WorkflowTarget(Enum):
     INSTRUMENT_IDENTIFIER = "instrument_identifier"  # Single product requirements
     ENGENIE_CHAT = "engenie_chat"               # Questions, greetings, RAG queries
     OUT_OF_DOMAIN = "out_of_domain"             # Unrelated queries
+    GREETING = "greeting"                       # Direct greeting response (optimization)
+    CONVERSATIONAL = "conversational"           # Farewell, gratitude, help, chitchat
 
 
 # =============================================================================
@@ -206,6 +221,7 @@ class WorkflowRoutingResult:
     classification_time_ms: float       # Time taken to classify
     timestamp: str                      # ISO timestamp
     reject_message: Optional[str]       # Message for out-of-domain queries
+    direct_response: Optional[str] = None  # Direct response (e.g., for greetings) to skip workflow execution
 
     def to_dict(self) -> Dict:
         """Convert to dictionary for serialization."""
@@ -215,14 +231,14 @@ class WorkflowRoutingResult:
             "intent": self.intent,
             "confidence": self.confidence,
             "reasoning": self.reasoning,
-            "reasoning": self.reasoning,
             "is_solution": self.is_solution,
             "target_rag": self.target_rag,
             "solution_indicators": self.solution_indicators,
             "extracted_info": self.extracted_info,
             "classification_time_ms": self.classification_time_ms,
             "timestamp": self.timestamp,
-            "reject_message": self.reject_message
+            "reject_message": self.reject_message,
+            "direct_response": self.direct_response
         }
 
 
@@ -269,6 +285,18 @@ class IntentConfig:
         # EnGenie Chat Workflow - Knowledge, education, conversational queries
         "chat": WorkflowTarget.ENGENIE_CHAT,
 
+        # Greeting (NEW) - handled directly
+        "greeting": WorkflowTarget.GREETING,
+        "greetings": WorkflowTarget.GREETING,
+
+        # Conversational Intents (Direct Response)
+        "farewell": WorkflowTarget.CONVERSATIONAL,
+        "gratitude": WorkflowTarget.CONVERSATIONAL,
+        "help": WorkflowTarget.CONVERSATIONAL,
+        "chitchat": WorkflowTarget.CONVERSATIONAL,
+        "complaint": WorkflowTarget.CONVERSATIONAL,
+        "gibberish": WorkflowTarget.CONVERSATIONAL,
+
         # Out of Domain - Unrelated to industrial automation
         "invalid_input": WorkflowTarget.OUT_OF_DOMAIN,
 
@@ -290,7 +318,7 @@ class IntentConfig:
         "question": WorkflowTarget.ENGENIE_CHAT,
         "productinfo": WorkflowTarget.ENGENIE_CHAT,
         "product_info": WorkflowTarget.ENGENIE_CHAT,
-        "greeting": WorkflowTarget.ENGENIE_CHAT,
+        # "greeting": WorkflowTarget.ENGENIE_CHAT, # Replaced by dedicated GREETING target
         "confirm": WorkflowTarget.ENGENIE_CHAT,
         "reject": WorkflowTarget.ENGENIE_CHAT,
         "standards": WorkflowTarget.ENGENIE_CHAT,
@@ -300,7 +328,7 @@ class IntentConfig:
         "productcomparison": WorkflowTarget.ENGENIE_CHAT,
 
         # Out of Domain (legacy names)
-        "chitchat": WorkflowTarget.OUT_OF_DOMAIN,
+        "chitchat": WorkflowTarget.CONVERSATIONAL, # Remapped from OUT_OF_DOMAIN
         "unrelated": WorkflowTarget.OUT_OF_DOMAIN,
     }
 
@@ -363,15 +391,109 @@ class IntentConfig:
         """Get list of all recognized intent values for validation and documentation."""
         return list(cls.INTENT_MAPPINGS.keys())
 
+    # Intent-specific confidence thresholds (PATH 2 IMPROVEMENT)
+    # Different workflows have different complexity and cost, so require different confidence levels
+    CONFIDENCE_THRESHOLDS = {
+        WorkflowTarget.ENGENIE_CHAT: 0.60,              # Low risk, fast, can handle ambiguity
+        WorkflowTarget.INSTRUMENT_IDENTIFIER: 0.75,     # Medium risk, expensive (30-60s workflow)
+        WorkflowTarget.SOLUTION_WORKFLOW: 0.80,         # High risk, very expensive (20-40s workflow)
+        WorkflowTarget.OUT_OF_DOMAIN: 0.90,             # Critical, user rejection, must be certain
+        WorkflowTarget.GREETING: 0.90,                  # High confidence required for exact matches
+        WorkflowTarget.CONVERSATIONAL: 0.90             # High confidence for conversational patterns
+    }
+
+    @classmethod
+    def should_accept_classification(
+        cls,
+        workflow: WorkflowTarget,
+        confidence: float
+    ) -> bool:
+        """
+        Check if confidence meets threshold for target workflow.
+
+        Args:
+            workflow: Target workflow
+            confidence: Classification confidence (0.0-1.0)
+
+        Returns:
+            True if confidence is acceptable, False if too low
+
+        Examples:
+            >>> should_accept_classification(WorkflowTarget.ENGENIE_CHAT, 0.65)
+            True  # CHAT accepts lower confidence (0.60)
+
+            >>> should_accept_classification(WorkflowTarget.SOLUTION_WORKFLOW, 0.75)
+            False  # SOLUTION requires higher confidence (0.80)
+        """
+        threshold = cls.CONFIDENCE_THRESHOLDS.get(workflow, 0.70)
+        accepted = confidence >= threshold
+
+        if not accepted:
+            logger.debug(
+                f"[IntentConfig] Confidence {confidence:.2f} below threshold "
+                f"{threshold:.2f} for {workflow.value}"
+            )
+
+        return accepted
+
+    @classmethod
+    def needs_disambiguation(
+        cls,
+        workflow: WorkflowTarget,
+        confidence: float
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Check if classification needs user disambiguation.
+
+        Returns:
+            (needs_disambiguation, question_text)
+
+        Examples:
+            >>> needs_disambiguation(WorkflowTarget.ENGENIE_CHAT, 0.55)
+            (True, "Do you want to learn about this topic, or find products?")
+
+            >>> needs_disambiguation(WorkflowTarget.ENGENIE_CHAT, 0.85)
+            (False, None)
+        """
+        threshold = cls.CONFIDENCE_THRESHOLDS.get(workflow, 0.70)
+
+        if confidence < threshold:
+            # Generate disambiguation question based on workflow
+            questions = {
+                WorkflowTarget.ENGENIE_CHAT:
+                    "Do you want to learn about this topic, or find specific products?",
+                WorkflowTarget.INSTRUMENT_IDENTIFIER:
+                    "Are you looking for a specific product to purchase?",
+                WorkflowTarget.SOLUTION_WORKFLOW:
+                    "Are you designing a complete system with multiple instruments?",
+                WorkflowTarget.OUT_OF_DOMAIN:
+                    "Your query might be outside my scope. Could you rephrase it in terms of instrumentation?"
+            }
+
+            question = questions.get(workflow, "I'm not sure how to help. Could you clarify your request?")
+            logger.info(f"[IntentConfig] Disambiguation needed for {workflow.value} (conf={confidence:.2f})")
+            return True, question
+
+        return False, None
+
+    @classmethod
+    def get_confidence_threshold(cls, workflow: WorkflowTarget) -> float:
+        """Get confidence threshold for a specific workflow."""
+        return cls.CONFIDENCE_THRESHOLDS.get(workflow, 0.70)
+
     @classmethod
     def print_config(cls):
         """Print configuration for debugging (logging)."""
         logger.info("[IntentConfig] ===== INTENT CONFIGURATION =====")
         logger.info(f"[IntentConfig] Total intents: {len(cls.INTENT_MAPPINGS)}")
         logger.info(f"[IntentConfig] Solution forcing intents: {cls.SOLUTION_FORCING_INTENTS}")
+        logger.info("[IntentConfig] Confidence thresholds:")
+        for workflow, threshold in cls.CONFIDENCE_THRESHOLDS.items():
+            logger.info(f"[IntentConfig]   {workflow.value}: {threshold:.2f}")
+        logger.info("[IntentConfig] Intent mappings by workflow:")
         for workflow in WorkflowTarget:
             intents = [i for i, w in cls.INTENT_MAPPINGS.items() if w == workflow]
-            logger.info(f"[IntentConfig] {workflow.value}: {intents}")
+            logger.info(f"[IntentConfig]   {workflow.value}: {intents}")
 
 
 # Legacy alias for backward compatibility (can be removed in next version)
@@ -497,6 +619,58 @@ class IntentClassificationRoutingAgent:
         
         return any(indicator in query_lower for indicator in strong_indicators)
 
+    def _check_conversational_patterns(self, query: str) -> Optional[Dict]:
+        """
+        Check for fast conversational patterns to bypass LLM classification.
+        
+        Handles:
+        - Greetings (hi, hello)
+        - Farewells (bye, exit)
+        - Gratitude (thanks)
+        - Help requests (help, stuck)
+        
+        Returns:
+            Dict with 'intent' and 'direct_response' if matched, else None
+        """
+        query_lower = query.lower().strip()
+        
+        # 1. Greetings
+        greetings = ["hi", "hello", "hey", "good morning", "good afternoon", "good evening", "greetings"]
+        if query_lower in greetings:
+            return {
+                "intent": "greeting",
+                "direct_response": random.choice([
+                    "Hello! I'm EnGenie. How can I help you with industrial automation today?",
+                    "Hi there! Ready to assist with your instrumentation needs.",
+                    "Greetings! What product or specification are you looking for?"
+                ])
+            }
+            
+        # 2. Farewells / Exit
+        farewells = ["bye", "goodbye", "see you", "exit", "quit", "end"]
+        if query_lower in farewells:
+            return {
+                "intent": "farewell",
+                "direct_response": "Goodbye! Let me know if you need anything else for your projects."
+            }
+            
+        # 3. Gratitude
+        gratitude = ["thanks", "thank you", "thx", "appreciate it"]
+        if any(g in query_lower for g in gratitude):
+            return {
+                "intent": "gratitude",
+                "direct_response": "You're welcome! Happy to help."
+            }
+            
+        # 4. Help
+        if query_lower in ["help", "support", "assist"]:
+            return {
+                "intent": "help",
+                "direct_response": "I can help you find products, compare specifications, or design complete instrumentation systems. Try asking for a pressure transmitter or a flow meter."
+            }
+            
+        return None
+
     @debug_log("INTENT_ROUTER", log_args=False)
     @timed_execution("INTENT_ROUTER", threshold_ms=2000)
     def classify(
@@ -526,13 +700,65 @@ class IntentClassificationRoutingAgent:
         logger.info(f"[{self.name}] Classifying: '{query[:80]}...' (session: {session_id[:8]}...)")
 
         # =====================================================================
-        # STEP 1: CHECK FOR EXPRESS EXIT
+        # STEP 1: CHECK FOR EXPRESS EXIT & CONVERSATIONAL PATTERNS
         # =====================================================================
         if should_exit_workflow(query):
             self._memory.clear_workflow(session_id)
             logger.info(f"[{self.name}] Exit detected - clearing workflow state")
-            # Proceed to classify as a fresh query (likely resulting in Greeting or ProductInfo)
+            # Proceed to classify as a fresh query
         
+        # FAST CONVERSATIONAL CHECK (Optimization)
+        # Check if query is a greeting, farewell, etc. to avoid expensive LLM calls
+        conversational_result = self._check_conversational_patterns(query)
+        if conversational_result:
+            end_time = datetime.now()
+            classification_time_ms = (end_time - start_time).total_seconds() * 1000
+            
+            logger.info(f"[{self.name}] Fast conversational pattern detected: {conversational_result['intent']}")
+            
+            return WorkflowRoutingResult(
+                query=query,
+                target_workflow=WorkflowTarget.GREETING if conversational_result['intent'] == 'greeting' else WorkflowTarget.CONVERSATIONAL,
+                intent=conversational_result['intent'],
+                confidence=1.0,
+                reasoning=f"Fast rule-based {conversational_result['intent']} detection",
+                is_solution=False,
+                target_rag=None,
+                solution_indicators=[],
+                extracted_info={"fast_pattern": True},
+                classification_time_ms=classification_time_ms,
+                timestamp=datetime.now().isoformat(),
+                reject_message=None,
+                direct_response=conversational_result["direct_response"]
+            )
+
+        # =====================================================================
+        # STEP 1.5: DOMAIN VALIDATION (PATH 2)
+        # =====================================================================
+        if DOMAIN_VALIDATOR_AVAILABLE:
+            domain_validator = get_domain_validator()
+            is_valid, reason = domain_validator.is_in_domain(query)
+
+            if not is_valid:
+                logger.info(f"[{self.name}] Domain validation failed: {reason}")
+                end_time = datetime.now()
+                classification_time_ms = (end_time - start_time).total_seconds() * 1000
+
+                return WorkflowRoutingResult(
+                    query=query,
+                    target_workflow=WorkflowTarget.OUT_OF_DOMAIN,
+                    intent="out_of_domain",
+                    confidence=0.95,
+                    reasoning=f"Domain validation rejected: {reason}",
+                    is_solution=False,
+                    target_rag=None,
+                    solution_indicators=[],
+                    extracted_info={"domain_validation_failed": True, "reason": reason},
+                    classification_time_ms=classification_time_ms,
+                    timestamp=datetime.now().isoformat(),
+                    reject_message=domain_validator.get_reject_message(reason)
+                )
+
         # =====================================================================
         # STEP 2: HANDLE WORKFLOW HINT FROM FRONTEND
         # =====================================================================
@@ -611,79 +837,14 @@ class IntentClassificationRoutingAgent:
                 )
 
         # =====================================================================
-        # STEP 3.5: FAST PATTERN CLASSIFICATION (Regex - Zero Latency)
+        # STEP 3.5: SEMANTIC CLASSIFICATION (PRIMARY - Run First for Accuracy)
         # =====================================================================
-        # Pre-check simple knowledge queries to avoid Semantic Embedding latency (200ms vs 0ms)
+        # IMPROVED: Run semantic classification BEFORE fast pattern matching
+        # Rationale: Semantic (300ms) is more accurate than pattern (0ms) for
+        # detecting out-of-domain queries and avoiding false positives from
+        # industrial keywords in wrong context
         
-        # FIX: Check for strong solution indicators FIRST to prevent misrouting complex queries
-        if self._has_strong_solution_indicators(query):
-            logger.info(f"[{self.name}] Strong solution indicators detected - Skipping Fast Pattern Check to favor Solution Workflow")
-        else:
-            try:
-                from agentic.workflows.engenie_chat.engenie_chat_intent_agent import classify_by_patterns, DataSource
-                
-                # Fast pattern check
-                pattern_result = classify_by_patterns(query.lower().strip())
-                
-                if pattern_result:
-                    source, conf, reason = pattern_result
-                    # Only use if high confidence (which patterns usually are)
-                    if conf >= 0.8:
-                        logger.info(
-                            f"[{self.name}] FAST PATTERN: {source.value} (conf={conf:.2f}) - "
-                            f"Skipping Semantic Classifier"
-                        )
-                        
-                        target_rag = None
-                        intent_name = "question"
-                        
-                        # Map Source -> Target RAG & Intent
-                        if source == DataSource.STANDARDS_RAG:
-                            target_rag = "standards_rag" 
-                            intent_name = "standards"
-                        elif source == DataSource.STRATEGY_RAG:
-                            target_rag = "strategy_rag"
-                            intent_name = "vendor_strategy"
-                        elif source == DataSource.INDEX_RAG:
-                            target_rag = "product_info_rag"
-                            intent_name = "product_info"
-                        elif source == DataSource.DEEP_AGENT:
-                            target_rag = "product_info_rag" # Deep agent is part of product info
-                            intent_name = "deep_agent"
-                            
-                        # Calculate time
-                        end_time = datetime.now()
-                        classification_time_ms = (end_time - start_time).total_seconds() * 1000
-                        
-                        return WorkflowRoutingResult(
-                            query=query,
-                            target_workflow=WorkflowTarget.ENGENIE_CHAT,
-                            intent=intent_name,
-                            confidence=conf,
-                            reasoning=f"Fast Pattern Match: {reason}",
-                            is_solution=False,
-                            target_rag=target_rag,
-                            solution_indicators=[],
-                            extracted_info={
-                                "fast_pattern_match": True,
-                                "source": source.value, 
-                                "pattern_reason": reason
-                            },
-                            classification_time_ms=classification_time_ms,
-                            timestamp=datetime.now().isoformat(),
-                            reject_message=None
-                        )
-            except ImportError:
-                pass # Ignore if module not found, proceed to semantic
-            except Exception as e:
-                logger.warning(f"[{self.name}] Fast pattern check failed: {e}")
-
-        # =====================================================================
-        # STEP 4: SEMANTIC CLASSIFICATION (PRIMARY - Embedding Similarity)
-        # =====================================================================
-        # Use semantic embeddings to classify intent based on similarity
-        # to pre-defined workflow signature patterns
-        
+        semantic_result = None
         try:
             from agentic.agents.routing.semantic_classifier import (
                 get_semantic_classifier, 
@@ -699,14 +860,48 @@ class IntentClassificationRoutingAgent:
                 f"(conf={semantic_result.confidence:.3f}, match='{semantic_result.matched_signature[:50]}...')"
             )
             
-            # High confidence semantic match - use directly
-            # Use 0.70 threshold to capture simple product requests that should go to EnGenie
-            if semantic_result.confidence >= 0.70:
+            # PRIORITY 1: OUT_OF_DOMAIN detection with HIGH confidence
+            # Reject immediately if strongly classified as out-of-domain
+            if (semantic_result.workflow == WorkflowType.OUT_OF_DOMAIN and 
+                semantic_result.confidence >= 0.70):
+                logger.warning(
+                    f"[{self.name}] OUT_OF_DOMAIN detected by semantic classifier "
+                    f"(conf={semantic_result.confidence:.3f})"
+                )
+                
+                # Use rejection message defined at module level
+                
+                end_time = datetime.now()
+                classification_time_ms = (end_time - start_time).total_seconds() * 1000
+                
+                return WorkflowRoutingResult(
+                    query=query,
+                    target_workflow=WorkflowTarget.OUT_OF_DOMAIN,
+                    intent="out_of_domain",
+                    confidence=semantic_result.confidence,
+                    reasoning=f"Semantic OUT_OF_DOMAIN: {semantic_result.reasoning}",
+                    is_solution=False,
+                    target_rag=None,
+                    solution_indicators=[],
+                    extracted_info={
+                        "semantic_ood_detection": True,
+                        "matched_signature": semantic_result.matched_signature,
+                        "all_scores": semantic_result.all_scores
+                    },
+                    classification_time_ms=classification_time_ms,
+                    timestamp=datetime.now().isoformat(),
+                    reject_message=OUT_OF_DOMAIN_MESSAGE
+                )
+            
+            # PRIORITY 2: HIGH confidence valid workflow classification
+            # Use semantic result directly if confidence >= 0.80 for valid workflows
+            if semantic_result.confidence >= 0.80 and semantic_result.workflow != WorkflowType.OUT_OF_DOMAIN:
                 # Map semantic workflow to target
                 semantic_workflow_map = {
                     WorkflowType.ENGENIE_CHAT: WorkflowTarget.ENGENIE_CHAT,
                     WorkflowType.SOLUTION_WORKFLOW: WorkflowTarget.SOLUTION_WORKFLOW,
-                    WorkflowType.INSTRUMENT_IDENTIFIER: WorkflowTarget.INSTRUMENT_IDENTIFIER
+                    WorkflowType.INSTRUMENT_IDENTIFIER: WorkflowTarget.INSTRUMENT_IDENTIFIER,
+                    WorkflowType.OUT_OF_DOMAIN: WorkflowTarget.OUT_OF_DOMAIN  # Added OUT_OF_DOMAIN
                 }
                 target_workflow = semantic_workflow_map.get(
                     semantic_result.workflow, 
@@ -719,17 +914,9 @@ class IntentClassificationRoutingAgent:
                 if target_workflow == WorkflowTarget.ENGENIE_CHAT:
                     target_rag = "product_info_rag"
                 
-                # Set workflow state
-                workflow_name = {
-                    WorkflowTarget.ENGENIE_CHAT: "engenie_chat",
-                    WorkflowTarget.INSTRUMENT_IDENTIFIER: "instrument_identifier",
-                    WorkflowTarget.SOLUTION_WORKFLOW: "solution"
-                }.get(target_workflow)
-                
-                # CONSOLIDATION: Don't set backend state here
-                # Frontend receives target_workflow in response and updates SessionManager
-                # Frontend then passes workflow_hint on next request
-                logger.debug(f"[{self.name}] SEMANTIC: Target workflow: {workflow_name} (frontend will store)")
+                logger.info(
+                    f"[{self.name}] HIGH CONFIDENCE SEMANTIC: Returning {target_workflow.value} immediately"
+                )
                 
                 end_time = datetime.now()
                 classification_time_ms = (end_time - start_time).total_seconds() * 1000
@@ -739,7 +926,7 @@ class IntentClassificationRoutingAgent:
                     target_workflow=target_workflow,
                     intent="semantic_match",
                     confidence=semantic_result.confidence,
-                    reasoning=f"Semantic classification: {semantic_result.reasoning}",
+                    reasoning=f"High confidence semantic: {semantic_result.reasoning}",
                     is_solution=is_solution,
                     target_rag=target_rag,
                     solution_indicators=["semantic_match"] if is_solution else [],
@@ -752,16 +939,176 @@ class IntentClassificationRoutingAgent:
                     timestamp=datetime.now().isoformat(),
                     reject_message=None
                 )
+            
+            # PRIORITY 3: MEDIUM confidence (0.65-0.80) - try fast pattern for refinement
+            elif 0.65 <= semantic_result.confidence < 0.80:
+                logger.info(
+                    f"[{self.name}] MEDIUM semantic confidence ({semantic_result.confidence:.3f}), "
+                    f"checking fast patterns for refinement..."
+                )
+                # Continue to fast pattern check below
+            
+            # PRIORITY 4: LOW confidence (<0.65) - definitely try fast pattern
             else:
                 logger.info(
-                    f"[{self.name}] SEMANTIC: Low confidence ({semantic_result.confidence:.3f}), "
-                    f"falling back to rule-based classification"
+                    f"[{self.name}] LOW semantic confidence ({semantic_result.confidence:.3f}), "
+                    f"falling back to fast patterns..."
                 )
+                # Continue to fast pattern check below
                 
         except ImportError as e:
             logger.warning(f"[{self.name}] Semantic classifier not available: {e}")
         except Exception as e:
             logger.warning(f"[{self.name}] Semantic classification failed: {e}, using fallback")
+
+        # =====================================================================
+        # STEP 4: FAST PATTERN CLASSIFICATION (Refinement/Fallback)
+        # =====================================================================
+        # IMPROVED: Only use fast patterns if semantic was ambiguous or failed
+        # This prevents false positives from keyword matching
+        
+        # Skip fast pattern if we have strong solution indicators (same as before)
+        if self._has_strong_solution_indicators(query):
+            logger.info(f"[{self.name}] Strong solution indicators detected - Skipping Fast Pattern Check")
+        # ALSO skip if semantic already gave us a confident OUT_OF_DOMAIN classification
+        elif semantic_result and semantic_result.workflow == WorkflowType.OUT_OF_DOMAIN and semantic_result.confidence >= 0.65:
+            logger.info(f"[{self.name}] Semantic OOD detected, skipping fast pattern")
+        else:
+            try:
+                from agentic.workflows.engenie_chat.engenie_chat_intent_agent import classify_by_patterns, DataSource
+                
+                # Fast pattern check
+                pattern_result = classify_by_patterns(query.lower().strip())
+                
+                if pattern_result:
+                    source, conf, reason = pattern_result
+                    # Only use if high confidence
+                    if conf >= 0.80:
+                        # If semantic also gave a result, compare confidences
+                        if semantic_result and semantic_result.confidence >= 0.70:
+                            logger.info(
+                                f"[{self.name}] Both semantic ({semantic_result.confidence:.3f}) and "
+                                f"pattern ({conf:.2f}) confident - using semantic (more accurate)"
+                            )
+                            # Semantic wins ties - skip pattern match
+                        else:
+                            # Pattern has higher confidence or semantic was low
+                            logger.info(
+                                f"[{self.name}] FAST PATTERN: {source.value} (conf={conf:.2f})"
+                            )
+                            
+                            target_rag = None
+                            intent_name = "question"
+                            
+                            # Map Source -> Target RAG & Intent
+                            if source == DataSource.STANDARDS_RAG:
+                                target_rag = "standards_rag" 
+                                intent_name = "standards"
+                            elif source == DataSource.STRATEGY_RAG:
+                                target_rag = "strategy_rag"
+                                intent_name = "vendor_strategy"
+                            elif source == DataSource.INDEX_RAG:
+                                target_rag = "product_info_rag"
+                                intent_name = "product_info"
+                            elif source == DataSource.DEEP_AGENT:
+                                target_rag = "product_info_rag"
+                                intent_name = "deep_agent"
+                                
+                            end_time = datetime.now()
+                            classification_time_ms = (end_time - start_time).total_seconds() * 1000
+                            
+                            return WorkflowRoutingResult(
+                                query=query,
+                                target_workflow=WorkflowTarget.ENGENIE_CHAT,
+                                intent=intent_name,
+                                confidence=conf,
+                                reasoning=f"Fast Pattern Match: {reason}",
+                                is_solution=False,
+                                target_rag=target_rag,
+                                solution_indicators=[],
+                                extracted_info={
+                                    "fast_pattern_match": True,
+                                    "source": source.value, 
+                                    "reason": reason
+                                },
+                                classification_time_ms=classification_time_ms,
+                                timestamp=datetime.now().isoformat(),
+                                reject_message=None
+                            )
+                        
+            except ImportError:
+                logger.debug(f"[{self.name}] Fast pattern classifier not available")
+            except Exception as e:
+                logger.warning(f"[{self.name}] Fast pattern check failed: {e}")
+        
+        # =====================================================================
+        # STEP 4.5: USE MEDIUM-CONFIDENCE SEMANTIC IF PATTERNS FAILED
+        # =====================================================================
+        # If we have a medium-confidence semantic result (0.65-0.80) but patterns didn't match,
+        # use the semantic result
+        if semantic_result and 0.65 <= semantic_result.confidence < 0.80:
+            logger.info(
+                f"[{self.name}] Using medium-confidence semantic result "
+                f"(patterns didn't provide better match)"
+            )
+            
+            # Handle OUT_OF_DOMAIN (use module-level constant)
+            if semantic_result.workflow == WorkflowType.OUT_OF_DOMAIN:
+                end_time = datetime.now()
+                classification_time_ms = (end_time - start_time).total_seconds() * 1000
+                
+                return WorkflowRoutingResult(
+                    query=query,
+                    target_workflow=WorkflowTarget.OUT_OF_DOMAIN,
+                    intent="out_of_domain",
+                    confidence=semantic_result.confidence,
+                    reasoning=f"Semantic OUT_OF_DOMAIN: {semantic_result.reasoning}",
+                    is_solution=False,
+                    target_rag=None,
+                    solution_indicators=[],
+                    extracted_info={
+                        "semantic_ood_detection": True,
+                        "matched_signature": semantic_result.matched_signature,
+                        "all_scores": semantic_result.all_scores
+                    },
+                    classification_time_ms=classification_time_ms,
+                    timestamp=datetime.now().isoformat(),
+                    reject_message=OUT_OF_DOMAIN_MESSAGE
+                )
+            
+            # Handle valid workflows
+            semantic_workflow_map = {
+                WorkflowType.ENGENIE_CHAT: WorkflowTarget.ENGENIE_CHAT,
+                WorkflowType.SOLUTION_WORKFLOW: WorkflowTarget.SOLUTION_WORKFLOW,
+                WorkflowType.INSTRUMENT_IDENTIFIER: WorkflowTarget.INSTRUMENT_IDENTIFIER
+            }
+            target_workflow = semantic_workflow_map.get(
+                semantic_result.workflow, WorkflowTarget.ENGENIE_CHAT
+            )
+            is_solution = (semantic_result.workflow == WorkflowType.SOLUTION_WORKFLOW)
+            target_rag = "product_info_rag" if target_workflow == WorkflowTarget.ENGENIE_CHAT else None
+            
+            end_time = datetime.now()
+            classification_time_ms = (end_time - start_time).total_seconds() * 1000
+            
+            return WorkflowRoutingResult(
+                query=query,
+                target_workflow=target_workflow,
+                intent="semantic_match",
+                confidence=semantic_result.confidence,
+                reasoning=f"Medium confidence semantic: {semantic_result.reasoning}",
+                is_solution=is_solution,
+                target_rag=target_rag,
+                solution_indicators=["semantic_match"] if is_solution else [],
+                extracted_info={
+                    "semantic_classification": True,
+                    "matched_signature": semantic_result.matched_signature,
+                    "all_scores": semantic_result.all_scores
+                },
+                classification_time_ms=classification_time_ms,
+                timestamp=datetime.now().isoformat(),
+                reject_message=None
+            )
 
         # =====================================================================
         # STEP 4: RULE-BASED CLASSIFICATION (FALLBACK)
@@ -932,7 +1279,8 @@ class IntentClassificationRoutingAgent:
         workflow_name = {
             WorkflowTarget.ENGENIE_CHAT: "engenie_chat",
             WorkflowTarget.INSTRUMENT_IDENTIFIER: "instrument_identifier",
-            WorkflowTarget.SOLUTION_WORKFLOW: "solution"
+            WorkflowTarget.SOLUTION_WORKFLOW: "solution",
+            WorkflowTarget.GREETING: "greeting"
         }.get(target_workflow)
         
         # CONSOLIDATION: Don't set backend state here
@@ -943,6 +1291,20 @@ class IntentClassificationRoutingAgent:
 
         # Prepare reject message for out-of-domain
         # reject_message logic handled above
+        
+        # Determine Direct Response for GREETING (if not already set by fast path)
+        direct_response = extracted_info.get("direct_response")
+        if target_workflow == WorkflowTarget.GREETING and not direct_response:
+            # Generate random greeting response if LLM classified as greeting but skipped fast path
+            # (or if query didn't match fast patterns but semantics matched greeting)
+            responses = [
+                "Hello! How can I help you with your industrial automation needs today?",
+                "Hi there! I'm here to help with process instrumentation and control systems.",
+                "Greetings! What can I assist you with?",
+                "Hello! Whether it's product selection or system design, I'm ready to help.",
+                "Hi! I'm EnGenie. How can I support your project today?"
+            ]
+            direct_response = random.choice(responses)
 
         # Calculate classification time
         end_time = datetime.now()
@@ -962,10 +1324,39 @@ class IntentClassificationRoutingAgent:
             extracted_info=extracted_info,
             classification_time_ms=classification_time_ms,
             timestamp=datetime.now().isoformat(),
-            reject_message=reject_message
+            reject_message=reject_message,
+            direct_response=direct_response
         )
 
         logger.info(f"[{self.name}] Result: {target_workflow.value} (intent={intent}, conf={confidence:.2f}) in {classification_time_ms:.1f}ms")
+
+        # =====================================================================
+        # METRICS RECORDING (PATH 2)
+        # =====================================================================
+        if METRICS_AVAILABLE:
+            try:
+                metrics = get_classification_metrics()
+
+                # Determine which layer was used
+                layer_used = "llm"  # Default
+                if extracted_info.get("fast_pattern_match"):
+                    layer_used = "pattern"
+                elif extracted_info.get("semantic_classification"):
+                    layer_used = "semantic"
+
+                metrics.record_classification(
+                    query=query,
+                    intent=intent,
+                    confidence=confidence,
+                    target_workflow=target_workflow.value,
+                    classification_time_ms=classification_time_ms,
+                    layer_used=layer_used,
+                    is_solution=is_solution,
+                    extracted_info=extracted_info,
+                    session_id=session_id
+                )
+            except Exception as e:
+                logger.warning(f"[{self.name}] Metrics recording failed: {e}")
 
         return result
 
@@ -1001,6 +1392,9 @@ class IntentClassificationRoutingAgent:
 
         elif target_workflow == WorkflowTarget.OUT_OF_DOMAIN:
             return f"Out of domain: '{intent}' is not related to industrial automation"
+            
+        elif target_workflow == WorkflowTarget.GREETING:
+            return "Greeting detected"
 
         return f"Classified as '{intent}'"
 
@@ -1039,6 +1433,27 @@ class IntentClassificationRoutingAgent:
             stats["registry_stats"] = self._registry.get_stats()
         
         return stats
+
+    def _check_fast_greeting(self, query: str) -> Optional[Dict]:
+        """Check if query is a simple greeting and return a random response."""
+        lower_query = query.lower().strip().rstrip("!.,")
+        
+        # Extended greeting phrases
+        greetings = set(GREETING_PHRASES + [
+            "hello there", "hi there", "greetings", "good day"
+        ])
+        
+        if lower_query in greetings:
+            responses = [
+                "Hello! How can I help you with your industrial automation needs today?",
+                "Hi there! I'm here to help with process instrumentation and control systems.",
+                "Greetings! What can I assist you with?",
+                "Hello! Whether it's product selection or system design, I'm ready to help.",
+                "Hi! I'm EnGenie. How can I support your project today?"
+            ]
+            return {"direct_response": random.choice(responses)}
+            
+        return None
 
 
 # =============================================================================

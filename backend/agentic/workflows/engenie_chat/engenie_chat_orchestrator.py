@@ -21,6 +21,9 @@ from .engenie_chat_question_splitter import (
     extract_refinery, extract_product_type
 )
 
+# Import prompt loader for dynamic response generation
+from prompts_library.prompt_loader import load_prompt
+
 # Import new utility modules
 try:
     from ..circuit_breaker import get_circuit_breaker, CircuitOpenError
@@ -45,6 +48,57 @@ logger = logging.getLogger(__name__)
 _executor = ThreadPoolExecutor(max_workers=4)
 
 
+def generate_no_results_message(query: str, session_id: str) -> str:
+    """
+    Generate a personable, context-aware message when no products are found.
+    
+    Uses LLM with a specialized prompt to create natural, helpful responses
+    instead of robotic error messages.
+    
+    Args:
+        query: Original user query
+        session_id: Session ID (unused but kept for consistency)
+        
+    Returns:
+        Personable "no results" message
+    """
+    try:
+        from services.llm.fallback import create_llm_with_fallback, invoke_with_retry_fallback
+        
+        # Load the fallback prompt
+        prompt_template = load_prompt("fallback_prompts", section="NO_RESULTS_FOUND")
+        prompt = prompt_template.format(query=query)
+        
+        # Use Flash model for speed (this is a simple generation task)
+        llm = create_llm_with_fallback(
+            model="gemini-2.5-flash",
+            temperature=0.7,  # Higher temp for more natural responses
+            skip_test=True
+        )
+        
+        # Generate the response
+        response = invoke_with_retry_fallback(
+            llm,
+            prompt,
+            max_retries=2,
+            fallback_to_openai=True,
+            model="gemini-2.5-flash",
+            temperature=0.7
+        )
+        
+        message = response.content if hasattr(response, 'content') else str(response)
+        logger.info(f"[ORCHESTRATOR] Generated personable no-results message ({len(message)} chars)")
+        return message.strip()
+        
+    except Exception as e:
+        # Fallback to a simple but helpful static message if LLM fails
+        logger.warning(f"[ORCHESTRATOR] Failed to generate dynamic no-results message: {e}")
+        return (
+            f"I couldn't find any products matching '{query}' in our database. "
+            "Try checking the spelling or searching for a broader category."
+        )
+
+
 def query_index_rag(query: str, session_id: str) -> Dict[str, Any]:
     """Query Index RAG for product information."""
     try:
@@ -59,13 +113,14 @@ def query_index_rag(query: str, session_id: str) -> Dict[str, Any]:
         output = result.get("output", {})
         answer = output.get("summary", "") or result.get("response", "")
 
-        # If no answer, generate a default message based on what we found
+        # If no answer, generate a message based on what we found
         if not answer or len(answer.strip()) == 0:
             products = output.get("recommended_products", [])
             if products:
                 answer = f"Found {len(products)} products matching your query. Please review the results below."
             else:
-                answer = "No products found matching your specific requirements. Please try rephrasing your question or adjusting your search criteria."
+                # Generate personable, context-aware "no results" message using LLM
+                answer = generate_no_results_message(query, session_id)
 
         # Check if we found any products
         found_in_database = result.get("success", False) and bool(output.get("recommended_products", []))
@@ -468,6 +523,61 @@ def run_engenie_chat_query(
         Unified response dict
     """
     logger.info(f"[ORCHESTRATOR] Processing query: {query[:100]}...")
+
+
+    # ============================================================================
+    # PHASE 3: ORCHESTRATOR PRE-LLM CHECK - ENABLED
+    # Block invalid/out-of-domain queries BEFORE expensive RAG+LLM operations
+    # BUT still return a helpful, user-friendly response message
+    # ============================================================================
+    from agentic.validators import validate_query_domain
+    
+    logger.info(f"[ORCHESTRATOR] Pre-flight validation for session {session_id}")
+    
+    # Validate query domain (NEVER raises exceptions)
+    validation_result = validate_query_domain(
+        query=query,
+        session_id=session_id,
+        context={},
+        use_fast_path=True  # Use fast-path optimization
+    )
+    
+    # Block OUT_OF_DOMAIN at orchestrator level (BEFORE LLM to save costs)
+    if not validation_result.is_valid:
+        logger.info(
+            f"[ORCHESTRATOR] ⚠️ OUT_OF_DOMAIN blocked (LLM NOT called): {query[:50]}... "
+            f"(confidence: {validation_result.confidence:.2f}, reasoning: {validation_result.reasoning[:80]})"
+        )
+        
+        # Return helpful response WITHOUT calling LLM
+        # User sees a clear explanation, but we save LLM costs
+        return {
+            'success': True,  # ✅ Success (user gets a response)
+            'answer': validation_result.reject_message or 
+                "I'm EnGenie, your industrial automation assistant. I can help with:\n\n"
+                "• **Instrument Identification** - Finding the right products for your needs\n\n"
+                "• **Product Search** - Searching for specific industrial instruments\n\n"
+                "• **Standards & Compliance** - Questions about industrial standards (ISA, IEC, etc.)\n\n"
+                "• **Technical Knowledge** - Industrial automation concepts and best practices\n\n"
+                "Please ask a question related to industrial automation, instrumentation, or process control.",
+            'source': 'validation_blocked',  # Indicates it was blocked at validation
+            'found_in_database': False,
+            'awaiting_confirmation': False,
+            'sources_used': [],
+            'is_follow_up': False,
+            'classification': {
+                'primary_source': 'out_of_domain',
+                'confidence': validation_result.confidence,
+                'reasoning': validation_result.reasoning
+            },
+            'blocked_reason': 'out_of_domain',  # Added field for debugging
+            'note': 'Query was blocked before LLM to prevent processing invalid input'
+        }
+    
+    logger.info(
+        f"[ORCHESTRATOR] ✅ Valid query - proceeding with LLM: {validation_result.target_workflow} "
+        f"(confidence: {validation_result.confidence:.2f})"
+    )
 
     # Step 1: Memory resolution
     is_follow_up = is_follow_up_query(query, session_id)

@@ -603,7 +603,8 @@ def generate_llm_specs(
             "iterations": iteration,
             "specs_count": final_count,
             "min_required": min_required,
-            "target_reached": target_reached
+            "target_reached": target_reached,
+            "success": True if final_count > 0 else False
         }
 
     except Exception as e:

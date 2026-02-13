@@ -30,8 +30,11 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List, BinaryIO, Union
 from urllib.parse import urlparse
 from dotenv import load_dotenv
+import logging
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 # Try to import Azure SDK
 try:
@@ -47,7 +50,7 @@ except ImportError:
     AZURE_SDK_AVAILABLE = False
     ResourceExistsError = Exception
     ResourceNotFoundError = Exception
-    print("⚠️ azure-storage-blob not installed. Run: pip install azure-storage-blob>=12.19.0")
+    print("azure-storage-blob not installed. Run: pip install azure-storage-blob>=12.19.0")
 
 
 class AzureBlobFileManager:
@@ -121,11 +124,11 @@ class AzureBlobFileManager:
 
         if not self.connection_string:
             self._connection_error = "AZURE_STORAGE_CONNECTION_STRING not set"
-            print("⚠️ AZURE_STORAGE_CONNECTION_STRING not set in environment")
+            logger.warning("AZURE_STORAGE_CONNECTION_STRING not set in environment")
             return False
 
         try:
-            print("🔄 Connecting to Azure Blob Storage...")
+            logger.info("Connecting to Azure Blob Storage...")
 
             self._blob_service_client = BlobServiceClient.from_connection_string(
                 self.connection_string,
@@ -144,15 +147,15 @@ class AzureBlobFileManager:
             self._connected = True
             self._connection_error = None
 
-            print(f"✅ Azure Blob Storage connected")
-            print(f"   Account: {self.account_name}")
-            print(f"   Default container: {self.container_name}")
+            logger.info(f"Azure Blob Storage connected")
+            logger.info(f"   Account: {self.account_name}")
+            logger.info(f"   Default container: {self.container_name}")
 
             return True
 
         except Exception as e:
             self._connection_error = str(e)
-            print(f"❌ Azure Blob connection error: {str(e)}")
+            logger.error(f"Azure Blob connection error: {str(e)}")
             return False
 
     @property
@@ -177,14 +180,14 @@ class AzureBlobFileManager:
             try:
                 if not container_client.exists():
                     container_client.create_container()
-                    print(f"✅ Auto-created container: {container_name}")
+                    logger.info(f"Auto-created container: {container_name}")
                 else:
-                    print(f"✓ Container exists: {container_name}")
+                    logger.info(f"Container exists: {container_name}")
             except ResourceExistsError:
                 # Container was created by another process
-                print(f"✓ Container already exists: {container_name}")
+                logger.info(f"Container already exists: {container_name}")
             except Exception as e:
-                print(f"⚠️ Container check/create failed for '{container_name}': {e}")
+                logger.warning(f"Container check/create failed for '{container_name}': {e}")
                 # Try to continue anyway - the container might exist despite the error
 
             self._container_clients[container_name] = container_client
@@ -290,7 +293,7 @@ class AzureBlobFileManager:
             blob_client.delete_blob()
             return True
         except Exception as e:
-            print(f"Error deleting blob: {e}")
+            logger.error(f"Error deleting blob: {e}")
             return False
 
     def file_exists(self, blob_path: str, container_name: str = None) -> bool:
@@ -370,7 +373,7 @@ class AzureBlobFileManager:
             URL with SAS token appended, or None on error
         """
         if not self.account_name or not self.account_key:
-            print("⚠️ Cannot generate SAS URL: account credentials not available")
+            logger.warning("Cannot generate SAS URL: account credentials not available")
             return None
 
         try:
@@ -405,7 +408,7 @@ class AzureBlobFileManager:
             return f"{blob_url}?{sas_token}"
 
         except Exception as e:
-            print(f"Error generating SAS URL: {str(e)}")
+            logger.error(f"Error generating SAS URL: {str(e)}")
             return None
 
     def generate_sas_url_for_path(

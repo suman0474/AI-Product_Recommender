@@ -36,8 +36,15 @@ class ExtractRequirementsInput(BaseModel):
 # ============================================================================
 
 # Load classification prompts (CLASSIFICATION + QUICK_CLASSIFICATION)
+# Try V2 first (improved prompt), fallback to V1 if not found
 # default_section captures content before any section marker as "CLASSIFICATION"
-_INTENT_CLASSIFICATION_PROMPTS = load_prompt_sections("intent_classification_prompts", default_section="CLASSIFICATION")
+try:
+    _INTENT_CLASSIFICATION_PROMPTS = load_prompt_sections("intent_classification_prompts_v2", default_section="CLASSIFICATION")
+    logger.info("[INTENT_TOOLS] Using improved intent classification prompt (V2)")
+except (FileNotFoundError, KeyError) as e:
+    logger.warning(f"[INTENT_TOOLS] V2 prompts not found ({e}), falling back to V1")
+    _INTENT_CLASSIFICATION_PROMPTS = load_prompt_sections("intent_classification_prompts", default_section="CLASSIFICATION")
+
 INTENT_CLASSIFICATION_PROMPT = _INTENT_CLASSIFICATION_PROMPTS["CLASSIFICATION"]
 QUICK_CLASSIFICATION_PROMPT = _INTENT_CLASSIFICATION_PROMPTS.get("QUICK_CLASSIFICATION", None)
 
@@ -401,15 +408,16 @@ def classify_intent_tool(
     # =========================================================================
     # STEP 0: Pre-LLM Input Validation (reject invalid queries immediately)
     # =========================================================================
-    from .input_validator import validate_query
-    is_valid, rejection_message = validate_query(user_input, skip_llm=False)
-    if not is_valid:
+    from agentic.validators import validate_query_domain
+    
+    validation_result = validate_query_domain(user_input, use_fast_path=True)
+    if not validation_result.is_valid:
         logger.warning(f"[INTENT_CLASSIFY] Query rejected at validation: '{user_input[:60]}...'")
         return {
             "success": False,
             "intent": "INVALID_INPUT",
-            "confidence": 1.0,
-            "reasoning": rejection_message or "Query is outside system scope",
+            "confidence": validation_result.confidence,
+            "reasoning": validation_result.reject_message or "Query is outside system scope",
             "key_indicators": ["out_of_domain"],
             "rejected": True,
             "next_step": None,

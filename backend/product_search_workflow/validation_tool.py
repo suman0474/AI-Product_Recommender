@@ -226,6 +226,74 @@ class ValidationTool:
             })
 
             product_type = extract_result.get("product_type") or expected_product_type or ""
+
+            # =================================================================
+            # FIX: REFINE OVERLY-GENERIC PRODUCT TYPES
+            # When the LLM returns a single generic word like "Flow", "Valves",
+            # "Level", parse the original user_input for a more specific type.
+            # =================================================================
+            _GENERIC_TYPES = {
+                "flow", "valves", "valve", "level", "pressure", "temperature",
+                "analytical", "control", "sensor", "instrument"
+            }
+            _DEVICE_SUFFIXES = [
+                "transmitter", "meter", "sensor", "gauge", "switch",
+                "indicator", "recorder", "controller", "positioner", "actuator"
+            ]
+            _TECH_QUALIFIERS = [
+                "coriolis", "vortex", "magnetic", "ultrasonic", "radar",
+                "guided wave", "differential", "rtd", "thermocouple",
+                "electromagnetic", "turbine", "dp", "multivariable"
+            ]
+
+            if product_type and product_type.lower().strip() in _GENERIC_TYPES:
+                logger.warning(
+                    "[ValidationTool] Product type '%s' is overly generic - attempting refinement from user input",
+                    product_type
+                )
+                input_lower = user_input.lower()
+
+                # Try to find "[tech] [measurement] [device]" pattern in user input
+                refined = None
+                for suffix in _DEVICE_SUFFIXES:
+                    if suffix in input_lower:
+                        # Check for technology qualifier before it
+                        for tech in _TECH_QUALIFIERS:
+                            pattern = f"{tech} {product_type.lower()} {suffix}"
+                            if pattern in input_lower:
+                                refined = f"{tech.title()} {product_type.title()} {suffix.title()}"
+                                break
+                            # Also try without the measurement word: "coriolis transmitter"
+                            pattern2 = f"{tech} {suffix}"
+                            if pattern2 in input_lower:
+                                refined = f"{tech.title()} {product_type.title()} {suffix.title()}"
+                                break
+                        if not refined:
+                            # At least add the device suffix: "Flow" -> "Flow Transmitter"
+                            pattern3 = f"{product_type.lower()} {suffix}"
+                            if pattern3 in input_lower:
+                                refined = f"{product_type.title()} {suffix.title()}"
+                                break
+                    if refined:
+                        break
+
+                if refined:
+                    logger.info(
+                        "[ValidationTool] Refined generic product type: '%s' -> '%s'",
+                        product_type, refined
+                    )
+                    product_type = refined
+                else:
+                    # Fallback: just add "Transmitter" if measurement-type word found
+                    for suffix in _DEVICE_SUFFIXES:
+                        if suffix in input_lower:
+                            product_type = f"{product_type.title()} {suffix.title()}"
+                            logger.info(
+                                "[ValidationTool] Added device type suffix: '%s'",
+                                product_type
+                            )
+                            break
+
             
             # Handle case when LLM extraction failed (quota exceeded, API error, etc.)
             if not product_type:
@@ -646,8 +714,27 @@ class ValidationTool:
             # =================================================================
             logger.info("[ValidationTool] Step 1.3: Validating requirements")
 
+            # FIX: Enrich user_input with extracted specs so validation LLM
+            # has structured data to map to schema keys
+            enriched_input = user_input
+            extracted_specs = extract_result.get("specifications", {})
+            if extracted_specs:
+                spec_lines = []
+                for k, v in extracted_specs.items():
+                    if v is not None and v != "":
+                        # Handle nested dict values (e.g. {value: ..., confidence: ...})
+                        if isinstance(v, dict):
+                            v = v.get("value", str(v))
+                        spec_lines.append(f"{k}: {v}")
+                if spec_lines:
+                    enriched_input = f"{user_input}\n\nExtracted specifications:\n" + "\n".join(spec_lines)
+                    logger.info(
+                        "[ValidationTool] Enriched user_input with %d extracted specs for validation",
+                        len(spec_lines)
+                    )
+
             validation_result = validate_requirements_tool.invoke({
-                "user_input": user_input,
+                "user_input": enriched_input,
                 "product_type": product_type,
                 "schema": schema
             })

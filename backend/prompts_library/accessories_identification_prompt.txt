@@ -23,10 +23,11 @@ CRITICAL RULES
    - Exception: Shared accessories (e.g., 1 calibration kit for multiple instruments)
 
 4. SAMPLE INPUT REQUIREMENTS
-   - 60-75 words in length
-   - Include ALL specifications from specifications object
+   - Include ALL key specification VALUES in a natural sentence
    - Mention parent instrument relationship
-   - Pattern: "[Accessory] for [Parent] with [spec1], [spec2]..."
+   - Pattern: "[Accessory] for [Parent] with [value1], [value2]..."
+   - Example: "Thermowell for RTD Temperature Transmitter with 316L SS material, 1/2 NPT connection, 200mm insertion length, tapered design"
+   - FORBIDDEN in sample_input: raw JSON, confidence scores, dict syntax
 
 ACCESSORY MAPPING BY INSTRUMENT TYPE
 
@@ -80,7 +81,7 @@ Return ONLY valid JSON:
       "specified_model_families": [],
       "parent_instrument_category": "<category of parent>",
       "related_instrument": "<parent instrument name>",
-      "sample_input": "<60-75 word description with ALL specs>"
+      "sample_input": "<description with ALL specs>"
     }}
   ],
   "summary": "<Brief summary of accessories identified>"

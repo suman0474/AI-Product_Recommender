@@ -156,7 +156,7 @@ OUTPUT (JSON):
 }}
 
 === PROMPT: BATCH_WORKER ===
-PURPOSE: Extract compliance specifications from a standards document for batch items
+PURPOSE: Extract compliance technical specifications from a standards document for batch items
 
 You are an expert standards compliance analyst. Extract relevant specifications and requirements from the provided standard document for each item.
 

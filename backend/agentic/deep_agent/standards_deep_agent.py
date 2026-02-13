@@ -433,11 +433,40 @@ def load_standard_text(standard_type: str) -> Optional[str]:
         blob_manager = AzureBlobFileManager()
         
         # Download as bytes
-        container_name = blob_manager.CONTAINERS['standards_documents']
-        file_content = blob_manager.download_file(filename, container_name)
+        # Download as bytes
+        container_name = blob_manager.CONTAINERS.get('standards_documents', 'standards-documents')
+        
+        # Try finding the file if exact path not found (handling user_id/timestamp prefixes)
+        blob_path = filename
+        if not blob_manager.file_exists(blob_path, container_name):
+            # List all blobs and find one that ENDS with the filename
+            # This handles paths like "user_1/20260212_100014_instrumentation_valves_actuators_standards.docx"
+            logger.info(f"Exact match not found for '{filename}', searching in container '{container_name}'...")
+            
+            all_blobs = blob_manager.list_files(container_name=container_name)
+            candidate = None
+            
+            # Sort by last_modified (descending) to get the latest one
+            # all_blobs dict usually has 'last_modified', 'name'
+            # We want the latest upload of this standard type
+            
+            matching_blobs = [b for b in all_blobs if b['name'].endswith(filename)]
+            
+            if matching_blobs:
+                # Sort by name (timestamp prefix usually sorts correctly) or last_modified if available
+                # Assuming timestamp prefix YYYYMMDD_HHMMSS
+                matching_blobs.sort(key=lambda x: x['name'], reverse=True)
+                candidate = matching_blobs[0]['name']
+                logger.info(f"Found standard document: {candidate}")
+                blob_path = candidate
+            else:
+                 logger.warning(f"Standard file not found in Blob Storage (checked suffix '{filename}'): {container_name}")
+                 return None
+
+        file_content = blob_manager.download_file(blob_path, container_name)
         
         if not file_content:
-             logger.warning(f"Standard file not found in Blob Storage: {filename}")
+             logger.warning(f"Failed to download standard file: {blob_path}")
              return None
 
         # Load using python-docx from bytes

@@ -209,9 +209,12 @@ def identify_instruments_and_accessories_node(state: InstrumentIdentifierState) 
 
     # Add instruments
     for instrument in state["identified_instruments"]:
-        # Ensure sample_input meets length requirements (60-75 words)
+        # Flatten nested spec dicts to clean values (removes {'value': 'x', 'confidence': 0.9} structures)
+        clean_specs = _flatten_nested_specs(instrument.get("specifications", {}))
+        
+        # Ensure sample_input includes ALL technical specifications
         raw_sample = instrument.get("sample_input", "")
-        final_sample = _ensure_min_word_count(raw_sample, instrument, state.get("project_name", "Project"))
+        final_sample = _ensure_full_spec_coverage(raw_sample, instrument, state.get("project_name", "Project"))
         
         all_items.append({
             "number": item_number,
@@ -219,7 +222,7 @@ def identify_instruments_and_accessories_node(state: InstrumentIdentifierState) 
             "name": instrument.get("product_name", "Unknown Instrument"),
             "category": instrument.get("category", "Instrument"),
             "quantity": instrument.get("quantity", 1),
-            "specifications": instrument.get("specifications", {}),
+            "specifications": clean_specs,
             "sample_input": final_sample,
             "strategy": instrument.get("strategy", "")
         })
@@ -234,8 +237,8 @@ def identify_instruments_and_accessories_node(state: InstrumentIdentifierState) 
         # Use LLM one if decent length, otherwise start with basic (or LLM one if exists)
         base_input = llm_sample_input if len(llm_sample_input) > 20 else basic_sample_input
         
-        # Ensure sample_input meets length requirements (60-75 words)
-        final_sample = _ensure_min_word_count(base_input, accessory, state.get("project_name", "Project"))
+        # Ensure sample_input includes ALL technical specifications
+        final_sample = _ensure_full_spec_coverage(base_input, accessory, state.get("project_name", "Project"))
 
         # Smart category extraction: If category is generic "Accessories" or "Accessory",
         # extract the product type from accessory_name (e.g., "Thermowell for X" -> "Thermowell")
@@ -252,12 +255,16 @@ def identify_instruments_and_accessories_node(state: InstrumentIdentifierState) 
         else:
             smart_category = raw_category
 
+        # Flatten nested spec dicts to clean values
+        clean_specs = _flatten_nested_specs(accessory.get("specifications", {}))
+        
         all_items.append({
             "number": item_number,
             "type": "accessory",
             "name": accessory_name,
             "category": smart_category,  # Use smart category instead of raw
             "quantity": accessory.get("quantity", 1),
+            "specifications": clean_specs,
             "sample_input": final_sample,
             "related_instrument": accessory.get("related_instrument", "")
         })
@@ -281,64 +288,60 @@ def identify_instruments_and_accessories_node(state: InstrumentIdentifierState) 
 
 
 
-def _ensure_min_word_count(text: str, item: dict, project_name: str, min_words: int = 60, max_words: int = 75) -> str:
+def _ensure_full_spec_coverage(text: str, item: dict, project_name: str) -> str:
     """
-    Ensure the text has at least min_words (target between min_words and max_words).
-    If not, augment it with detailed specifications and context to reach the length.
+    Ensure the text includes ALL identified technical specifications.
+    Augments the description with any missing specifications.
     """
     if not text:
         text = ""
         
-    words = text.split()
-    if len(words) >= min_words:
-        return text
-    
-    # Need to augment
     name = item.get("name") or item.get("accessory_name") or item.get("product_name") or "Component"
     category = item.get("category", "Industrial Item")
     
     # Start with what we have
-    augmented_parts = [text] if text else []
+    augmented_text = text
     
-    # Add intro if missing
-    if name not in text:
-        augmented_parts.append(f"Technical specifications for {name} ({category}) required for {project_name}.")
-        
-    # Add detailed specs
+    # Add intro if completely empty or name missing
+    if not augmented_text:
+        augmented_text = f"Technical specifications for {name} ({category}) required for {project_name}."
+    elif name not in augmented_text:
+        # Prepend context if missing
+        augmented_text = f"For {project_name}: {augmented_text}"
+
+    # Get all specifications
     specs = item.get("specifications", {})
-    if specs:
-        spec_desc = []
-        for k, v in specs.items():
-            val = str(v)
-            if isinstance(v, dict):
-                val = v.get("value", str(v))
-            if val and str(val).lower() not in ["null", "none", "n/a"]:
-                # Clean up key name
-                clean_k = k.replace("_", " ").title()
-                spec_desc.append(f"the {clean_k} must be {val}")
-        
-        if spec_desc:
-            augmented_parts.append("Key technical requirements include: " + "; ".join(spec_desc) + ".")
-            
-    # Add filler/context if still short
-    current_text = " ".join(augmented_parts)
-    current_words = len(current_text.split())
+    if not specs:
+        return augmented_text
+
+    # Identify which specs are missing from the text
+    missing_specs = []
+    text_lower = augmented_text.lower()
     
-    if current_words < min_words:
-        # Add generic industrial context sentence by sentence to reach min_words without overshooting too much
-        filler_sentences = [
-            f"This {category} is a critical component for the {project_name} system and must ensure high reliability, durability, and compliance with relevant industrial standards.",
-            "It should be suitable for the specified process conditions and integrate seamlessly with existing instrumentation and control infrastructure.",
-            "Selection should prioritize models with proven field performance and availability of support."
-        ]
-        
-        for sentence in filler_sentences:
-            if current_words >= min_words:
-                break
-            augmented_parts.append(sentence)
-            current_words += len(sentence.split())
-        
-    return " ".join(augmented_parts)
+    for k, v in specs.items():
+        # Extract clean value (handles nested dicts, lists, etc.)
+        val = _extract_spec_value(v) if isinstance(v, (dict, list)) else str(v)
+            
+        # Skip empty/null values
+        if not val or val.lower() in ["null", "none", "n/a", ""]:
+            continue
+            
+        # Check if value is already in text (simple heuristic)
+        # We check if the value string is present
+        if str(val).lower() not in text_lower:
+            # Clean up key name for readability
+            clean_k = k.replace("_", " ").title()
+            missing_specs.append(f"{clean_k}: {val}")
+    
+    # Append missing specs
+    if missing_specs:
+        # If text doesn't end with punctuation, add period
+        if augmented_text and augmented_text[-1] not in [".", "!", "?"]:
+            augmented_text += "."
+            
+        augmented_text += " Specifications: " + "; ".join(missing_specs) + "."
+            
+    return augmented_text
 
 
 def _extract_spec_value(spec_value) -> str:
@@ -467,7 +470,7 @@ def _merge_deep_agent_specs_for_display(items: list) -> list:
             for key, val in flattened.items():
                 if not val: continue
                 
-                # Check source in original dict/object so we can show [STANDARDS] or [INFERRED]
+                # Check source in original dict/object so we can show (Standards) or (Inferred)
                 source_label = ""
                 raw = combined_specs.get(key)
                 if raw is not None:
@@ -476,16 +479,23 @@ def _merge_deep_agent_specs_for_display(items: list) -> list:
                         src = raw.get("source", "")
                     else:
                         src = getattr(raw, "source", None) or ""
+                    
+                    # USER REQUEST: 
+                    # 1. LLM -> "Inferred"
+                    # 2. Standards -> "Standards"
+                    # 3. User -> No label
                     if src == "standards":
-                        source_label = " [STANDARDS]"
+                        source_label = " (Standards)"
                     elif src in ("llm_generated", "database"):
-                        # "database" = non-standards from batch (user/LLM); show as [INFERRED]
-                        source_label = " [INFERRED]"
+                        # "database" = non-standards from batch (user/LLM); show as (Inferred)
+                        source_label = " (Inferred)"
+                    elif src == "user_specified":
+                        source_label = "" # No label
                 
                 # Helper to check validity
                 val_str = str(val).strip()
                 # Clean up any pre-existing tags
-                val_str = val_str.replace("[INFERRED]", "").replace("[STANDARDS]", "").strip()
+                val_str = val_str.replace("[INFERRED]", "").replace("[STANDARDS]", "").replace("(Inferred)", "").replace("(Standards)", "").replace("(LLM)", "").replace("(USER)", "").strip()
                 val_lower = val_str.lower()
                 
                 if any(p in val_lower for p in RAW_JSON_PATTERNS): continue
@@ -500,7 +510,7 @@ def _merge_deep_agent_specs_for_display(items: list) -> list:
             for key, val in flattened.items():
                 if not val: continue
                 if str(val).lower() in PLACEHOLDER_VALUES: continue
-                display_specs[key] = f"{str(val)} [STANDARDS]"
+                display_specs[key] = f"{str(val)} (Standards)"
                 
         elif llm_specs:
             # Fallback: All are inferred
@@ -508,7 +518,7 @@ def _merge_deep_agent_specs_for_display(items: list) -> list:
             for key, val in flattened.items():
                 if not val: continue
                 if str(val).lower() in PLACEHOLDER_VALUES: continue
-                display_specs[key] = f"{str(val)} [INFERRED]"
+                display_specs[key] = f"{str(val)} (Inferred)"
         
         # Merge with any existing specs (User specs usually here)
         original_specs = item.get("specifications", {})
@@ -524,9 +534,14 @@ def _merge_deep_agent_specs_for_display(items: list) -> list:
                  existing_keys = [k.lower().replace("_", "").replace(" ", "") for k in display_specs.keys()]
                  
                  if key_clean not in existing_keys:
-                     val_str = str(val).strip()
+                     # FIX: Extract clean value from nested dicts instead of str()
+                     # This prevents raw dict text like "{'value': 'x', 'confidence': 0.9}" in UI
+                     if isinstance(val, (dict, list)):
+                         val_str = _extract_spec_value(val)
+                     else:
+                         val_str = str(val).strip()
                      # Clean up any pre-existing tags to avoid double labeling
-                     val_str = val_str.replace("[INFERRED]", "").replace("[STANDARDS]", "").strip()
+                     val_str = val_str.replace("[INFERRED]", "").replace("[STANDARDS]", "").replace("(Inferred)", "").replace("(Standards)", "").replace("(LLM)", "").replace("(USER)", "").strip()
                      
                      if val_str and val_str.lower() not in PLACEHOLDER_VALUES:
                          display_specs[key] = val_str # No label for user/original specs
@@ -631,6 +646,19 @@ def format_selection_list_node(state: InstrumentIdentifierState) -> InstrumentId
         logger.info(f"[IDENTIFIER] Merged Deep Agent specs for {len(state['all_items'])} items")
         # === END MERGE ===
 
+        # === REGENERATE SAMPLE_INPUT WITH ENRICHED SPECS ===
+        # After enrichment merges 50-80 specs, the sample_input (created in Node 2
+        # with only ~5 initial specs) is stale. Regenerate it so the product search
+        # query includes ALL enriched specification values.
+        for item in state["all_items"]:
+            item["sample_input"] = _ensure_full_spec_coverage(
+                item.get("sample_input", ""),
+                item,
+                state.get("project_name", "Project")
+            )
+        logger.info(f"[IDENTIFIER] Regenerated sample_input with enriched specs for {len(state['all_items'])} items")
+        # === END REGENERATE SAMPLE_INPUT ===
+
         # === FETCH GENERIC IMAGES FOR ALL ITEMS ===
         # This ensures each identified item has a generic product image for UI display
         try:
@@ -639,8 +667,16 @@ def format_selection_list_node(state: InstrumentIdentifierState) -> InstrumentId
             # Collect unique product types for batch fetch (use name or category)
             product_types_map = {}  # Maps product_type -> list of item indices
             for idx, item in enumerate(state["all_items"]):
-                # Prefer 'name' field, fallback to 'category'
-                product_type = item.get("name") or item.get("category")
+                name = item.get("name", "").strip()
+                category = item.get("category", "").strip()
+                
+                # Combine category and name for context-rich generation (e.g., "Electrical Accessories - Terminal Head")
+                # This helps disambiguate generic names like "Head" or "Box"
+                if name and category and category.lower() not in name.lower() and name.lower() not in category.lower():
+                    product_type = f"{category} - {name}"
+                else:
+                    product_type = name or category
+
                 if product_type:
                     product_type = product_type.strip()
                     if product_type not in product_types_map:

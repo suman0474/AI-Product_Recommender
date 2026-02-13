@@ -29,12 +29,20 @@ FIELD MAPPING:
 - "Ex ia/Ex d" -> explosionProtection
 
 EXTRACTION RULES:
-1. Most specific product type ("3-valve manifold" not "manifold")
-2. Handle synonyms: "DP transmitter"=differential pressure, "mag meter"=magnetic flowmeter
+1. PRESERVE FULL PRODUCT TYPE including technology qualifiers:
+   ✓ "Coriolis Flow Transmitter" (NOT just "Flow" or "Transmitter")
+   ✓ "Vortex Flow Meter" (NOT just "Flow")
+   ✓ "Differential Pressure Transmitter" (NOT just "Pressure")
+   ✓ "Radar Level Transmitter" (NOT just "Level")
+   ✓ "Magnetic Flow Meter" (NOT just "Flow Meter")
+   ✗ NEVER output a single generic word like "Flow", "Valves", "Level", "Pressure"
+   The productType MUST include the device type (Transmitter/Meter/Sensor/Gauge/Valve)
+2. Handle synonyms: "DP transmitter"=Differential Pressure Transmitter, "mag meter"=Magnetic Flow Meter, "coriolis meter"=Coriolis Flow Meter
 3. Recognize brands: "Rosemount 3051"=pressure transmitter -> vendorInfo
 4. Parse values with units: "100 PSI", "4-20 mA", "0-100C"
 5. Extract quantity: "5 transmitters", "a pair of"
 6. Context inference: steam->high temp materials, offshore->Ex/IP67, outdoor->IP66
+
 
 OUTPUT FORMAT (JSON only):
 {{
@@ -58,5 +66,8 @@ Input: "pressure transmitter, 0-100 bar, 4-20mA HART, Class 300 flange, steam se
 
 Input: "3-valve manifold for DP transmitter, 1/2 NPT, 316 SS, 6000 PSI"
 {{"productType": "3-Valve Manifold", "productCategory": "accessory", "parentInstrument": "Differential Pressure Transmitter", "quantity": 1, "specifications": {{"valveCount": "3-valve", "connection": "1/2 NPT", "material": "316 SS", "pressureRating": "6000 PSI"}}, "inferredSpecs": {{}}, "vendorInfo": {{"preference": null, "modelNumber": null}}, "applicationContext": {{"industry": null, "process": null, "environment": null}}, "missingCriticalSpecs": [], "confidence": {{"productIdentification": 0.98, "overallExtraction": 0.92}}, "rawRequirementsText": "3-valve manifold for DP transmitter, 1/2 NPT, 316 SS, 6000 PSI"}}
+
+Input: "Coriolis Flow Transmitter with 5-20 m³/hr range, 316SS wetted material, Foundation Fieldbus output"
+{{"productType": "Coriolis Flow Transmitter", "productCategory": "instrument", "parentInstrument": null, "quantity": 1, "specifications": {{"flowRange": "5-20 m³/hr", "wettedParts": "316SS", "outputSignal": "Foundation Fieldbus"}}, "inferredSpecs": {{"accuracy": {{"value": "±0.1%", "reason": "typical for Coriolis technology"}}}}, "vendorInfo": {{"preference": null, "modelNumber": null}}, "applicationContext": {{"industry": null, "process": null, "environment": null}}, "missingCriticalSpecs": ["processConnection", "hazardousArea"], "confidence": {{"productIdentification": 0.97, "overallExtraction": 0.90}}, "rawRequirementsText": "Coriolis Flow Transmitter with 5-20 m³/hr range, 316SS wetted material, Foundation Fieldbus output"}}
 
 USER INPUT: {user_input}

@@ -198,6 +198,10 @@ class DocumentService:
         """
         Get all strategy documents for user with SAS URLs.
 
+        Returns BOTH:
+        - Admin documents (is_admin_upload=True, visible to all users)
+        - User's own documents (user_id matches)
+
         Args:
             user_id: User ID
             limit: Max documents
@@ -209,9 +213,15 @@ class DocumentService:
         if not self.strategy_collection:
             return []
 
-        cursor = self.strategy_collection.find(
-            {"user_id": user_id}
-        ).sort("uploaded_at", -1).skip(skip).limit(limit)
+        # Query: Admin documents OR user's own documents
+        query = {
+            "$or": [
+                {"is_admin_upload": True},  # Admin documents visible to all
+                {"user_id": user_id}        # User's own documents
+            ]
+        }
+
+        cursor = self.strategy_collection.find(query).sort("uploaded_at", -1).skip(skip).limit(limit)
 
         documents = []
         for doc in cursor:
@@ -263,10 +273,20 @@ class DocumentService:
             return False
 
     def get_strategy_document_count(self, user_id: int) -> int:
-        """Get strategy document count for user"""
+        """
+        Get strategy document count for user.
+        Includes both admin documents and user's own documents.
+        """
         if not self.strategy_collection:
             return 0
-        return self.strategy_collection.count_documents({"user_id": user_id})
+
+        query = {
+            "$or": [
+                {"is_admin_upload": True},  # Admin documents
+                {"user_id": user_id}        # User's documents
+            ]
+        }
+        return self.strategy_collection.count_documents(query)
 
     # ============================================================
     # Standards Documents
@@ -279,12 +299,15 @@ class DocumentService:
         user_id: int,
         content_type: str = 'application/pdf',
         username: Optional[str] = None,
-        metadata: Optional[Dict] = None
+        metadata: Optional[Dict] = None,
+        is_admin: bool = False
     ) -> Dict:
         """
         Upload standards document.
 
         Same flow as strategy documents.
+        Admin documents (is_admin=True) are visible to all users.
+        User documents (is_admin=False) are only visible to the uploader.
         """
         filename = secure_filename(filename)
 
@@ -304,6 +327,7 @@ class DocumentService:
             "file_size": len(file_bytes),
             "uploaded_at": datetime.utcnow().isoformat(),
             "uploaded_by_username": username,
+            "is_admin_upload": is_admin,  # Track if uploaded by admin (visible to all users)
             "storage": blob_info,
             "metadata": metadata or {}
         }
@@ -380,13 +404,33 @@ class DocumentService:
         limit: int = 100,
         skip: int = 0
     ) -> List[Dict]:
-        """Get all standards documents for user with SAS URLs"""
+        """
+        Get all standards documents for user with SAS URLs.
+
+        Returns BOTH:
+        - Admin documents (is_admin_upload=True, visible to all users)
+        - User's own documents (user_id matches)
+
+        Args:
+            user_id: User ID
+            limit: Max documents
+            skip: Pagination offset
+
+        Returns:
+            List of documents with sas_url field
+        """
         if not self.standards_collection:
             return []
 
-        cursor = self.standards_collection.find(
-            {"user_id": user_id}
-        ).sort("uploaded_at", -1).skip(skip).limit(limit)
+        # Query: Admin documents OR user's own documents
+        query = {
+            "$or": [
+                {"is_admin_upload": True},  # Admin documents visible to all
+                {"user_id": user_id}        # User's own documents
+            ]
+        }
+
+        cursor = self.standards_collection.find(query).sort("uploaded_at", -1).skip(skip).limit(limit)
 
         documents = []
         for doc in cursor:
@@ -428,10 +472,20 @@ class DocumentService:
             return False
 
     def get_standards_document_count(self, user_id: int) -> int:
-        """Get standards document count for user"""
+        """
+        Get standards document count for user.
+        Includes both admin documents and user's own documents.
+        """
         if not self.standards_collection:
             return 0
-        return self.standards_collection.count_documents({"user_id": user_id})
+
+        query = {
+            "$or": [
+                {"is_admin_upload": True},  # Admin documents
+                {"user_id": user_id}        # User's documents
+            ]
+        }
+        return self.standards_collection.count_documents(query)
 
     # ============================================================
     # Common Methods

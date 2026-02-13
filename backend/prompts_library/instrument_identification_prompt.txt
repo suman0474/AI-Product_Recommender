@@ -39,9 +39,11 @@ CRITICAL RULES
    - Default: 1
 
 5. SAMPLE INPUT REQUIREMENTS
-   - 60-75 words in length
-   - Include ALL specifications from specifications object
-   - Pattern: "[Product Name] with [spec1], [spec2]..., suitable for [application]"
+   - Include ALL key specification VALUES (not keys) in a natural sentence
+   - Use ONLY clean values: numbers, units, materials, codes
+   - Pattern: "[Product Name] with [value1], [value2], [value3], suitable for [application]"
+   - Example: "Pressure Transmitter with 0-100 psi range, 4-20mA HART output, 1/2 NPT connection, 316L SS wetted parts, suitable for hydrocarbon service"
+   - FORBIDDEN in sample_input: raw JSON, confidence scores, dict syntax, explanation text
 
 6. INFERRED SPECIFICATIONS
    - Mark with [INFERRED] tag in specifications
@@ -87,7 +89,7 @@ Return ONLY valid JSON (no markdown):
       "strategy": "<procurement strategy or empty string>",
       "specified_vendors": ["<vendor1>"],
       "specified_model_families": ["<model1>"],
-      "sample_input": "<60-75 word description with ALL specs>",
+      "sample_input": "<description with ALL specs>",
       "inferred_specs": ["<spec: value - reasoning>"]
     }}
   ],

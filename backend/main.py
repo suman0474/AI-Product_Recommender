@@ -919,21 +919,36 @@ def database_health():
         # Check MongoDB
         try:
             from core.mongodb_manager import mongodb_manager
-            if mongodb_manager.is_healthy():
+            from services.azure.cosmos_manager import cosmos_project_manager
+
+            if mongodb_manager.is_connected():
                 db = mongodb_manager.database
-                collections = db.list_collection_names()
+                collections = db.list_collection_names() if db else []
+
+                # Check cosmos_project_manager (user_projects collection)
+                projects_health = cosmos_project_manager.check_mongodb_health()
+
                 health_status["mongodb"] = {
                     "connected": True,
                     "collections": collections,
                     "count": len(collections),
-                    "reason": "OK"
+                    "reason": "OK",
+                    "user_projects_collection": {
+                        "can_read": projects_health.get('can_read', False),
+                        "can_write": projects_health.get('can_write', False),
+                        "document_count": projects_health.get('document_count', 0),
+                        "error": projects_health.get('error')
+                    }
                 }
             else:
-                health_status["mongodb"]["reason"] = "MongoDB not available (using fallback mode)"
-        except ImportError:
-            health_status["mongodb"]["reason"] = "MongoDB manager not installed"
+                health_status["mongodb"]["reason"] = "MongoDB not connected (using fallback mode)"
+                health_status["mongodb"]["error"] = mongodb_manager.get_connection_error()
+        except ImportError as ie:
+            health_status["mongodb"]["reason"] = f"MongoDB manager not installed: {str(ie)}"
         except Exception as e:
             health_status["mongodb"]["reason"] = f"Error: {str(e)}"
+            import traceback
+            logging.error(f"MongoDB health check error: {traceback.format_exc()}")
 
         # Check Azure Blob
         try:
@@ -6789,8 +6804,9 @@ def upload_standards_file():
         user_id = session.get('user_id')
         user = User.query.get(user_id)
         username = user.username if user else None
+        is_admin = user.role == 'admin' if user else False
 
-        logging.info(f"[STANDARDS-UPLOAD] Processing file: {filename} ({len(file_bytes)} bytes) for user {user_id}")
+        logging.info(f"[STANDARDS-UPLOAD] Processing file: {filename} ({len(file_bytes)} bytes) for user {user_id} (admin: {is_admin})")
 
         # Upload using document service
         result = document_service.upload_standards_document(
@@ -6798,7 +6814,8 @@ def upload_standards_file():
             filename=filename,
             user_id=user_id,
             content_type=content_type,
-            username=username
+            username=username,
+            is_admin=is_admin  # Admin documents visible to all users
         )
 
         if result.get('success'):

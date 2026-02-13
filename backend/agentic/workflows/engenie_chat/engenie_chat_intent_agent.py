@@ -33,6 +33,7 @@ class DataSource(Enum):
     STANDARDS_RAG = "standards_rag" # IEC, ISO, API standards
     STRATEGY_RAG = "strategy_rag"   # Vendor procurement strategies
     DEEP_AGENT = "deep_agent"       # Detailed spec extraction
+    SOLUTION = "solution"           # System/Solution design
     WEB_SEARCH = "web_search"       # Web search with verification (parallel source)
     HYBRID = "hybrid"               # Multiple sources
     LLM = "llm"                     # General LLM fallback
@@ -234,9 +235,34 @@ WEB_SEARCH_KEYWORDS = [
     "feedback", "experience", "experiences"
 ]
 
+# 5. Solution Design - System/Package Design
+SOLUTION_KEYWORDS = [
+    # Design intent
+    "design", "designing", "designed",
+    "solution", "solutions",
+    "system", "systems",
+    "package", "packages", "packaged",
+    "skid", "skids",
+   "unit", "units",
+    
+    # Context indicators
+    "metering skid", "control system", "safety system",
+    "instrumentation system", "scada system",
+    "distributed control", "dcs", "plc system",
+    "custody transfer", "fiscal metering",
+    "boiler control", "burner management",
+    "compressor control", "pump control",
+    
+    # Design-specific phrases
+    "i need to design", "we're designing", "design a",
+    "solution for", "complete solution",
+    "integrated solution", "turnkey solution",
+    "system integration", "full system",
+    "build a system", "create a system",
+    "engineering solution", "custom solution"
+]
 
-# =============================================================================
-# PATTERN-BASED CLASSIFICATION (Query Structure Recognition)
+# 6. Web Search - External/Current Information
 # =============================================================================
 
 # Patterns that strongly indicate Index RAG (product queries)
@@ -288,6 +314,20 @@ DEEP_AGENT_PATTERNS = [
     r"what does the standard say about"
 ]
 
+# Patterns that strongly indicate Solution Design (system/package design)
+SOLUTION_PATTERNS = [
+    r"design (a|the|an) .*(system|skid|package|unit|solution)",
+    r"(solution|package) for .*(process|application|plant|facility)",
+    r"(metering|control|safety|instrumentation) (skid|system|package)",
+    r"(custody transfer|fiscal metering|burner management)",
+    r"(i need|we need|looking for|require) (a |an )?(complete |integrated )?(solution|system|package)",
+    r"build (a|an) .*(control|safety|metering) system",
+    r"(design|create|build|engineer) .*(scada|dcs|plc) system",
+    r"turnkey (solution|package|system)",
+    r"system integration for",
+    r"full system (for|to)"
+]
+
 # Patterns that strongly indicate Web Search (external/current info)
 WEB_SEARCH_PATTERNS = [
     r"(latest|recent|current|newest) (news|update|development|trend)",
@@ -333,12 +373,18 @@ Classify this query into ONE category:
 Query: {query}
 
 Categories:
-- INDEX_RAG: Product specifications, datasheets, models, vendors (Rosemount, Yokogawa, Siemens, etc.), technical specs, flowmeters, transmitters, valves
-- STANDARDS_RAG: Safety standards (SIL, ATEX, IECEx), certifications, compliance (IEC, ISO, API standards), hazardous area classifications
-- STRATEGY_RAG: Vendor selection, procurement strategy, approved/preferred suppliers, vendor priorities, forbidden vendors
-- DEEP_AGENT: Extract specific values from standards tables, clauses, annexes - detailed requirement extraction
-- HYBRID: Query clearly needs BOTH product info AND standards/strategy info (e.g., "Is Rosemount 3051 certified for SIL 3?")
-- LLM: General question not related to industrial instrumentation, or conversational/greeting
+- INDEX_RAG: Searching for SPECIFIC PRODUCTS - datasheets, specs, individual instruments (e.g., "Rosemount 3051 specs", "pressure transmitter datasheet")
+- STANDARDS_RAG: Safety standards (SIL, ATEX, IECEx), certifications, compliance requirements (IEC, ISO, API standards), hazardous area classifications
+- STRATEGY_RAG: Vendor procurement decisions - approved/preferred supplier lists, vendor selection criteria, commercial terms, procurement rules
+- SOLUTION: SYSTEM/PACKAGE DESIGN - designing complete solutions, skids, integrated systems requiring multiple instruments (e.g., "design a metering skid", "control system for boiler")
+- DEEP_AGENT: Extract specific values from standards documents - tables, clauses, annexes (detailed requirement extraction from PDFs)
+- HYBRID: Query needs BOTH product info AND standards/strategy (e.g., "Is Rosemount 3051 certified for SIL 3?")
+- LLM: General non-instrumentation question, conversational/greeting
+
+IMPORTANT DISTINCTIONS:
+- INDEX_RAG = Finding a single product ("get me a transmitter")
+- SOLUTION = Designing a complete system ("design a custody transfer skid")
+- STRATEGY_RAG = Choosing vendors ("who is our preferred vendor")
 
 Respond ONLY with valid JSON (no markdown):
 {{"category": "CATEGORY_NAME", "confidence": 0.7, "reasoning": "brief reason"}}
@@ -382,6 +428,7 @@ def _classify_with_llm(query: str) -> Tuple[DataSource, float, str]:
             "STANDARDS_RAG": DataSource.STANDARDS_RAG,
             "STRATEGY_RAG": DataSource.STRATEGY_RAG,
             "DEEP_AGENT": DataSource.DEEP_AGENT,
+            "SOLUTION": DataSource.SOLUTION,
             "WEB_SEARCH": DataSource.WEB_SEARCH,
             "HYBRID": DataSource.HYBRID,
             "LLM": DataSource.LLM,
@@ -503,6 +550,11 @@ def classify_by_patterns(query_lower: str) -> Optional[Tuple[DataSource, float, 
         if re.search(pattern, query_lower):
             return DataSource.DEEP_AGENT, 0.9, f"Deep Agent pattern matched"
 
+    # Check Solution Design patterns (system/package design)
+    for pattern in SOLUTION_PATTERNS:
+        if re.search(pattern, query_lower):
+            return DataSource.SOLUTION, 0.9, f"Solution Design pattern matched"
+
     # Check Web Search patterns (external/current info)
     for pattern in WEB_SEARCH_PATTERNS:
         if re.search(pattern, query_lower):
@@ -535,6 +587,7 @@ def _calculate_keyword_scores(query_lower: str) -> Tuple[Dict[DataSource, float]
         DataSource.STANDARDS_RAG: 0.0,
         DataSource.STRATEGY_RAG: 0.0,
         DataSource.DEEP_AGENT: 0.0,
+        DataSource.SOLUTION: 0.0,
         DataSource.WEB_SEARCH: 0.0
     }
 
@@ -543,6 +596,7 @@ def _calculate_keyword_scores(query_lower: str) -> Tuple[Dict[DataSource, float]
         DataSource.STANDARDS_RAG: [],
         DataSource.STRATEGY_RAG: [],
         DataSource.DEEP_AGENT: [],
+        DataSource.SOLUTION: [],
         DataSource.WEB_SEARCH: []
     }
 
@@ -587,6 +641,16 @@ def _calculate_keyword_scores(query_lower: str) -> Tuple[Dict[DataSource, float]
             else:
                 scores[DataSource.DEEP_AGENT] += 1.0
             matches[DataSource.DEEP_AGENT].append(kw)
+
+    # Score Solution Design keywords
+    for kw in SOLUTION_KEYWORDS:
+        if kw in query_lower:
+            # Higher weight for explicit design/system terms
+            if re.match(r'^(design|solution|system|skid|package)', kw):
+                scores[DataSource.SOLUTION] += 3.0
+            else:
+                scores[DataSource.SOLUTION] += 1.0
+            matches[DataSource.SOLUTION].append(kw)
 
     # Score Web Search keywords
     for kw in WEB_SEARCH_KEYWORDS:
@@ -689,6 +753,7 @@ def is_engenie_chat_intent(query: str) -> Tuple[bool, float]:
         DataSource.STANDARDS_RAG,
         DataSource.STRATEGY_RAG,
         DataSource.DEEP_AGENT,
+        DataSource.SOLUTION,
         DataSource.HYBRID
     ]
 
@@ -786,6 +851,7 @@ def _get_query_type_description(data_source: DataSource) -> str:
         DataSource.STANDARDS_RAG: "Standards & Compliance Query",
         DataSource.STRATEGY_RAG: "Vendor & Procurement Query",
         DataSource.DEEP_AGENT: "Detailed Extraction Query",
+        DataSource.SOLUTION: "Solution Design Query",
         DataSource.HYBRID: "Multi-Domain Query",
         DataSource.LLM: "General Query"
     }

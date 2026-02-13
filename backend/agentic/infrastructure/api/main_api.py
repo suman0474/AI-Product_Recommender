@@ -1400,7 +1400,7 @@ def instrument_identifier():
     workflow_thread_id = data.get('workflow_thread_id')
     zone = data.get('zone')  # Optional - backend will detect if not provided
     session_id = data.get('session_id') or get_session_id()
-    user_id = data.get('user_id') or current_user.id
+    user_id = data.get('user_id') or session.get('user_id')
 
     # Frontend sends 'message', check for it, fallback to 'requirements'
     message = data.get('message') or data.get('requirements')

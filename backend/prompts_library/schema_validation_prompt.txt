@@ -19,21 +19,46 @@ PRODUCT TYPE STANDARDIZATION
    - Measurement + Recording → Meter/Recorder
    - Control + Actuation → Valve/Actuator/Positioner
 
-3. REMOVE TECHNOLOGY MODIFIERS
-   ✓ "Vortex Flow Meter" → "Flow Meter"
-   ✓ "Differential Pressure Transmitter" → "Pressure Transmitter"
-   ✓ "RTD Temperature Sensor" → "Temperature Sensor"
-   ✓ "Radar Level Transmitter" → "Level Transmitter"
+3. PRESERVE TECHNOLOGY MODIFIERS
+   Keep technology qualifiers when the user explicitly mentions them:
+   ✓ "Coriolis Flow Transmitter" → "Coriolis Flow Transmitter"
+   ✓ "Vortex Flow Meter" → "Vortex Flow Meter"
+   ✓ "Differential Pressure Transmitter" → "Differential Pressure Transmitter"
+   ✓ "RTD Temperature Sensor" → "RTD Temperature Sensor"
+   ✓ "Radar Level Transmitter" → "Radar Level Transmitter"
+   ✓ "Magnetic Flow Meter" → "Magnetic Flow Meter"
+   ✓ "Ultrasonic Level Transmitter" → "Ultrasonic Level Transmitter"
+   ✓ "Guided Wave Radar Level Transmitter" → "Guided Wave Radar Level Transmitter"
 
-   Remove: Technology (differential, vortex, RTD), Materials (stainless steel), Brands (Rosemount)
+   ONLY remove: Brand names (Rosemount, Endress+Hauser), Material modifiers (stainless steel)
 
 4. STANDARD CATEGORIES
-   - Pressure: Pressure Transmitter, Pressure Gauge, Pressure Sensor, Pressure Switch
-   - Temperature: Temperature Sensor, Temperature Transmitter, Temperature Indicator
-   - Flow: Flow Meter, Flow Transmitter, Flow Indicator
-   - Level: Level Transmitter, Level Sensor, Level Indicator, Level Switch
+   - Pressure: Pressure Transmitter, Differential Pressure Transmitter, Pressure Gauge, Pressure Sensor, Pressure Switch
+   - Temperature: Temperature Sensor, RTD Temperature Sensor, Thermocouple Temperature Sensor, Temperature Transmitter, Temperature Indicator
+   - Flow: Flow Meter, Flow Transmitter, Coriolis Flow Transmitter, Magnetic Flow Meter, Vortex Flow Meter, Ultrasonic Flow Meter, Turbine Flow Meter
+   - Level: Level Transmitter, Radar Level Transmitter, Ultrasonic Level Transmitter, Guided Wave Radar Level Transmitter, Level Sensor, Level Indicator, Level Switch
    - Analytical: pH Sensor, Conductivity Meter, Dissolved Oxygen Sensor
    - Control: Control Valve, Isolation Valve, Safety Valve, Valve Positioner, Actuator
+
+FIELD NAME MAPPING (CRITICAL)
+
+When extracting provided_requirements, you MUST use the schema field names as keys, NOT the user's original field names.
+Map user input terms to the closest matching schema key:
+
+Common mappings:
+  - "range" / "measurement range" / "flow range" → match to schema key (e.g. flowRange, pressureRange, measurementRange)
+  - "output" / "signal" / "output signal" / "output_signal" → outputSignal or outputType
+  - "wetted material" / "wetted_material" / "wetted parts" / "material of construction" → wettedParts or wettedMaterial or material
+  - "connection" / "process connection" / "fitting" → processConnection
+  - "pipe size" / "line size" / "nominal diameter" → pipeSize or nominalDiameter
+  - "body material" / "housing" → bodyMaterial
+  - "hazardous area" / "ATEX" / "explosion proof" → hazardousAreaRating or hazardousArea
+  - "accuracy" / "precision" → accuracy
+  - "protocol" / "communication" → protocol or communicationProtocol
+  - "power" / "supply voltage" → powerSupply
+
+IMPORTANT: Scan ALL schema keys (mandatory AND optional) and map each user-provided value to the best-matching schema key.
+If a user provides a value but the exact key name differs, find the closest semantic match in the schema.
 
 VALIDATION RULES
 
@@ -52,13 +77,32 @@ Return ONLY valid JSON:
 
 {{
   "is_valid": <true if all mandatory provided>,
-  "product_type": "<standardized product type>",
+  "product_type": "<standardized product type WITH technology qualifier>",
   "provided_requirements": {{
-    "<field_name>": "<value>"
+    "<schema_field_name>": "<value>"
   }},
   "missing_fields": ["<missing mandatory field>"],
   "optional_fields": ["<available optional field>"],
   "validation_messages": ["<actionable guidance>"]
+}}
+
+EXAMPLE
+
+User Input: "Coriolis Flow Transmitter with 5-20 m³/hr range, 316SS wetted material, Foundation Fieldbus output"
+Schema has keys: flowRange, wettedParts, outputSignal, accuracy, processConnection, ...
+
+Correct output:
+{{
+  "is_valid": false,
+  "product_type": "Coriolis Flow Transmitter",
+  "provided_requirements": {{
+    "flowRange": "5-20 m³/hr",
+    "wettedParts": "316SS",
+    "outputSignal": "Foundation Fieldbus"
+  }},
+  "missing_fields": ["accuracy", "processConnection"],
+  "optional_fields": ["nominalDiameter", "powerSupply"],
+  "validation_messages": ["Please provide: accuracy, processConnection to complete requirements"]
 }}
 
 INPUT PARAMETERS
@@ -67,4 +111,4 @@ User Input: {user_input}
 Product Type (initial detection): {product_type}
 Schema: {schema}
 
-Standardize product type. Extract user-provided requirements. Validate against schema. Generate clear validation messages. Output ONLY valid JSON.
+Standardize product type (preserve technology qualifiers). Extract user-provided requirements using SCHEMA FIELD NAMES as keys. Validate against schema. Generate clear validation messages. Output ONLY valid JSON.

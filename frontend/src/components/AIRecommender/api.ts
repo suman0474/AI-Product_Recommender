@@ -22,7 +22,7 @@ import {
 
 
 // Use environment variable for production API URL, fallback to relative path (proxy) for dev
-export const BASE_URL = import.meta.env.VITE_API_URL || "https://engenie-production.up.railway.app";
+export const BASE_URL = import.meta.env.VITE_API_URL || "";
 axios.defaults.baseURL = BASE_URL;
 axios.defaults.withCredentials = true;
 
@@ -1491,6 +1491,10 @@ export const routeUserInputByIntent = async (
       }
     } else if (target === 'out_of_domain') {
       legacyIntent = 'other';
+    } else if (target === 'greeting') {
+      legacyIntent = 'greeting';
+    } else if (target === 'conversational') {
+      legacyIntent = 'chitchat';
     }
 
     // Construct workflow suggestion manually (backend agent doesn't send it in to_dict)
@@ -1562,8 +1566,22 @@ export const routeUserInputByIntent = async (
     }
 
     // ROUTE 3: Greeting - Use EnGenie Chat for friendly response
-    if (intent === 'greeting') {
-      console.log('[INTENT_ROUTER] 👋 Routing to ENGENIE CHAT for greeting');
+    if (intent === 'greeting' || intent === 'chitchat' || intent === 'other') {
+      console.log(`[INTENT_ROUTER] 👋 Routing to ENGENIE CHAT for ${intent}`);
+
+      // OPTIMIZATION: Use direct response if available (from fast path or LLM classifier)
+      if (routeResult.direct_response) {
+        console.log(`[INTENT_ROUTER] Using direct response for ${intent}`);
+        return {
+          intent: intent as any,
+          responseType: 'greeting', // Use 'greeting' type for simple text responses
+          message: routeResult.direct_response,
+          instruments: currentInstruments || [],
+          accessories: currentAccessories || [],
+          isSolution: false,
+        };
+      }
+
 
       try {
         const chatResult = await callEnGenieChat(userInput, sessionId);

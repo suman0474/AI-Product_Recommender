@@ -21,7 +21,7 @@ export class ThreadAwareApiClient {
   private sessionManager: SessionManager;
   private baseURL: string;
 
-  constructor(baseURL: string = import.meta.env.VITE_API_URL || 'https://engenie-production.up.railway.app') {
+  constructor(baseURL: string = import.meta.env.VITE_API_URL || '') {
     this.baseURL = baseURL;
     this.sessionManager = SessionManager.getInstance();
 

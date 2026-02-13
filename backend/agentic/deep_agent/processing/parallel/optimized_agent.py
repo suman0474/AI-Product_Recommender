@@ -874,21 +874,30 @@ def run_optimized_parallel_enrichment(
             if isinstance(v, dict):
                 value = v.get("value", v)
                 source = v.get("source", "unknown")
-                # Normalize source name for display
-                source_label = {
-                    "user_specified": "USER",
-                    "standards": "STANDARDS", 
-                    "llm_generated": "LLM"
-                }.get(source, source.upper())
-                enriched_item["specifications"][k] = f"{value} ({source_label})"
+                
+                # USER REQUEST: 
+                # 1. LLM -> "Inferred"
+                # 2. Standards -> "Standards"
+                # 3. User -> No label
+                if source == "llm_generated":
+                    enriched_item["specifications"][k] = f"{value} (Inferred)"
+                elif source == "standards":
+                    enriched_item["specifications"][k] = f"{value} (Standards)"
+                elif source == "user_specified":
+                    enriched_item["specifications"][k] = str(value)  # No label
+                else:
+                    enriched_item["specifications"][k] = f"{value} ({source})"
+                    
             elif hasattr(v, 'value') and hasattr(v, 'source'):
                 # SpecificationSource dataclass
-                source_label = {
-                    "user_specified": "USER",
-                    "standards": "STANDARDS",
-                    "llm_generated": "LLM"
-                }.get(v.source, v.source.upper())
-                enriched_item["specifications"][k] = f"{v.value} ({source_label})"
+                if v.source == "llm_generated":
+                    enriched_item["specifications"][k] = f"{v.value} (Inferred)"
+                elif v.source == "standards":
+                    enriched_item["specifications"][k] = f"{v.value} (Standards)"
+                elif v.source == "user_specified":
+                    enriched_item["specifications"][k] = str(v.value)  # No label
+                else:
+                    enriched_item["specifications"][k] = f"{v.value} ({v.source})"
             else:
                 enriched_item["specifications"][k] = str(v)
                 

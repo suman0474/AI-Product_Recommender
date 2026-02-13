@@ -911,6 +911,43 @@ const EnGenieChat = () => {
                 setShowThinking(true);
 
                 try {
+                    // ============================================================================
+                    // PHASE 1: OUT_OF_DOMAIN BLOCKING (Auto-submit from URL)
+                    // Classify query before processing to block invalid queries
+                    // ============================================================================
+                    const routingResult = await classifyRoute(queryToSubmit!);
+                    const targetWorkflow = routingResult.target_workflow;
+
+                    console.log('[CHAT_AUTO_SUBMIT] Classification:', {
+                        target: targetWorkflow,
+                        intent: routingResult.intent
+                    });
+
+                    // Block OUT_OF_DOMAIN queries
+                    if (targetWorkflow === 'out_of_domain') {
+                        console.log('[CHAT_AUTO_SUBMIT] OUT_OF_DOMAIN blocked');
+                        setShowThinking(false);
+
+                        const rejectMessage = routingResult.reject_message ||
+                            "I'm EnGenie, your industrial automation assistant. I can help with:\n\n" +
+                            "• **Instrument Identification** - Finding the right products for your needs\n\n" +
+                            "• **Product Search** - Searching for specific industrial instruments\n\n" +
+                            "• **Standards & Compliance** - Questions about industrial standards (ISA, IEC, etc.)\n\n" +
+                            "• **Technical Knowledge** - Industrial automation concepts and best practices\n\n" +
+                            "Please ask a question related to industrial automation, instrumentation, or process control.";
+
+                        const assistantMessage: ChatMessage = {
+                            id: `assistant_${Date.now()}`,
+                            type: "assistant",
+                            content: rejectMessage,
+                            timestamp: new Date()
+                        };
+                        setMessages(prev => [...prev, assistantMessage]);
+                        setIsLoading(false);
+                        return; // ✅ BLOCKED
+                    }
+
+                    // Continue with normal query processing
                     const response = await queryEnGenieChat(queryToSubmit!);
                     setShowThinking(false);
 
@@ -978,6 +1015,34 @@ const EnGenieChat = () => {
                 intent: routingResult.intent,
                 confidence: routingResult.confidence
             });
+
+            // ============================================================================
+            // ============================================================================
+            // PHASE 1: OUT_OF_DOMAIN BLOCKING - DISABLED
+            // Blocking has been disabled to allow all queries through to the backend
+            // ============================================================================
+            // if (targetWorkflow === 'out_of_domain') {
+            //     console.log('[CHAT_ROUTING] OUT_OF_DOMAIN query detected - blocking');
+            //     setShowThinking(false);
+            //
+            //     const rejectMessage = routingResult.reject_message ||
+            //         "I'm EnGenie, your industrial automation assistant. I can help with:\n\n" +
+            //         "• **Instrument Identification** - Finding the right products for your needs\n\n" +
+            //         "• **Product Search** - Searching for specific industrial instruments\n\n" +
+            //         "• **Standards & Compliance** - Questions about industrial standards (ISA, IEC, etc.)\n\n" +
+            //         "• **Technical Knowledge** - Industrial automation concepts and best practices\n\n" +
+            //         "Please ask a question related to industrial automation, instrumentation, or process control.";
+            //
+            //     const assistantMessage: ChatMessage = {
+            //         id: `assistant_${Date.now()}`,
+            //         type: "assistant",
+            //         content: rejectMessage,
+            //         timestamp: new Date()
+            //     };
+            //     setMessages(prev => [...prev, assistantMessage]);
+            //     setIsLoading(false);
+            //     return; // ✅ BLOCKED - No API call made
+            // }
 
             // Map backend target_workflow to page names and create action buttons
             const workflowPageMap: Record<string, { page: string; label: string; icon: string; description: string }> = {

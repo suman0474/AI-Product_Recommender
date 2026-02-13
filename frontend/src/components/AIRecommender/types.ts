@@ -191,7 +191,7 @@ export interface IntentClassificationResult {
  */
 export interface WorkflowRoutingResult {
   query: string;
-  target_workflow: "solution" | "instrument_identifier" | "engenie_chat" | "out_of_domain";
+  target_workflow: "solution" | "instrument_identifier" | "engenie_chat" | "out_of_domain" | "greeting" | "conversational";
   intent: string;
   confidence: number;
   reasoning: string;
@@ -201,6 +201,7 @@ export interface WorkflowRoutingResult {
   classification_time_ms: number;
   timestamp: string;
   reject_message: string | null;
+  direct_response?: string | null;  // Direct response from classifier (e.g. for greetings)
 }
 
 

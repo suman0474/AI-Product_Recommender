@@ -203,6 +203,47 @@ def _apply_request_throttle():
             return 0.0
 
 
+
+def _get_visual_description(product_type: str) -> Optional[str]:
+    """
+    Get a visual description of the product using a text LLM.
+    This helps ground the image generation for obscure industrial parts.
+    """
+    global _gemini_client
+    if not _gemini_client:
+        return None
+
+    try:
+        logger.info(f"[LLM_DESC] Generating visual description for '{product_type}'...")
+        prompt = (
+            f"Describe the **isolated physical form** of an industrial {product_type} for a 3D artist. "
+            f"Focus on what makes a {product_type} VISUALLY DISTINCT from other industrial instruments. "
+            "Describe it as a standalone component floating in whitespace. "
+            "Focus on shape, materials (e.g. stainless steel, plastic), and key visible components (e.g. LCD screen, flanges, tubes, U-shaped pipes). "
+            "Do not mention usage. Start with 'A ...'"
+        )
+        
+        # Use gemini-2.0-flash for speed/cost
+        response = _gemini_client.models.generate_content(
+            model='gemini-2.0-flash',
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.2,
+                max_output_tokens=120
+            )
+        )
+        
+        if response.text:
+            description = response.text.strip()
+            logger.info(f"[LLM_DESC] Description: {description}")
+            return description
+            
+    except Exception as e:
+        logger.warning(f"[LLM_DESC] Failed to generate description: {e}")
+    
+    return None
+
+
 def _generate_image_with_llm(product_type: str, retry_count: int = 0, max_retries: int = 3) -> Optional[Dict[str, Any]]:
     """
     Generate a generic product image using Gemini's Imagen model
@@ -229,9 +270,36 @@ def _generate_image_with_llm(product_type: str, retry_count: int = 0, max_retrie
         if throttle_wait > 0:
             logger.info(f"[FIX3] Applied throttling: {throttle_wait:.2f}s")
 
-        # Construct the prompt for image generation
-        # Ensure no text and no background color as per user requirement
-        prompt = f"A professional 3D render of a {product_type}, studio lighting, high resolution, isolated on a transparent background, no shadow, clean edges."
+        # Step 1: Get Visual Description (Dynamic Prompt Enrichment)
+        visual_description = _get_visual_description(product_type)
+
+        # Step 2: Construct the prompt for image generation
+        # Enforce industrial context to avoid ambiguous interpretations (e.g. "Terminal Head" -> Robot)
+        if visual_description:
+            # Use the LLM-generated description
+            clean_desc = visual_description.rstrip('.')
+            prompt = (
+                f"A professional product catalog shot of {clean_desc}. "
+                f"(Context: {product_type} - industrial automation component). "
+                "Style: Industrial product photography, flat lighting, soft even illumination, "
+                "white background, high resolution. "
+                "Composition: Floating object, fully isolated. "
+                "Exclude: shadows, cast shadows, drop shadows, floor, surface, table, reflection, "
+                "dramatic lighting, high contrast, cinematic, "
+                "faces, characters, robots, organic, sci-fi."
+            )
+        else:
+            # Fallback to template if description fails
+            prompt = (
+                f"A professional product catalog shot of a {product_type}. "
+                f"(Context: {product_type} - industrial automation component). "
+                "Style: Industrial product photography, flat lighting, soft even illumination, "
+                "white background, high resolution. "
+                "Composition: Floating object, fully isolated. "
+                "Exclude: shadows, cast shadows, drop shadows, floor, surface, table, reflection, "
+                "dramatic lighting, high contrast, cinematic, "
+                "faces, characters, robots, organic, sci-fi."
+            )
 
         logger.info(f"[LLM_IMAGE_GEN] Prompt: {prompt}")
 
@@ -345,7 +413,34 @@ def _generate_image_with_llm_fast(product_type: str) -> Optional[Dict[str, Any]]
         if throttle_wait > 0:
             logger.info(f"[LLM_FAST] Throttle: {throttle_wait:.2f}s")
         
-        prompt = f"A professional 3D render of a {product_type}, studio lighting, high resolution, isolated on a transparent background, no shadow, clean edges."
+        # Step 1: Get Visual Description (Fast - still worth the ~500ms for quality)
+        visual_description = _get_visual_description(product_type)
+        
+        # Step 2: Construct Prompt
+        if visual_description:
+            clean_desc = visual_description.rstrip('.')
+            prompt = (
+                f"A professional product catalog shot of {clean_desc}. "
+                f"(Context: {product_type} - industrial automation component). "
+                "Style: Industrial product photography, flat lighting, soft even illumination, "
+                "white background, high resolution. "
+                "Composition: Floating object, fully isolated. "
+                "Exclude: shadows, cast shadows, drop shadows, floor, surface, table, reflection, "
+                "dramatic lighting, high contrast, cinematic, "
+                "faces, characters, robots, organic, sci-fi."
+            )
+        else:
+            # Enforce industrial context
+            prompt = (
+                f"A professional product catalog shot of a {product_type}. "
+                f"(Context: {product_type} - industrial automation component). "
+                "Style: Industrial product photography, flat lighting, soft even illumination, "
+                "white background, high resolution. "
+                "Composition: Floating object, fully isolated. "
+                "Exclude: shadows, cast shadows, drop shadows, floor, surface, table, reflection, "
+                "dramatic lighting, high contrast, cinematic, "
+                "faces, characters, robots, organic, sci-fi."
+            )
         
         response = _gemini_client.models.generate_images(
             model='imagen-4.0-generate-001',
@@ -856,24 +951,23 @@ def _try_fallback_cache_lookup(product_type: str) -> Optional[Dict[str, Any]]:
     
     # Common prefixes to strip
     COMMON_PREFIXES = [
-        # General modifiers
+        # General modifiers (safe to strip - don't change visual appearance)
         "Process ", "Industrial ", "Digital ", "Smart ", "Advanced ", 
         "Precision ", "High Performance ", "Multi ", "Dual ", "Single ",
         "Compact ", "Integrated ", "Electronic ", "Intelligent ", "Programmable ",
         "Wireless ", "Remote ", "Field ", "Panel ", "Portable ", "Handheld ",
         "Ex-rated ", "ATEX ", "Hazardous Area ", "Explosion Proof ",
-        # Sensor type prefixes
-        "RTD ", "PT100 ", "PT1000 ", "Thermocouple ", "TC ", "K-Type ", "J-Type ",
+        # Communication protocol prefixes (don't change physical appearance)
         "HART ", "Foundation Fieldbus ", "Profibus ", "Modbus ", "4-20mA ",
-        # Measurement type prefixes
-        "Coriolis ", "Magnetic ", "Ultrasonic ", "Vortex ", "Differential ",
-        "Absolute ", "Gauge ", "Sealed ", "Diaphragm ", "Capacitive ",
-        # Material/application prefixes
+        # Material/application prefixes (minor visual differences)
         "Stainless Steel ", "SS ", "316L ", "Hastelloy ", "Titanium ",
         "Sanitary ", "Hygienic ", "Food Grade ", "Pharmaceutical ",
         # Size/range prefixes
         "High Pressure ", "Low Pressure ", "High Temperature ", "Low Temperature ",
         "Wide Range ", "Narrow Range ", "High Accuracy ",
+        # NOTE: DO NOT strip measurement-type prefixes (Coriolis, Radar, Magnetic, Ultrasonic, etc.)
+        # or sensor-type prefixes (RTD, Thermocouple, etc.)
+        # These distinguish fundamentally different products that look very different physically.
     ]
     
     fallback_types = []

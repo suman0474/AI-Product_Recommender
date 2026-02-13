@@ -27,6 +27,7 @@ class WorkflowType(Enum):
     ENGENIE_CHAT = "engenie_chat"
     SOLUTION_WORKFLOW = "solution_workflow"
     INSTRUMENT_IDENTIFIER = "instrument_identifier"
+    OUT_OF_DOMAIN = "out_of_domain"  # Invalid/non-industrial queries
 
 
 @dataclass
@@ -108,6 +109,102 @@ SOLUTION_WORKFLOW_SIGNATURES = [
     "We need to implement a comprehensive monitoring system with multiple measurement points",
     "Design a multi-zone temperature control system with redundancy",
     "I'm building a complete measurement system for reactor temperature profiling",
+]
+
+# Out-of-Domain: Non-industrial queries that should be rejected
+OUT_OF_DOMAIN_SIGNATURES = [
+    # General knowledge (non-industrial)
+    "What is the capital of France?",
+    "Who is the president of United States?",
+    "Tell me about World War 2",
+    "What is quantum physics?",
+    "Explain theory of relativity",
+    "Who invented the telephone?",
+    "What is the meaning of life?",
+    "How does photosynthesis work?",
+    
+    # Entertainment & Media
+    "Tell me a joke",
+    "What's a good movie to watch?",
+    "Who won the World Cup?",
+    "Latest episode of Game of Thrones",
+    "Best songs of 2024",
+    "Who is the best actor?",
+    "Netflix recommendations",
+    "Video game tips and tricks",
+    
+    # Weather & Nature
+    "What's the weather like today?",
+    "Will it rain tomorrow?",
+    "Climate change effects",
+    "Earthquake prediction methods",
+    "What causes hurricanes?",
+    "Best time to plant tomatoes",
+    
+    # Personal & Health & Food
+    "Best recipe for chocolate cake",
+    "How to lose weight fast?",
+    "Symptoms of flu",
+    "Restaurant recommendations near me",
+    "Dating advice for beginners",
+    "How to cook pasta perfectly?",
+    "Best diet for weight loss",
+    "Yoga poses for back pain",
+    
+    # Consumer Tech (non-industrial)
+    "How to code in Python?",
+    "Best laptop for gaming?",
+    "Install Windows 11 step by step",
+    "Fix WiFi connection issues",
+    "iPhone vs Android comparison",
+    "How to edit photos in Photoshop?",
+    "Smartphone camera settings",
+    "Best antivirus software",
+    
+    # Politics & Current Events
+    "Who is Donald Trump?",
+    "Latest political news",
+    "What is happening in Ukraine?",
+    "Election results 2024",
+    "Government policies explained",
+    
+    # Sports & Fitness
+    "Who won the Super Bowl?",
+    "Best exercises for abs",
+    "How to improve running speed?",
+    "Football match schedule",
+    "NBA playoff predictions",
+    
+    # Travel & Lifestyle
+    "Best places to visit in Europe",
+    "How to pack for a vacation?",
+    "Budget travel tips",
+    "Hotel recommendations in Paris",
+    "What to see in New York?",
+    
+    # Education (non-industrial)
+    "How to study for exams?",
+    "Best online courses for marketing",
+    "What is algebra?",
+    "How to write an essay?",
+    "Grammar rules explained",
+    
+    # Edge cases with industrial terms but wrong context
+    "Temperature for baking bread",
+    "Pressure when diving underwater",
+    "Flow of traffic on highway",
+    "Level up in video game",
+    "Sensor news and updates",
+    "Automation in workflow management software",
+    "Sensor data from smartphone accelerometer",
+    "Temperature control in refrigerator",
+    "Pressure cooker cooking times",
+    "Flow rate of garden hose",
+    "Water level in swimming pool",
+    "Smart home sensor integration",
+    "Body temperature measurement",
+    "Blood pressure readings",
+    "Air pressure in car tires",
 ]
 
 
@@ -221,7 +318,7 @@ class SemanticIntentClassifier:
         if self._signatures_precomputed:
             return
         
-        all_signatures = ENGENIE_CHAT_SIGNATURES + SOLUTION_WORKFLOW_SIGNATURES
+        all_signatures = ENGENIE_CHAT_SIGNATURES + SOLUTION_WORKFLOW_SIGNATURES + OUT_OF_DOMAIN_SIGNATURES
         missing_signatures = []
         cached_count = 0
         
@@ -409,12 +506,15 @@ class SemanticIntentClassifier:
             # Compute query embedding
             query_embedding = self._compute_embedding(query)
             
-            # Compute similarity to each workflow
+            # Compute similarity to each workflow (4-way classification)
             engenie_sim, engenie_match = self._compute_workflow_similarity(
                 query_embedding, ENGENIE_CHAT_SIGNATURES
             )
             solution_sim, solution_match = self._compute_workflow_similarity(
                 query_embedding, SOLUTION_WORKFLOW_SIGNATURES
+            )
+            out_of_domain_sim, ood_match = self._compute_workflow_similarity(
+                query_embedding, OUT_OF_DOMAIN_SIGNATURES
             )
             
             # Analyze query complexity for boosting
@@ -427,20 +527,38 @@ class SemanticIntentClassifier:
             logger.info(
                 f"[SEMANTIC] Query: '{query[:50]}...' | "
                 f"EnGenie: {engenie_sim:.3f} | Solution: {solution_sim:.3f} "
-                f"(boosted: {solution_sim_boosted:.3f})"
+                f"(boosted: {solution_sim_boosted:.3f}) | OOD: {out_of_domain_sim:.3f}"
             )
             
-            # Decision logic
+            # Decision logic with OUT_OF_DOMAIN priority
             all_scores = {
                 "engenie_chat": engenie_sim,
                 "solution_workflow": solution_sim,
-                "solution_boosted": solution_sim_boosted
+                "solution_boosted": solution_sim_boosted,
+                "out_of_domain": out_of_domain_sim
             }
             
-            # Solution workflow wins if:
+            # PRIORITY 1: Reject if OUT_OF_DOMAIN confidence is very high
+            # High threshold (0.80) to avoid false positives
+            if out_of_domain_sim > 0.80:
+                logger.warning(
+                    f"[SEMANTIC] OUT_OF_DOMAIN detected (high confidence): {out_of_domain_sim:.3f}"
+                )
+                return ClassificationResult(
+                    workflow=WorkflowType.OUT_OF_DOMAIN,
+                    confidence=out_of_domain_sim,
+                    matched_signature=ood_match,
+                    all_scores=all_scores,
+                    reasoning=f"Out-of-domain similarity {out_of_domain_sim:.3f} > 0.80 (high threshold)"
+                )
+            
+            # PRIORITY 2: Solution workflow wins if:
             # 1. Boosted score > threshold AND
-            # 2. Boosted score > engenie score
-            if solution_sim_boosted > self.SOLUTION_THRESHOLD and solution_sim_boosted > engenie_sim:
+            # 2. Boosted score > engenie score AND
+            # 3. NOT strongly out-of-domain
+            if (solution_sim_boosted > self.SOLUTION_THRESHOLD and 
+                solution_sim_boosted > engenie_sim and
+                out_of_domain_sim < 0.65):
                 return ClassificationResult(
                     workflow=WorkflowType.SOLUTION_WORKFLOW,
                     confidence=solution_sim_boosted,
@@ -449,8 +567,10 @@ class SemanticIntentClassifier:
                     reasoning=f"Solution similarity {solution_sim_boosted:.3f} > threshold {self.SOLUTION_THRESHOLD}"
                 )
             
-            # EnGenie Chat wins if score > threshold
-            if engenie_sim > self.ENGENIE_THRESHOLD:
+            # PRIORITY 3: EnGenie Chat wins if:
+            # 1. Score > threshold AND
+            # 2. NOT strongly out-of-domain
+            if engenie_sim > self.ENGENIE_THRESHOLD and out_of_domain_sim < 0.65:
                 return ClassificationResult(
                     workflow=WorkflowType.ENGENIE_CHAT,
                     confidence=engenie_sim,
@@ -459,13 +579,47 @@ class SemanticIntentClassifier:
                     reasoning=f"EnGenie similarity {engenie_sim:.3f} > threshold {self.ENGENIE_THRESHOLD}"
                 )
             
-            # Fallback: EnGenie Chat with lower confidence
+            # PRIORITY 4: Ambiguous case - compare valid scores vs OUT_OF_DOMAIN
+            max_valid_score = max(engenie_sim, solution_sim_boosted)
+            
+            # If both valid scores are low AND OOD score is moderate, likely invalid
+            if max_valid_score < 0.60 and out_of_domain_sim > 0.60:
+                logger.warning(
+                    f"[SEMANTIC] OUT_OF_DOMAIN detected (ambiguous): "
+                    f"max_valid={max_valid_score:.3f}, ood={out_of_domain_sim:.3f}"
+                )
+                # Compute hybrid confidence: average of OOD score and (1 - max_valid_score)
+                hybrid_confidence = (out_of_domain_sim + (1 - max_valid_score)) / 2
+                return ClassificationResult(
+                    workflow=WorkflowType.OUT_OF_DOMAIN,
+                    confidence=hybrid_confidence,
+                    matched_signature=ood_match,
+                    all_scores=all_scores,
+                    reasoning=f"Ambiguous query: low industrial similarity ({max_valid_score:.3f}) + moderate OOD ({out_of_domain_sim:.3f})"
+                )
+            
+            # PRIORITY 5: Additional check - if OOD clearly beats valid scores
+            if out_of_domain_sim > max_valid_score and out_of_domain_sim > 0.65:
+                logger.warning(
+                    f"[SEMANTIC] OUT_OF_DOMAIN wins comparison: "
+                    f"ood={out_of_domain_sim:.3f} > max_valid={max_valid_score:.3f}"
+                )
+                return ClassificationResult(
+                    workflow=WorkflowType.OUT_OF_DOMAIN,
+                    confidence=out_of_domain_sim,
+                    matched_signature=ood_match,
+                    all_scores=all_scores,
+                    reasoning=f"OOD score {out_of_domain_sim:.3f} clearly exceeds valid scores ({max_valid_score:.3f})"
+                )
+            
+            # FALLBACK: Default to EnGenie Chat with lower confidence
+            # Prefer to process rather than reject in uncertain cases
             return ClassificationResult(
                 workflow=WorkflowType.ENGENIE_CHAT,
                 confidence=max(engenie_sim, solution_sim),
                 matched_signature=engenie_match if engenie_sim > solution_sim else solution_match,
                 all_scores=all_scores,
-                reasoning=f"Fallback to EnGenie Chat (no score met threshold)"
+                reasoning=f"Fallback to EnGenie Chat (no clear classification, max_valid={max_valid_score:.3f})"
             )
             
         except Exception as e:

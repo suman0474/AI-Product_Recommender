@@ -89,9 +89,24 @@ def extract_vendors(query: str) -> List[str]:
     query_lower = query.lower()
     detected_vendors = []
     
+    # Exact match first
     for vendor in KNOWN_VENDORS:
         if vendor in query_lower:
             detected_vendors.append(vendor)
+            
+    # Fuzzy match for typos (e.g. heonywell -> honeywell)
+    if not detected_vendors:
+        import difflib
+        words = query_lower.split()
+        for word in words:
+            # removing punctuation
+            clean_word = re.sub(r'[^\w\s]', '', word)
+            matches = difflib.get_close_matches(clean_word, KNOWN_VENDORS, n=1, cutoff=0.7)
+            if matches:
+                detected_vendors.append(matches[0])
+    
+    # Deduplicate
+    detected_vendors = list(set(detected_vendors))
     
     logger.info(f"[MetadataFilter] Extracted vendors: {detected_vendors}")
     return detected_vendors

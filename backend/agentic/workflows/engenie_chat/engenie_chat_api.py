@@ -58,6 +58,7 @@ def query_endpoint():
                 'answer': 'Please provide a query.'
             }), 400
         
+        
         query = data.get('query', '').strip()
         if not query:
             return jsonify({
@@ -66,21 +67,39 @@ def query_endpoint():
                 'answer': 'Please enter your question.'
             }), 400
         
-        # Input validation - reject invalid queries before LLM processing
-        from tools.input_validator import validate_query, OUT_OF_DOMAIN_MESSAGE
-        is_valid, rejection_message = validate_query(query, skip_llm=False)
-        if not is_valid:
-            logger.info(f"[ENGENIE_CHAT_API] Query rejected at validation: {query[:60]}...")
-            return jsonify({
-                'success': False,
-                'error': 'Invalid query - out of scope',
-                'answer': rejection_message or OUT_OF_DOMAIN_MESSAGE,
-                'source': 'validation',
-                'found_in_database': False,
-                'awaiting_confirmation': False,
-                'sources_used': [],
-                'rejected': True
-            }), 200
+        
+        # ============================================================================
+        # PHASE 2: BACKEND ENDPOINT GUARD - DISABLED
+        # OUT_OF_DOMAIN blocking has been disabled to allow all queries through
+        # ============================================================================
+        # from agentic.validators import validate_query_domain, create_rejection_response
+        # 
+        # session_id = data.get('session_id', 'default')
+        # 
+        # # Validate query domain (NEVER raises exceptions)
+        # validation_result = validate_query_domain(
+        #     query=query,
+        #     session_id=session_id,
+        #     context={}
+        # )
+        # 
+        # # Block OUT_OF_DOMAIN queries with HTTP 400 and helpful message
+        # if not validation_result.is_valid:
+        #     logger.info(
+        #         f"[ENGENIE_CHAT_API] OUT_OF_DOMAIN blocked: {query[:50]}... "
+        #         f"(confidence: {validation_result.confidence:.2f})"
+        #     )
+        #     # Return standardized rejection response
+        #     return jsonify(create_rejection_response(
+        #         validation_result,
+        #         include_reasoning=True  # Include reasoning for debugging
+        #     )), 400  # HTTP 400 Bad Request (NOT 500!)
+        # 
+        # # Log valid query with classification info
+        # logger.info(
+        #     f"[ENGENIE_CHAT_API] Valid query: {query[:50]}... "
+        #     f"(workflow: {validation_result.target_workflow}, confidence: {validation_result.confidence:.2f})"
+        # )
         
         # Get or generate session ID
         session_id = data.get('session_id') or session.get('engenie_chat_session_id')

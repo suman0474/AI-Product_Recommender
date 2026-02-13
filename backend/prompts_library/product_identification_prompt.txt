@@ -13,7 +13,7 @@ SHARED RULES:
    FORBIDDEN: "typically", "usually", "approximately", "suitable for", "designed for"
 
 2. SAMPLE INPUT REQUIREMENTS
-   - 60-75 words, include ALL specs from specifications object
+   - Include EACH and EVERY identified technical specification value in the description.
    - Pattern: "[Product] with [spec1], [spec2]..., suitable for [application]"
 
 3. INFERRED SPECIFICATIONS
@@ -68,7 +68,7 @@ OUTPUT FORMAT (JSON only):
       "strategy": "<procurement strategy or empty>",
       "specified_vendors": ["<vendor>"],
       "specified_model_families": ["<model>"],
-      "sample_input": "<60-75 word description>",
+      "sample_input": "<Description including ALL technical specs>",
       "inferred_specs": ["<spec: value - reasoning>"]
     }}
   ],
@@ -86,7 +86,7 @@ DOWNSTREAM ENRICHMENT: Accessories are also enriched with standards-based specs 
 
 SHARED RULES: (Same as INSTRUMENT_IDENTIFICATION)
 1. CLEAN SPECIFICATION VALUES ONLY - No descriptive text, only values
-2. SAMPLE INPUT REQUIREMENTS - 60-75 words, mention parent instrument relationship
+2. SAMPLE INPUT REQUIREMENTS - Include EACH and EVERY identified technical specification value, mention parent instrument relationship
 
 ACCESSORY-SPECIFIC RULES:
 
@@ -128,7 +128,7 @@ OUTPUT FORMAT (JSON only):
       "specified_model_families": [],
       "parent_instrument_category": "<category of parent>",
       "related_instrument": "<parent instrument name>",
-      "sample_input": "<60-75 word description>"
+      "sample_input": "<Description including ALL technical specs>"
     }}
   ],
   "summary": "<Brief accessories summary>"
