@@ -131,10 +131,14 @@ export const logout = async (): Promise<{ message: string }> => {
  * Updates the user's profile (first name, last name, username).
  */
 export const updateProfile = async (
-  data: { first_name?: string; last_name?: string; username?: string }
+  data: { first_name?: string; last_name?: string; username?: string; company?: string; location?: string }
 ): Promise<any> => {
   try {
-    const response = await axios.post(`/api/update_profile`, data);
+    const response = await axios.post(`/api/update_profile`, data, {
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
     return convertKeysToCamelCase(response.data);
   } catch (error: any) {
     console.error("Profile update error:", error.response?.data || error.message);
