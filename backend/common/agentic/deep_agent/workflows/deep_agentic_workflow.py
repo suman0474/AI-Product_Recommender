@@ -319,14 +319,14 @@ class DeepAgenticWorkflowOrchestrator:
     @property
     def advanced_params_tool(self):
         if self._advanced_params_tool is None:
-            from product_search.compat import AdvancedParametersTool
+            from search.compat import AdvancedParametersTool
             self._advanced_params_tool = AdvancedParametersTool()
         return self._advanced_params_tool
 
     @property
     def workflow_helper(self):
         if self._workflow_helper is None:
-            from product_search.compat import ProductSearchWorkflow
+            from search.compat import ProductSearchWorkflow
             self._workflow_helper = ProductSearchWorkflow(
                 enable_ppi_workflow=self.enable_ppi,
                 max_vendor_workers=self.max_workers

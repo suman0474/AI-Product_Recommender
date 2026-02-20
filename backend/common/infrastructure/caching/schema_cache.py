@@ -89,7 +89,7 @@ class SchemaCache:
         self.memory_cache = {}  # L1: In-memory
         self.redis_client = None  # L2: Redis
         self.use_redis = use_redis
-        self.default_ttl_hours = 24
+        self.default_ttl_hours = 0  # Disabled by default
         self.cache_stats = {
             "memory_hits": 0,
             "memory_misses": 0,
@@ -277,9 +277,13 @@ class SchemaCache:
         if self.redis_client:
             try:
                 schema_json = json.dumps(schema)
-                ttl_seconds = ttl_hours * 3600
-                self.redis_client.setex(cache_key, ttl_seconds, schema_json)
-                logger.info(f"[SCHEMA_CACHE] Cached schema for {product_type} in L2 (Redis, TTL: {ttl_hours}h)")
+                if ttl_hours > 0:
+                    ttl_seconds = ttl_hours * 3600
+                    self.redis_client.setex(cache_key, ttl_seconds, schema_json)
+                    logger.info(f"[SCHEMA_CACHE] Cached schema for {product_type} in L2 (Redis, TTL: {ttl_hours}h)")
+                else:
+                    self.redis_client.set(cache_key, schema_json)
+                    logger.info(f"[SCHEMA_CACHE] Cached schema for {product_type} in L2 (Redis, No TTL)")
             except Exception as e:
                 logger.warning(f"[SCHEMA_CACHE] Redis storage failed (non-critical): {e}")
 

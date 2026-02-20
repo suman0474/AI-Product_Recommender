@@ -14,6 +14,7 @@ import logging
 from typing import Dict, Any, List, Optional, TypedDict
 
 from common.agentic.deep_agent.memory import ParallelEnrichmentResult
+from .orchestration import OrchestrationContext
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,7 @@ class SolutionDeepAgentState(TypedDict, total=False):
     - Conversation memory (rolling window)
     - Personal context integration
     - Flash personality orchestration
-    - Cross-over validation for spec isolation
+    - Identity-namespaced orchestration context for structural isolation
     """
 
     # ---- Session ----
@@ -101,6 +102,12 @@ class SolutionDeepAgentState(TypedDict, total=False):
     workflow_thread_id: str
     main_thread_id: str
 
+    # ---- Orchestration Context ----
+    # Serialised OrchestrationContext (frozen dataclass → always a plain dict
+    # in state so LangGraph MemorySaver can serialise it without issue).
+    # Reconstructed at runtime via OrchestrationContext.from_dict().
+    orchestration_ctx: Dict[str, Any]
+
     # ---- Output ----
     response: str
     response_data: Dict[str, Any]
@@ -138,6 +145,7 @@ def create_solution_deep_agent_state(
     personal_context: Optional[Dict[str, Any]] = None,
     workflow_thread_id: Optional[str] = None,
     main_thread_id: Optional[str] = None,
+    zone: str = "DEFAULT",
 ) -> SolutionDeepAgentState:
     """
     Create initial state for Solution Deep Agent workflow.
@@ -150,7 +158,9 @@ def create_solution_deep_agent_state(
         personal_context: User preferences and saved configurations
         workflow_thread_id: Thread ID for this workflow instance
         main_thread_id: Parent thread ID for session tracking
+        zone: Geographic zone for orchestration routing
     """
+    root_ctx = OrchestrationContext.root(session_id=session_id, zone=zone)
     return SolutionDeepAgentState(
         # Session
         session_id=session_id,
@@ -215,6 +225,9 @@ def create_solution_deep_agent_state(
         # Thread Management
         workflow_thread_id=workflow_thread_id or f"solution_{session_id}_{int(time.time())}",
         main_thread_id=main_thread_id or session_id,
+
+        # Orchestration Context (serialised — reconstructed at runtime)
+        orchestration_ctx=root_ctx.to_dict(),
 
         # Output
         response="",

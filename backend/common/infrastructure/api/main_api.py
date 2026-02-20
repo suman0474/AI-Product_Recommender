@@ -54,7 +54,6 @@ import importlib as _importlib
 
 # Lazy loaders — avoids module-level import of hyphenated package
 _solution_id_agents = None
-_solution_modification = None
 
 def _get_id_agents():
     global _solution_id_agents
@@ -62,11 +61,6 @@ def _get_id_agents():
         _solution_id_agents = _importlib.import_module("solution.identification_agents")
     return _solution_id_agents
 
-def _get_modification_module():
-    global _solution_modification
-    if _solution_modification is None:
-        _solution_modification = _importlib.import_module("solution.modification_agent")
-    return _solution_modification
 
 logger = logging.getLogger(__name__)
 
@@ -247,91 +241,6 @@ def classify_route():
     result = agent.classify(query, session_id=session_id, context=context)
     
     return api_response(True, data=result.to_dict())
-
-
-@agentic_bp.route('/validate', methods=['POST'])
-@login_required
-@handle_errors
-def validate_input():
-    """
-    Validate Product Input and Generate Schema
-    ---
-    tags:
-      - Validation
-    summary: Validate user input for single product workflow
-    description: |
-      Detects product type from user input and generates/loads appropriate schema.
-      Triggers PPI workflow if schema not found.
-    """
-    data = request.get_json()
-    user_input = data.get('user_input') or data.get('userInput')
-    expected_type = data.get('expected_product_type') or data.get('productType')
-    session_id = data.get('session_id') or data.get('sessionId')
-
-    if not user_input:
-        return api_response(False, error="user_input is required", status_code=400)
-
-    try:
-        from common.tools.validation_tool import ValidationTool
-        tool = ValidationTool(enable_ppi=True)
-        
-        result = tool.validate(
-            user_input=user_input,
-            expected_product_type=expected_type,
-            session_id=session_id
-        )
-
-        return api_response(True, data={
-            "product_type": result.get('product_type'),
-            "detectedSchema": result.get('schema'),
-            "providedRequirements": result.get('provided_requirements'),
-            "missingFields": result.get('missing_fields'),
-            "ppiWorkflowUsed": result.get('ppi_workflow_used', False),
-            "error": result.get('error')
-        })
-    except Exception as e:
-        logger.error(f"[VALIDATE] Error: {e}", exc_info=True)
-        return api_response(False, error=str(e), status_code=500)
-
-
-@agentic_bp.route('/advanced-parameters', methods=['POST'])
-@login_required
-@handle_errors
-def discover_advanced_parameters_endpoint():
-    """
-    Discover Advanced Parameters
-    ---
-    tags:
-      - Advanced Parameters
-    summary: Discover advanced params from vendor PDFs
-    """
-    data = request.get_json()
-    product_type = data.get('product_type') or data.get('productType')
-    session_id = data.get('session_id') or data.get('sessionId')
-    existing_schema = data.get('existing_schema') or data.get('schema')
-
-    if not product_type:
-        return api_response(False, error="product_type is required", status_code=400)
-
-    try:
-        from product_search.compat import AdvancedParametersTool
-        tool = AdvancedParametersTool()
-        
-        result = tool.discover(
-            product_type=product_type,
-            session_id=session_id,
-            existing_schema=existing_schema
-        )
-
-        return api_response(True, data={
-            "unique_specifications": result.get('unique_specifications', []),
-            "total_unique_specifications": result.get('total_unique_specifications', 0),
-            "existing_specifications_filtered": result.get('existing_specifications_filtered', 0),
-            "vendors_searched": result.get('vendors_searched', [])
-        })
-    except Exception as e:
-        logger.error(f"[ADV_PARAMS] Error: {e}", exc_info=True)
-        return api_response(False, error=str(e), status_code=500)
 
 
 @agentic_bp.route('/product-info-decision', methods=['POST'])
@@ -813,49 +722,6 @@ def identify_instruments():
         )
 
     return api_response(True, data=result)
-
-
-@agentic_bp.route('/modify-instruments', methods=['POST'])
-@login_required
-@handle_errors
-def modify_instruments():
-    """
-    Modify instruments list based on user request.
-    
-    Request Body:
-    {
-        "modification_request": "add a thermowell",
-        "current_instruments": [...],
-        "current_accessories": [...],
-        "session_id": "..."
-    }
-    """
-    data = request.get_json()
-    
-    if not data or 'modification_request' not in data:
-        return api_response(False, error="Modification request is required", status_code=400)
-        
-    modification_request = data['modification_request']
-    current_instruments = data.get('current_instruments', [])
-    current_accessories = data.get('current_accessories', [])
-    session_id = data.get('session_id') or get_session_id()
-    
-    try:
-        result = _get_modification_module().modify_solution_items(
-            modification_request=modification_request,
-            current_instruments=current_instruments,
-            current_accessories=current_accessories,
-            session_id=session_id,
-        )
-        
-        if not result.get('success', True):
-            return api_response(False, error=result.get('error', 'Modification failed'), status_code=500)
-            
-        return api_response(True, data=result)
-        
-    except Exception as e:
-        logger.error(f"Modify instruments endpoint failed: {e}")
-        return api_response(False, error=str(e), status_code=500)
 
 
 @agentic_bp.route('/analyze', methods=['POST'])
@@ -2043,8 +1909,7 @@ def agentic_validate():
         }
     """
     try:
-        from common.tools.schema_tools import load_schema_tool, validate_requirements_tool
-        from common.tools.intent_tools import extract_requirements_tool
+        from search import run_validation_only
 
         data = request.get_json()
 
@@ -2060,34 +1925,19 @@ def agentic_validate():
         logger.info(f"[VALIDATION_TOOL] Starting validation for session: {session_id}")
         logger.info(f"[VALIDATION_TOOL] User input: {user_input[:100]}...")
 
-        # Step 1: Extract product type and requirements
-        extract_result = extract_requirements_tool.invoke({
-            "user_input": user_input
-        })
+        # Use the new search deep agent functional API for validation
+        validation_result = run_validation_only(
+            user_input=user_input,
+            expected_product_type=expected_product_type,
+            session_id=session_id,
+            enable_ppi=enable_ppi
+        )
 
-        product_type = extract_result.get("product_type", expected_product_type or "")
-        logger.info(f"[VALIDATION_TOOL] Detected Product Type: {product_type}")
-
-        # Step 2: Load or generate schema
-        schema_result = load_schema_tool.invoke({
-            "product_type": product_type,
-            "enable_ppi": enable_ppi
-        })
-
-        schema = schema_result.get("schema", {})
-        ppi_used = not schema_result.get("from_database", True)
-
-        logger.info(f"[VALIDATION_TOOL] Schema: {'Generated via PPI' if ppi_used else 'Loaded from DB'}")
-
-        # Step 3: Validate requirements against schema
-        validation_result = validate_requirements_tool.invoke({
-            "user_input": user_input,
-            "product_type": product_type,
-            "schema": schema
-        })
-
+        product_type = validation_result.get("product_type", "")
+        schema = validation_result.get("schema", {})
         requirements = validation_result.get("provided_requirements", {})
         missing_fields = validation_result.get("missing_fields", [])
+        ppi_used = validation_result.get("ppi_workflow_used", False)
         is_valid = validation_result.get("is_valid", False)
 
         if missing_fields:
@@ -2156,16 +2006,15 @@ def agentic_validate():
             logger.warning(f"[VALIDATION_TOOL] Field description extraction failed: {desc_err}")
 
         result = {
-            "product_type": product_type,
-            "detected_schema": schema,
-            "provided_requirements": requirements,
-            "ppi_workflow_used": ppi_used,
-            "is_valid": is_valid,
-            "missing_fields": missing_fields,
-            "session_id": session_id,
-            # Field descriptions for on-hover tooltips
-            "field_descriptions": field_descriptions,
-            "field_descriptions_count": len(field_descriptions)
+            "productType": product_type,
+            "detectedSchema": schema,
+            "providedRequirements": requirements,
+            "ppiWorkflowUsed": ppi_used,
+            "isValid": is_valid,
+            "missingFields": missing_fields,
+            "sessionId": session_id,
+            "fieldDescriptions": field_descriptions,
+            "fieldDescriptionsCount": len(field_descriptions)
         }
 
         logger.info(f"[VALIDATION_TOOL] Validation complete with {len(field_descriptions)} field descriptions")
@@ -2215,7 +2064,7 @@ def agentic_advanced_parameters():
         }
     """
     try:
-        from product_search.compat import AdvancedParametersTool
+        from search.compat import AdvancedParametersTool
 
         data = request.get_json()
 
@@ -2326,7 +2175,7 @@ def product_search():
     """
     try:
         # Search Deep Agent workflow (replaces old DeepAgenticWorkflowOrchestrator)
-        from product_search.product_search_workflow import run_product_search_workflow as run_search_deep_agent, resume_product_search_workflow as run_search_deep_agent_resume
+        from search import run_product_search_workflow as run_search_deep_agent, resume_product_search_workflow as run_search_deep_agent_resume
 
         data = request.get_json()
         if not data:
@@ -2546,7 +2395,7 @@ def run_product_analysis():
         }
     """
     try:
-        from product_search.product_search_workflow import run_product_search_workflow as run_search_deep_agent
+        from search import run_analysis_only
 
         data = request.get_json()
         if not data:
@@ -2569,12 +2418,12 @@ def run_product_analysis():
         logger.info(f"[RUN_ANALYSIS] Product Type: {product_type}")
         logger.info(f"[RUN_ANALYSIS] Session: {session_id}")
 
-        # Run Search Deep Agent workflow
-        analysis_result = run_search_deep_agent(
-            user_input=json.dumps(structured_requirements) if isinstance(structured_requirements, dict) else str(structured_requirements),
-            session_id=session_id,
+        # Run Search Deep Agent functional API for analysis step
+        analysis_result = run_analysis_only(
+            structured_requirements=structured_requirements,
             product_type=product_type,
-            provided_requirements=structured_requirements if isinstance(structured_requirements, dict) else None,
+            schema=schema,
+            session_id=session_id
         )
 
         if not analysis_result.get('success'):
@@ -2593,7 +2442,7 @@ def run_product_analysis():
         try:
             from common.services.azure.image_utils import fetch_generic_product_image
             
-            ranked_products = analysis_result.get('overallRanking', {}).get('rankedProducts', [])
+            ranked_products = analysis_result.get('overall_ranking', [])
             images_fetched = 0
             
             # Fetch images for top 20 products to avoid rate limiting
@@ -2627,8 +2476,20 @@ def run_product_analysis():
         except Exception as e:
             logger.warning(f"[RUN_ANALYSIS] Image fetching failed: {e}")
 
-        # Return analysis result
-        return api_response(True, data=analysis_result)
+        # Map to expected response format (camelCase for frontend)
+        final_result = {
+            "vendorAnalysis": {
+                "vendorMatches": analysis_result.get("vendor_matches", []),
+                "totalMatches": len(analysis_result.get("vendor_matches", []))
+            },
+            "overallRanking": {
+                "rankedProducts": analysis_result.get("overall_ranking", [])
+            },
+            "topRecommendation": analysis_result.get("top_product"),
+            "analysisResult": analysis_result  # Pass full result for RightPanel
+        }
+
+        return api_response(True, data=final_result)
 
     except Exception as e:
         logger.error(f"[RUN_ANALYSIS] Failed: {e}", exc_info=True)

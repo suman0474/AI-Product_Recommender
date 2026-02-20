@@ -719,146 +719,152 @@ class StandardsRAGState(TypedDict, total=False):
 # ============================================================================
 # PRODUCT SEARCH DEEP AGENT STATE  (LangGraph workflow state)
 # ============================================================================
+# Re-exported from search.state for backward compatibility.
+# The full implementation is now in search/state.py
 
-class ProductSearchDeepAgentState(TypedDict, total=False):
-    """
-    LangGraph state for the Product Search Deep Agent workflow.
-
-    Graph topology:
-        validate_product → discover_advanced_params → collect_requirements
-        → analyze_vendors → rank_products → format_response
-    """
-    # ---- Session ----
-    session_id: str
-    instance_id: str
-    workflow_thread_id: str
-    main_thread_id: Optional[str]
-    parent_workflow_id: Optional[str]
-    zone: Optional[str]
-
-    # ---- Input ----
-    user_input: str
-    expected_product_type: Optional[str]
-    sales_agent_mode: str           # "auto" | "interactive"
-    auto_mode: bool                 # shorthand for sales_agent_mode=="auto"
-    enable_ppi: bool                # allow PPI schema generation
-    skip_advanced_params: bool      # skip Step 2
-    max_vendor_workers: int
-
-    # ---- Step 1: Validation ----
-    product_type: str
-    schema: Dict[str, Any]
-    schema_source: str              # "azure_blob" | "ppi" | "default" | ...
-    validation_result: Dict[str, Any]
-    is_valid: bool
-    missing_fields: List[str]
-    optional_fields: List[str]
-    provided_requirements: Dict[str, Any]
-    standards_enrichment_applied: bool
-    rag_invocations: List[Dict[str, Any]]
-
-    # ---- Step 2: Advanced Params ----
-    advanced_params_result: Dict[str, Any]
-    available_advanced_params: List[Dict[str, Any]]
-    discovered_specifications: List[Dict[str, Any]]
-
-    # ---- Step 3: Requirements (HITL) ----
-    structured_requirements: Dict[str, Any]
-    user_confirmed: bool
-    awaiting_user_input: bool
-    sales_agent_response: str
-
-    # ---- Step 4: Vendor Analysis ----
-    vendor_analysis_result: Dict[str, Any]
-    vendor_matches: List[Dict[str, Any]]
-    strategy_context: Optional[Dict[str, Any]]
-
-    # ---- Step 5: Ranking ----
-    ranking_result: Dict[str, Any]
-    overall_ranking: List[Dict[str, Any]]
-    top_product: Optional[Dict[str, Any]]
-
-    # ---- Final: Output ----
-    analysis_result: Dict[str, Any]
-    response_data: Dict[str, Any]
-    success: bool
-
-    # ---- Workflow Tracking ----
-    current_step: str
-    messages: List[Dict[str, str]]
-    error: Optional[str]
-
-
-def create_product_search_deep_agent_state(
-    user_input: str,
-    session_id: str = "default",
-    expected_product_type: Optional[str] = None,
-    sales_agent_mode: Optional[str] = None,
-    auto_mode: bool = True,
-    enable_ppi: bool = True,
-    skip_advanced_params: bool = False,
-    max_vendor_workers: int = 10,
-    instance_id: Optional[str] = None,
-    workflow_thread_id: Optional[str] = None,
-    main_thread_id: Optional[str] = None,
-    parent_workflow_id: Optional[str] = None,
-    zone: Optional[str] = None,
-) -> ProductSearchDeepAgentState:
-    """Create initial state for the Product Search Deep Agent workflow."""
-    import time as _time
-    return ProductSearchDeepAgentState(
-        # Session
-        session_id=session_id,
-        instance_id=instance_id or "",
-        workflow_thread_id=workflow_thread_id or f"ps_{session_id}_{int(_time.time())}",
-        main_thread_id=main_thread_id,
-        parent_workflow_id=parent_workflow_id,
-        zone=zone,
-        # Input
-        user_input=user_input,
-        expected_product_type=expected_product_type,
-        sales_agent_mode=sales_agent_mode or ("auto" if auto_mode else "interactive"),
-        auto_mode=auto_mode,
-        enable_ppi=enable_ppi,
-        skip_advanced_params=skip_advanced_params,
-        max_vendor_workers=max_vendor_workers,
-        # Step 1
-        product_type="",
-        schema={},
-        schema_source="",
-        validation_result={},
-        is_valid=False,
-        missing_fields=[],
-        optional_fields=[],
-        provided_requirements={},
-        standards_enrichment_applied=False,
-        rag_invocations=[],
-        # Step 2
-        advanced_params_result={},
-        available_advanced_params=[],
-        discovered_specifications=[],
-        # Step 3
-        structured_requirements={},
-        user_confirmed=False,
-        awaiting_user_input=False,
-        sales_agent_response="",
-        # Step 4
-        vendor_analysis_result={},
-        vendor_matches=[],
-        strategy_context=None,
-        # Step 5
-        ranking_result={},
-        overall_ranking=[],
-        top_product=None,
-        # Final
-        analysis_result={},
-        response_data={},
-        success=False,
-        # Tracking
-        current_step="validate_product",
-        messages=[],
-        error=None,
+try:
+    from search.state import (
+        SearchDeepAgentState as ProductSearchDeepAgentState,
+        create_search_deep_agent_state as create_product_search_deep_agent_state,
     )
+except ImportError:
+    # Fallback if search module not available - define minimal state
+    class ProductSearchDeepAgentState(TypedDict, total=False):
+        """
+        LangGraph state for the Product Search Deep Agent workflow.
+        Note: This is a fallback definition. The full implementation is in search/state.py.
+        """
+        # ---- Session ----
+        session_id: str
+        instance_id: str
+        workflow_thread_id: str
+        main_thread_id: Optional[str]
+        parent_workflow_id: Optional[str]
+        zone: Optional[str]
+
+        # ---- Input ----
+        user_input: str
+        expected_product_type: Optional[str]
+        sales_agent_mode: str           # "auto" | "interactive"
+        auto_mode: bool                 # shorthand for sales_agent_mode=="auto"
+        enable_ppi: bool                # allow PPI schema generation
+        skip_advanced_params: bool      # skip Step 2
+        max_vendor_workers: int
+
+        # ---- Step 1: Validation ----
+        product_type: str
+        schema: Dict[str, Any]
+        schema_source: str              # "azure_blob" | "ppi" | "default" | ...
+        validation_result: Dict[str, Any]
+        is_valid: bool
+        missing_fields: List[str]
+        optional_fields: List[str]
+        provided_requirements: Dict[str, Any]
+        standards_enrichment_applied: bool
+        rag_invocations: List[Dict[str, Any]]
+
+        # ---- Step 2: Advanced Params ----
+        advanced_params_result: Dict[str, Any]
+        available_advanced_params: List[Dict[str, Any]]
+        discovered_specifications: List[Dict[str, Any]]
+
+        # ---- Step 3: Requirements (HITL) ----
+        structured_requirements: Dict[str, Any]
+        user_confirmed: bool
+        awaiting_user_input: bool
+        sales_agent_response: str
+
+        # ---- Step 4: Vendor Analysis ----
+        vendor_analysis_result: Dict[str, Any]
+        vendor_matches: List[Dict[str, Any]]
+        strategy_context: Optional[Dict[str, Any]]
+
+        # ---- Step 5: Ranking ----
+        ranking_result: Dict[str, Any]
+        overall_ranking: List[Dict[str, Any]]
+        top_product: Optional[Dict[str, Any]]
+
+        # ---- Final: Output ----
+        analysis_result: Dict[str, Any]
+        response_data: Dict[str, Any]
+        success: bool
+
+        # ---- Workflow Tracking ----
+        current_step: str
+        messages: List[Dict[str, str]]
+        error: Optional[str]
+
+
+    def create_product_search_deep_agent_state(
+        user_input: str,
+        session_id: str = "default",
+        expected_product_type: Optional[str] = None,
+        sales_agent_mode: Optional[str] = None,
+        auto_mode: bool = True,
+        enable_ppi: bool = True,
+        skip_advanced_params: bool = False,
+        max_vendor_workers: int = 10,
+        instance_id: Optional[str] = None,
+        workflow_thread_id: Optional[str] = None,
+        main_thread_id: Optional[str] = None,
+        parent_workflow_id: Optional[str] = None,
+        zone: Optional[str] = None,
+    ) -> ProductSearchDeepAgentState:
+        """Create initial state for the Product Search Deep Agent workflow (fallback)."""
+        import time as _time
+        return ProductSearchDeepAgentState(
+            # Session
+            session_id=session_id,
+            instance_id=instance_id or "",
+            workflow_thread_id=workflow_thread_id or f"ps_{session_id}_{int(_time.time())}",
+            main_thread_id=main_thread_id,
+            parent_workflow_id=parent_workflow_id,
+            zone=zone,
+            # Input
+            user_input=user_input,
+            expected_product_type=expected_product_type,
+            sales_agent_mode=sales_agent_mode or ("auto" if auto_mode else "interactive"),
+            auto_mode=auto_mode,
+            enable_ppi=enable_ppi,
+            skip_advanced_params=skip_advanced_params,
+            max_vendor_workers=max_vendor_workers,
+            # Step 1
+            product_type="",
+            schema={},
+            schema_source="",
+            validation_result={},
+            is_valid=False,
+            missing_fields=[],
+            optional_fields=[],
+            provided_requirements={},
+            standards_enrichment_applied=False,
+            rag_invocations=[],
+            # Step 2
+            advanced_params_result={},
+            available_advanced_params=[],
+            discovered_specifications=[],
+            # Step 3
+            structured_requirements={},
+            user_confirmed=False,
+            awaiting_user_input=False,
+            sales_agent_response="",
+            # Step 4
+            vendor_analysis_result={},
+            vendor_matches=[],
+            strategy_context=None,
+            # Step 5
+            ranking_result={},
+            overall_ranking=[],
+            top_product=None,
+            # Final
+            analysis_result={},
+            response_data={},
+            success=False,
+            # Tracking
+            current_step="validate_product",
+            messages=[],
+            error=None,
+        )
 
 
 # ============================================================================

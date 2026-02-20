@@ -64,17 +64,17 @@ def __getattr__(name):
     
     # Auth decorators
     if name in ('login_required', 'admin_required', 'optional_auth'):
-        from .infrastructure.utils.auth_decorators import login_required, admin_required, optional_auth
+        from common.utils.auth_decorators import login_required, admin_required, optional_auth
         return globals().setdefault(name, locals()[name])
     
     # API utilities
     if name in ('api_response', 'handle_errors', 'validate_request_json', 'validate_query_params'):
-        from .infrastructure.api.utils import api_response, handle_errors, validate_request_json, validate_query_params
+        from common.infrastructure.api.utils import api_response, handle_errors, validate_request_json, validate_query_params
         return globals().setdefault(name, locals()[name])
     
     # API Blueprint
     if name == 'agentic_bp':
-        from .infrastructure.api.main_api import agentic_bp
+        from common.infrastructure.api.main_api import agentic_bp
         return agentic_bp
     
     # Deep Agent Blueprint

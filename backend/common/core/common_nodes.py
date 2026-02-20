@@ -37,7 +37,7 @@ def _get_id_agents():
 from common.tools.schema_tools import load_schema_tool, validate_requirements_tool
 # DEPRECATED: search_tools dissolved into search deep agent
 try:
-    from product_search.product_search_workflow import run_product_search_workflow as search_vendors_tool
+    from search import run_product_search_workflow as search_vendors_tool
 except ImportError:
     search_vendors_tool = None
 from common.tools.analysis_tools import analyze_vendor_match_tool

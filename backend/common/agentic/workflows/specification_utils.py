@@ -570,9 +570,13 @@ def build_sample_input(item: dict, project_name: str = "Project", max_specs: int
     # ── Step 3: Assemble natural language description ──────────────────
     parts = [f"{name}"]
 
-    # Service / application
-    if groups["service"]:
-        parts.append(f"for {', '.join(groups['service'])}")
+    # Service / application / Purpose
+    purpose = item.get("purpose") or item.get("solution_purpose") or item.get("related_instrument")
+    if groups["service"] or purpose:
+        service_parts = groups["service"]
+        if purpose and purpose not in service_parts:
+            service_parts.insert(0, purpose)
+        parts.append(f"for {', '.join(service_parts)}")
 
     # Materials
     if groups["materials"]:

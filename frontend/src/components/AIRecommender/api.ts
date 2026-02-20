@@ -1945,45 +1945,43 @@ export const callAgenticProductSearch = async (
 
     const response = await axios.post(`/api/agentic/product-search`, payload);
 
-    const data = response.data;
-
-    if (!data.success) {
-      throw new Error(data.error || "Product search failed");
+    if (!response.data.success) {
+      throw new Error(response.data.error || "Product search failed");
     }
 
-    // Extract response data
-    const responseData = data.data || {};
+    // Extract and convert response data
+    const responseData = convertKeysToCamelCase(response.data.data) || {};
 
     // Check if workflow is interrupted (awaiting user input)
-    const isInterrupted = responseData.awaiting_user_input || false;
+    const isInterrupted = responseData.awaitingUserInput || false;
 
     console.log('[AGENTIC_PS] Response received:', {
-      currentPhase: responseData.current_phase,
-      currentStep: responseData.current_sales_step,
+      currentPhase: responseData.currentPhase,
+      currentStep: responseData.currentSalesStep,
       isInterrupted,
       hasSchema: !!responseData.schema,
-      missingFields: responseData.missing_fields,
-      hasProducts: !!responseData.ranked_products,
-      productCount: responseData.ranked_products?.length || 0
+      missingFields: responseData.missingFields,
+      hasProducts: !!responseData.rankedProducts,
+      productCount: responseData.rankedProducts?.length || 0
     });
 
     return {
       success: true,
       awaiting_user_input: isInterrupted,
-      sales_agent_response: responseData.sales_agent_response || responseData.response || "",
-      current_sales_step: responseData.current_sales_step || responseData.current_phase || "initialInput",
-      current_phase: responseData.current_phase || "initial_validation",
-      thread_id: responseData.thread_id || threadId || "",
-      product_type: responseData.product_type,
+      sales_agent_response: responseData.salesAgentResponse || responseData.response || "",
+      current_sales_step: responseData.currentSalesStep || responseData.currentPhase || "initialInput",
+      current_phase: responseData.currentPhase || "initialValidation",
+      thread_id: responseData.threadId || threadId || "",
+      product_type: responseData.productType,
       schema: responseData.schema,                              // Schema for left sidebar
-      missing_fields: responseData.missing_fields || [],        // Missing fields
-      validation_result: responseData.validation_result,        // Full validation result
-      available_advanced_params: responseData.available_advanced_params || [],
-      ranked_products: responseData.ranked_products || [],
-      ready_for_vendor_search: responseData.ready_for_vendor_search || false,
+      missing_fields: responseData.missingFields || [],        // Missing fields
+      validation_result: responseData.validationResult,        // Full validation result
+      available_advanced_params: responseData.availableAdvancedParams || [],
+      ranked_products: responseData.rankedProducts || [],
+      ready_for_vendor_search: responseData.readyForVendorSearch || false,
       completed: responseData.completed || !isInterrupted,
       // CRITICAL: Include final_requirements for triggering analysis after workflow completion
-      final_requirements: responseData.final_requirements
+      final_requirements: responseData.finalRequirements
     };
 
   } catch (error: any) {
@@ -2138,17 +2136,16 @@ export const resumeProductSearch = async (
 
     const response = await axios.post('/api/agentic/product-search', payload);
 
-    const data = response.data;
-
-    if (!data.success) {
-      throw new Error(data.error || "Failed to resume workflow");
+    if (!response.data.success) {
+      throw new Error(response.data.error || "Failed to resume workflow");
     }
 
-    const responseData = data.data || {};
-    const isInterrupted = responseData.awaiting_user_input || false;
+    // Extract and convert response data
+    const responseData = convertKeysToCamelCase(response.data.data) || {};
+    const isInterrupted = responseData.awaitingUserInput || false;
 
     console.log('[RESUME_PS] Response received:', {
-      currentPhase: responseData.current_phase,
+      currentPhase: responseData.currentPhase,
       isInterrupted,
       hasSchema: !!responseData.schema,
       completed: responseData.completed
@@ -2157,20 +2154,20 @@ export const resumeProductSearch = async (
     return {
       success: true,
       awaiting_user_input: isInterrupted,
-      sales_agent_response: responseData.sales_agent_response || "",
-      current_sales_step: responseData.current_sales_step || responseData.current_phase || "initialInput",
-      current_phase: responseData.current_phase || "initial_validation",
-      thread_id: responseData.thread_id || threadId,
-      product_type: responseData.product_type,
+      sales_agent_response: responseData.salesAgentResponse || "",
+      current_sales_step: responseData.currentSalesStep || responseData.currentPhase || "initialInput",
+      current_phase: responseData.currentPhase || "initialValidation",
+      thread_id: responseData.threadId || threadId,
+      product_type: responseData.productType,
       schema: responseData.schema,
-      missing_fields: responseData.missing_fields || [],
-      validation_result: responseData.validation_result,
-      available_advanced_params: responseData.available_advanced_params || [],
-      ranked_products: responseData.ranked_products || [],
-      ready_for_vendor_search: responseData.ready_for_vendor_search || false,
+      missing_fields: responseData.missingFields || [],
+      validation_result: responseData.validationResult,
+      available_advanced_params: responseData.availableAdvancedParams || [],
+      ranked_products: responseData.rankedProducts || [],
+      ready_for_vendor_search: responseData.readyForVendorSearch || false,
       completed: responseData.completed || !isInterrupted,
       // CRITICAL: Include final_requirements for triggering analysis after workflow completion
-      final_requirements: responseData.final_requirements
+      final_requirements: responseData.finalRequirements
     };
 
   } catch (error: any) {
@@ -2188,3 +2185,4 @@ export const resumeProductSearch = async (
     };
   }
 };
+

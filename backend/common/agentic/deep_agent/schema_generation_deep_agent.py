@@ -134,7 +134,7 @@ class SchemaGenerationDeepAgent:
     def failure_memory(self):
         """Lazy load failure memory."""
         if self._failure_memory is None:
-            from ..infrastructure.caching import get_schema_failure_memory
+            from common.infrastructure.caching import get_schema_failure_memory
             self._failure_memory = get_schema_failure_memory()
         return self._failure_memory
 
@@ -142,7 +142,7 @@ class SchemaGenerationDeepAgent:
     def prompt_engine(self):
         """Lazy load prompt engine."""
         if self._prompt_engine is None:
-            from .adaptive_prompt_engine import get_adaptive_prompt_engine
+            from .agents.adaptive_prompt_engine import get_adaptive_prompt_engine
             self._prompt_engine = get_adaptive_prompt_engine()
         return self._prompt_engine
 

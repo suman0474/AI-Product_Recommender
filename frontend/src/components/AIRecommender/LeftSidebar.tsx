@@ -101,16 +101,25 @@ function renderFlatFieldsList(
       const newHierarchyPath = [...hierarchyPath, prettify(key)];
 
       if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-        // Check if this is a Deep Agent structured object with 'value' property
+        // Check if this is a Deep Agent structured object with 'value' property or suggested_values
         // Deep Agent returns: { value: "...", source: "...", confidence: 0.9, standards_referenced: [...] }
-        if ("value" in value && typeof value.value === "string") {
-          // This is a structured field - extract the value and treat as leaf
-          const extractedValue = value.value;
-          const isFilled = extractedValue !== undefined && extractedValue !== "" && extractedValue !== null && extractedValue.toLowerCase() !== "not specified";
+        const isMetadataObject = "value" in value || "suggested_values" in value || "source" in value;
+
+        if (isMetadataObject) {
+          // This is a structured field metadata object - extract the value and treat as leaf
+          const extractedValue = (value as any).value;
+
+          // Check if filled - handle string or non-string values
+          const isFilled = extractedValue !== undefined &&
+            extractedValue !== null &&
+            extractedValue !== "" &&
+            (typeof extractedValue !== "string" || extractedValue.toLowerCase() !== "not specified");
+
           const fieldName = prettify(key);
           const hierarchicalLabel = newHierarchyPath.length > 1
             ? `${newHierarchyPath.slice(0, -1).join(" > ")} > ${fieldName}`
             : fieldName;
+
           const displayValue = deduplicateValue(String(extractedValue ?? ""));
           const categoryPath = newHierarchyPath.slice(0, -1).join(" ");
 

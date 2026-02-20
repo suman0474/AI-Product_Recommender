@@ -331,7 +331,7 @@ logging.info("Deep Agent blueprint registered at /api/deep-agent")
 
 # --- Import and Register Product Search Blueprint (Phase C) ---
 try:
-    from product_search.product_search_api import product_search_bp
+    from search.product_search_api import product_search_bp
     app.register_blueprint(product_search_bp)
     logging.info("Product Search blueprint registered at /api/product-search/*")
 except ImportError as e:

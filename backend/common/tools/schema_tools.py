@@ -44,7 +44,7 @@ def load_schema_tool(product_type: str, enable_ppi: bool = True) -> Dict[str, An
         # 1. Try schema service (MongoDB/Azure)
         schema = schema_service.get_schema(product_type)
         
-        if schema:
+        if schema is not None:
             return {
                 "schema": schema,
                 "source": "database",

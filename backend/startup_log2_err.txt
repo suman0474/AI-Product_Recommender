@@ -1,0 +1,171 @@
+2026-02-20 17:02:29,758 - initialization - INFO - ======================================================================
+2026-02-20 17:02:29,758 - initialization - INFO - [INIT] Starting application initialization
+2026-02-20 17:02:29,759 - initialization - INFO - ======================================================================
+2026-02-20 17:02:29,759 - initialization - INFO - [INIT] Step 1: Loading environment variables...
+2026-02-20 17:02:29,762 - initialization - INFO - [INIT] \u2713 Environment variables loaded from .env
+2026-02-20 17:02:29,763 - initialization - INFO - [INIT] Step 1.5: Configuring observability...
+2026-02-20 17:02:29,765 - initialization - WARNING - [INIT] \u26a0 LangSmith config module not available
+2026-02-20 17:02:29,766 - initialization - INFO - [INIT] Step 2: Validating configurations...
+2026-02-20 17:02:29,766 - initialization - WARNING - [INIT]   \u26a0 PineconeConfig not available (optional)
+2026-02-20 17:02:29,766 - initialization - INFO - [INIT]   \u2713 AgenticConfig validated
+2026-02-20 17:02:29,766 - initialization - INFO - [INIT]   \u2713 MongoDB configured (database: product-recommender)
+2026-02-20 17:02:29,766 - initialization - INFO - [INIT]   \u2713 Azure Storage configured
+2026-02-20 17:02:29,766 - initialization - INFO - [INIT]   \u2713 GOOGLE_API_KEY configured
+2026-02-20 17:02:29,766 - initialization - INFO - [INIT]   \u2713 OPENAI_API_KEY configured (fallback available)
+2026-02-20 17:02:29,766 - initialization - INFO - ======================================================================
+2026-02-20 17:02:29,766 - initialization - INFO - [INIT] \U0001f4ca LLM Configuration Summary:
+2026-02-20 17:02:29,767 - initialization - INFO - [INIT]   • Google API keys available: 1
+2026-02-20 17:02:29,767 - initialization - INFO - [INIT]   • OpenAI fallback configured: Yes \u2713
+2026-02-20 17:02:29,767 - initialization - WARNING - [INIT]   \u26a0\ufe0f WARNING 1: Only 1 Google API key configured
+2026-02-20 17:02:29,767 - initialization - WARNING - [INIT]      • Consider adding GOOGLE_API_KEY2, GOOGLE_API_KEY3 for rotation
+2026-02-20 17:02:29,767 - initialization - WARNING - [INIT]      • Multiple keys help avoid rate limit errors
+2026-02-20 17:02:29,767 - initialization - INFO - [INIT]   \U0001f4cb Recommended configuration for production:
+2026-02-20 17:02:29,767 - initialization - INFO - [INIT]      • GOOGLE_API_KEY + GOOGLE_API_KEY2 + GOOGLE_API_KEY3
+2026-02-20 17:02:29,767 - initialization - INFO - [INIT]      • OPENAI_API_KEY (for reliable fallback)
+2026-02-20 17:02:29,767 - initialization - INFO - ======================================================================
+2026-02-20 17:02:29,767 - initialization - WARNING - [INIT]   \u26a0 GOOGLE_CX not set - image search may be limited
+2026-02-20 17:02:29,767 - initialization - INFO - [INIT] \u2713 All configurations validated
+2026-02-20 17:02:29,767 - initialization - INFO - [INIT] Step 3: Initializing singletons...
+2026-02-20 17:02:30,436 - initialization - WARNING - [INIT]   \u26a0 MongoDB not available - using Azure Blob fallback
+2026-02-20 17:02:30,437 - common.config.api_key_manager - INFO - [APIKeyManager] Initialized with 1 Google key(s)
+2026-02-20 17:02:30,437 - common.config.api_key_manager - INFO - [APIKeyManager] OpenAI key available for fallback
+2026-02-20 17:02:30,437 - initialization - INFO - [INIT]   \u2713 API Key Manager initialized: 1 Google key(s) available
+2026-02-20 17:02:30,439 - common.config.azure_blob_config - INFO - AzureBlobManager initialized
+2026-02-20 17:02:30,439 - initialization - INFO - [INIT]   \u2713 Azure Blob Manager configured (lazy connection)
+2026-02-20 17:02:30,497 - initialization - INFO - [INIT]   \u2713 Service layer initialized (schema, vendor, project, document, image)
+2026-02-20 17:02:30,497 - initialization - INFO - [INIT]   \u2713 Singleton initialization complete
+2026-02-20 17:02:30,497 - initialization - INFO - [INIT] \u2713 All singletons initialized
+2026-02-20 17:02:30,497 - initialization - INFO - [INIT] Step 4: Registering cleanup handlers...
+2026-02-20 17:02:30,497 - initialization - INFO - [INIT] \u2713 Cleanup handlers registered (LIFO order)
+2026-02-20 17:02:30,497 - initialization - INFO - [INIT] \u2713 Cleanup handlers registered
+2026-02-20 17:02:30,497 - initialization - INFO - ======================================================================
+2026-02-20 17:02:30,497 - initialization - INFO - [INIT] Application initialization complete
+2026-02-20 17:02:30,497 - initialization - INFO - ======================================================================
+2026-02-20 17:02:31,438 - debug_flags - INFO - [DEBUG_FLAGS] Enabled flags: ['LLM', 'SYSTEM', 'DATA', 'SECURITY', 'IMAGE']
+2026-02-20 17:02:32,747 - common.infrastructure.circuit_breaker - INFO - [CIRCUIT:strategy_rag] Initialized - threshold=3, timeout=60.0s
+2026-02-20 17:02:32,748 - common.infrastructure.circuit_breaker - INFO - [CIRCUIT:standards_rag] Initialized - threshold=3, timeout=60.0s
+2026-02-20 17:02:32,748 - common.infrastructure.circuit_breaker - INFO - [CIRCUIT:inventory_rag] Initialized - threshold=3, timeout=60.0s
+2026-02-20 17:02:33,364 - common.utils.hitl_gates - INFO - [HITL] ApprovalGate initialized: requirements_review (requirements)
+2026-02-20 17:02:33,364 - common.utils.hitl_gates - INFO - [HITL] ApprovalGate initialized: vendor_selection (vendor)
+2026-02-20 17:02:33,364 - common.utils.hitl_gates - INFO - [HITL] ApprovalGate initialized: budget_approval (budget)
+2026-02-20 17:02:33,654 - common.infrastructure.caching.base_cache - INFO - [SearchCache] Initialized: max_size=1000, ttl=3600s
+2026-02-20 17:02:33,655 - common.infrastructure.caching.base_cache - INFO - [SchemaCache] Initialized: max_size=500, ttl=86400s
+2026-02-20 17:02:33,673 - root - INFO - [INIT] \u2713 Service layer loaded successfully (MongoDB + Azure Blob hybrid)
+2026-02-20 17:02:33,674 - __main__ - INFO - ======================================================================
+2026-02-20 17:02:33,674 - __main__ - INFO - ENVIRONMENT VALIDATION
+2026-02-20 17:02:33,674 - __main__ - INFO - ======================================================================
+2026-02-20 17:02:33,674 - __main__ - INFO - \u2705 GOOGLE_API_KEY configured (LLM generation)
+2026-02-20 17:02:33,675 - __main__ - INFO - ======================================================================
+2026-02-20 17:02:33,678 - root - INFO - \u2705 Using MySQL database
+2026-02-20 17:02:33,842 - common.infrastructure.rate_limiter - INFO - [RateLimit] Testing Redis connection: redis://default:oUBWwgifWJBXGWJljQaxRLNASCbneTbi@tramway.proxy.rlwy.net:41376
+2026-02-20 17:02:34,418 - common.infrastructure.rate_limiter - INFO - [RateLimit] \u2705 Redis connection successful
+2026-02-20 17:02:34,420 - common.infrastructure.rate_limiter - INFO - [RateLimit] Rate limiter initialized
+2026-02-20 17:02:34,421 - common.infrastructure.rate_limiter - INFO - [RateLimit]   Storage backend: redis://default:oUBWwgifWJBXGWJljQaxRLNASCbneTbi@tramway.proxy.rlwy.net:41376
+2026-02-20 17:02:34,421 - common.infrastructure.rate_limiter - INFO - [RateLimit]   Redis status: connected
+2026-02-20 17:02:34,421 - common.infrastructure.rate_limiter - INFO - [RateLimit]   Rate limiting enabled: True
+2026-02-20 17:02:34,421 - common.infrastructure.rate_limiter - INFO - Rate limiting configured successfully
+2026-02-20 17:02:34,421 - root - INFO - Rate limiting initialized successfully
+2026-02-20 17:02:34,552 - common.infrastructure.caching.bounded_cache - INFO - [CACHE_REGISTRY] Created cache: standards_results (max=100, ttl=600s)
+2026-02-20 17:02:34,831 - common.agentic.agents.routing.classification_metrics - INFO - [ClassificationMetrics] Initialized - Tracking enabled
+2026-02-20 17:02:34,832 - common.agentic.agents.routing.intent_classifier - INFO - [INTENT_ROUTER] PATH 2 metrics module available
+2026-02-20 17:02:34,832 - common.agentic.agents.routing.intent_classifier - INFO - [WorkflowStateMemory] Initialized - Backend workflow state tracking enabled
+2026-02-20 17:02:34,843 - common.core.agents.base_memory - INFO - [StandardsRAGMemory] Initialized: timeout=3600s, max_history=20
+2026-02-20 17:02:34,843 - common.core.agents.base_memory - INFO - [StandardsRAGMemory] Singleton instance created
+2026-02-20 17:02:34,848 - common.infrastructure.caching.bounded_cache - INFO - [CACHE_REGISTRY] Created cache: standards_unified (max=100, ttl=600s)
+2026-02-20 17:02:34,903 - common.workflows.base.registry - INFO - [WorkflowRegistry] Initialized - Ready for workflow registration
+2026-02-20 17:02:34,903 - common.workflows.base.registry - INFO - [WorkflowRegistry] Registered: solution_deep_agent (intents=5, keywords=11, priority=110)
+2026-02-20 17:02:34,903 - solution.workflow - INFO - [SolutionDeepAgent] Registered with WorkflowRegistry
+2026-02-20 17:02:34,904 - common.infrastructure.caching.workflow_state_cache - INFO - [WORKFLOW_STATE_MANAGER] Initialized: max_states=10000, ttl=3600s, cleanup_interval=300s
+2026-02-20 17:02:34,906 - common.infrastructure.caching.workflow_state_cache - INFO - [WORKFLOW_STATE_MANAGER] Background cleanup thread started
+2026-02-20 17:02:34,936 - root - INFO - Agentic workflow blueprint registered at /api/agentic
+2026-02-20 17:02:34,938 - root - INFO - Deep Agent blueprint registered at /api/deep-agent
+2026-02-20 17:02:34,942 - root - INFO - Product Search blueprint registered at /api/product-search/*
+2026-02-20 17:02:34,954 - root - INFO - EnGenie Chat API blueprint registered at /api/engenie-chat
+2026-02-20 17:02:34,959 - root - INFO - Tools API blueprint registered at /api/tools
+2026-02-20 17:02:34,962 - root - INFO - Sales Agent blueprint registered at /api/sales-agent
+2026-02-20 17:02:34,965 - common.infrastructure.state.session.orchestrator - INFO - [SESSION_ORCHESTRATOR] Initialized
+2026-02-20 17:02:34,966 - common.infrastructure.state.execution.instance_manager - INFO - [INSTANCE_MANAGER] Initialized
+2026-02-20 17:02:34,966 - common.utils.orchestrator_utils - INFO - [CLEANUP] Background cleanup tasks started
+2026-02-20 17:02:34,966 - common.infrastructure.api.session - INFO - [SESSION_API] Session API initialized with background cleanup tasks
+2026-02-20 17:02:34,966 - common.infrastructure.api.session - INFO - [SESSION_API] Registered session and instance blueprints
+2026-02-20 17:02:34,966 - root - INFO - Session and Instance blueprints registered
+2026-02-20 17:02:34,967 - root - INFO - Resource Monitoring blueprint registered at /api/resources
+2026-02-20 17:02:39,648 - common.services.llm.fallback - INFO - [FallbackLLMClient] Using Gemini: gemini-2.5-flash (key #1/1)
+2026-02-20 17:02:39,649 - common.services.llm.fallback - INFO - [FallbackLLMClient] Using Gemini: gemini-2.5-flash (key #1/1)
+2026-02-20 17:02:39,649 - common.services.llm.fallback - INFO - [FallbackLLMClient] Using Gemini: gemini-2.5-flash (key #1/1)
+2026-02-20 17:02:39,655 - root - INFO - LangChain components initialized.
+2026-02-20 17:02:39,657 - root - WARNING - GOOGLE_CX environment variable not set! Custom search engine not configured.
+2026-02-20 17:02:40,738 - root - INFO - \u2705 Database tables created and admin user initialized
+2026-02-20 17:02:40,745 - common.agentic.azure_checkpointing - INFO - [AZURE_CHECKPOINT] Initializing with container prefix: workflow-checkpoints
+2026-02-20 17:02:40,745 - common.agentic.checkpointing - INFO - Using Azure Blob Storage checkpointer: workflow-checkpoints-default
+2026-02-20 17:02:40,745 - common.agentic.checkpointing - INFO - Azure Blob checkpoint cleanup handled by TTL metadata
+2026-02-20 17:02:40,745 - common.agentic.checkpointing - INFO - Started AutoCheckpointCleaner (interval: 300s, TTL: 72h)
+2026-02-20 17:02:40,746 - root - INFO - Automatic checkpoint cleanup initialized successfully with Azure Blob Storage
+2026-02-20 17:02:40,746 - common.infrastructure.state.session.cleanup - INFO - [SESSION_CLEANUP] Started with proper lifecycle management: interval=600s, max_age=24.0h
+2026-02-20 17:02:40,746 - root - INFO - Automatic session cleanup initialized successfully with proper lifecycle
+2026-02-20 17:02:40,747 - root - INFO - Workflow state manager initialized with bounded memory and auto-cleanup
+2026-02-20 17:02:40,747 - root - INFO - Pre-warming standards document cache...
+2026-02-20 17:02:40,747 - common.core.azure_blob_file_manager - INFO - Connecting to Azure Blob Storage...
+2026-02-20 17:02:41,865 - common.core.azure_blob_file_manager - INFO - Azure Blob Storage connected
+2026-02-20 17:02:41,866 - common.core.azure_blob_file_manager - INFO -    Account: productrecommener2
+2026-02-20 17:02:41,866 - common.core.azure_blob_file_manager - INFO -    Default container: product-documents
+2026-02-20 17:02:42,091 - common.core.azure_blob_file_manager - INFO - Container exists: standards-documents
+2026-02-20 17:02:42,317 - common.standards.generation.deep_agent - INFO - Exact match not found for 'instrumentation_safety_standards.docx', searching in container 'standards-documents'...
+2026-02-20 17:02:42,768 - common.standards.generation.deep_agent - INFO - Found standard document: user_1/20260217_070716_instrumentation_safety_standards.docx
+2026-02-20 17:02:43,232 - common.standards.generation.deep_agent - INFO - Exact match not found for 'instrumentation_pressure_standards.docx', searching in container 'standards-documents'...
+2026-02-20 17:02:43,683 - common.standards.generation.deep_agent - INFO - Found standard document: user_1/20260217_070723_instrumentation_pressure_standards.docx
+2026-02-20 17:02:44,141 - common.standards.generation.deep_agent - INFO - Exact match not found for 'instrumentation_temperature_standards.docx', searching in container 'standards-documents'...
+2026-02-20 17:02:44,590 - common.standards.generation.deep_agent - INFO - Found standard document: user_1/20260217_070626_instrumentation_temperature_standards.docx
+2026-02-20 17:02:45,049 - common.standards.generation.deep_agent - INFO - Exact match not found for 'instrumentation_flow_standards.docx', searching in container 'standards-documents'...
+2026-02-20 17:02:45,498 - common.standards.generation.deep_agent - INFO - Found standard document: user_1/20260217_070737_instrumentation_flow_standards.docx
+2026-02-20 17:02:45,961 - common.standards.generation.deep_agent - INFO - Exact match not found for 'instrumentation_level_standards.docx', searching in container 'standards-documents'...
+2026-02-20 17:02:46,412 - common.standards.generation.deep_agent - INFO - Found standard document: user_1/20260217_070730_instrumentation_level_standards.docx
+2026-02-20 17:02:46,870 - common.standards.generation.deep_agent - INFO - Exact match not found for 'instrumentation_control_systems_standards.docx', searching in container 'standards-documents'...
+2026-02-20 17:02:47,327 - common.standards.generation.deep_agent - INFO - Found standard document: user_1/20260217_070747_instrumentation_control_systems_standards.docx
+2026-02-20 17:02:47,785 - common.standards.generation.deep_agent - INFO - Exact match not found for 'instrumentation_valves_actuators_standards.docx', searching in container 'standards-documents'...
+2026-02-20 17:02:48,237 - common.standards.generation.deep_agent - INFO - Found standard document: user_1/20260217_070616_instrumentation_valves_actuators_standards.docx
+2026-02-20 17:02:48,697 - common.standards.generation.deep_agent - INFO - Exact match not found for 'instrumentation_calibration_maintenance_standards.docx', searching in container 'standards-documents'...
+2026-02-20 17:02:49,150 - common.standards.generation.deep_agent - INFO - Found standard document: user_1/20260217_070815_instrumentation_calibration_maintenance_standards.docx
+2026-02-20 17:02:49,605 - common.standards.generation.deep_agent - INFO - Exact match not found for 'instrumentation_comm_signal_standards.docx', searching in container 'standards-documents'...
+2026-02-20 17:02:50,057 - common.standards.generation.deep_agent - INFO - Found standard document: user_1/20260217_070808_instrumentation_comm_signal_standards.docx
+2026-02-20 17:02:50,516 - common.standards.generation.deep_agent - INFO - Exact match not found for 'instrumentation_condition_monitoring_standards.docx', searching in container 'standards-documents'...
+2026-02-20 17:02:50,968 - common.standards.generation.deep_agent - INFO - Found standard document: user_1/20260217_070759_instrumentation_condition_monitoring_standards.docx
+2026-02-20 17:02:51,432 - common.standards.generation.deep_agent - INFO - Exact match not found for 'instrumentation_analytical_standards.docx', searching in container 'standards-documents'...
+2026-02-20 17:02:51,880 - common.standards.generation.deep_agent - INFO - Found standard document: user_1/20260217_070827_instrumentation_analytical_standards.docx
+2026-02-20 17:02:52,340 - common.standards.generation.deep_agent - INFO - Exact match not found for 'instrumentation_accessories_calibration_standards.docx', searching in container 'standards-documents'...
+2026-02-20 17:02:52,794 - common.standards.generation.deep_agent - INFO - Found standard document: user_1/20260217_070834_instrumentation_accessories_calibration_standards.docx
+2026-02-20 17:02:53,027 - root - INFO - Standards cache pre-warmed: 12/12 documents loaded in 12.28s
+2026-02-20 17:02:53,058 - werkzeug - INFO - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5000
+ * Running on http://192.168.0.74:5000
+2026-02-20 17:02:53,058 - werkzeug - INFO - [33mPress CTRL+C to quit[0m
+2026-02-20 17:05:15,780 - werkzeug - INFO - 127.0.0.1 - - [20/Feb/2026 17:05:15] "GET /api/health HTTP/1.1" 200 -
+2026-02-20 17:05:55,629 - root - INFO - [SHUTDOWN] Stopping session cleanup manager...
+2026-02-20 17:05:55,632 - common.infrastructure.state.session.cleanup - INFO - [SESSION_CLEANUP] Initiating graceful shutdown...
+2026-02-20 17:05:55,634 - common.infrastructure.state.session.cleanup - INFO - [SESSION_CLEANUP] Shutdown complete
+2026-02-20 17:05:55,634 - root - INFO - [SHUTDOWN] Session cleanup manager stopped successfully
+2026-02-20 17:05:55,634 - root - INFO - [SHUTDOWN] Stopping workflow state manager...
+2026-02-20 17:05:55,638 - common.infrastructure.caching.workflow_state_cache - INFO - [WORKFLOW_STATE_MANAGER] Stopping cleanup thread...
+2026-02-20 17:05:55,640 - common.infrastructure.caching.workflow_state_cache - INFO - [WORKFLOW_STATE_MANAGER] Cleanup thread stopped
+2026-02-20 17:05:55,641 - common.infrastructure.caching.workflow_state_cache - INFO - [WORKFLOW_STATE_MANAGER] Global manager stopped and cleared
+2026-02-20 17:05:55,642 - root - INFO - [SHUTDOWN] Workflow state manager stopped successfully
+2026-02-20 17:05:55,665 - initialization - INFO - ======================================================================
+2026-02-20 17:05:55,665 - initialization - INFO - [CLEANUP] Application shutdown complete
+2026-02-20 17:05:55,666 - initialization - INFO - ======================================================================
+2026-02-20 17:05:55,667 - initialization - INFO - [CLEANUP] Cleaning up bounded caches...
+2026-02-20 17:05:55,672 - initialization - INFO - [CLEANUP] Cache cleanup results: {'standards_results': 0, 'standards_unified': 0}
+2026-02-20 17:05:55,674 - initialization - INFO - [CLEANUP] Registry summary: {'cache_count': 2, 'total_entries': 0, 'total_max_capacity': 200, 'utilization_percent': 0.0, 'cache_names': ['standards_results', 'standards_unified']}
+2026-02-20 17:05:55,674 - initialization - INFO - [CLEANUP] Final cache statistics:
+2026-02-20 17:05:55,674 - initialization - INFO - [CLEANUP]   standards_results: {'name': 'standards_results', 'size': 0, 'max_size': 100, 'ttl_seconds': 600, 'hits': 0, 'misses': 0, 'evictions': 0, 'sets': 0, 'hit_rate_percent': 0.0}
+2026-02-20 17:05:55,675 - initialization - INFO - [CLEANUP]   standards_unified: {'name': 'standards_unified', 'size': 0, 'max_size': 100, 'ttl_seconds': 600, 'hits': 0, 'misses': 0, 'evictions': 0, 'sets': 0, 'hit_rate_percent': 0.0}
+2026-02-20 17:05:55,675 - initialization - INFO - [CLEANUP] \u2713 Bounded caches cleanup complete
+2026-02-20 17:05:55,677 - initialization - INFO - [CLEANUP] Shutting down global executor...
+2026-02-20 17:05:55,687 - common.infrastructure.state.context.managers - INFO - Acquiring thread_pool resource: global_executor
+2026-02-20 17:05:55,697 - common.infrastructure.state.context.managers - INFO - Created thread pool 'global_executor' with 16 workers
+2026-02-20 17:05:55,699 - common.infrastructure.state.execution.executor_manager - INFO - GlobalExecutorManager initialized with max 16 workers (managed)
+2026-02-20 17:05:55,699 - initialization - INFO - [CLEANUP] Global executor stats: {'max_workers': 16, 'task_count': 0, 'completed_tasks': 0, 'failed_tasks': 0, 'is_active': True, 'executor_available': True}
+2026-02-20 17:05:55,704 - common.infrastructure.state.context.managers - INFO - Shut down thread pool 'global_executor'. Tasks: 0, Completed: 0, Failed: 0
+2026-02-20 17:05:55,706 - common.infrastructure.state.context.managers - INFO - Released thread_pool resource: global_executor (duration: 23.77ms)
+2026-02-20 17:05:55,706 - common.infrastructure.state.execution.executor_manager - INFO - Global managed executor shut down.
+2026-02-20 17:05:55,707 - initialization - INFO - [CLEANUP] \u2713 Global executor shutdown complete

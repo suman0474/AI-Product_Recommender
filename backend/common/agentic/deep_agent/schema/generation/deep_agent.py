@@ -134,7 +134,7 @@ class SchemaGenerationDeepAgent:
     def failure_memory(self):
         """Lazy load failure memory."""
         if self._failure_memory is None:
-            from ....infrastructure.caching import get_schema_failure_memory
+            from common.infrastructure.caching import get_schema_failure_memory
             self._failure_memory = get_schema_failure_memory()
         return self._failure_memory
 
@@ -142,7 +142,7 @@ class SchemaGenerationDeepAgent:
     def prompt_engine(self):
         """Lazy load prompt engine."""
         if self._prompt_engine is None:
-            from .adaptive_prompt_engine import get_adaptive_prompt_engine
+            from ...agents.adaptive_prompt_engine import get_adaptive_prompt_engine
             self._prompt_engine = get_adaptive_prompt_engine()
         return self._prompt_engine
 
@@ -356,7 +356,7 @@ class SchemaGenerationDeepAgent:
         # ║  Saves 15-30+ seconds by avoiding the retrieval→generate→retry cycle  ║
         # ╚════════════════════════════════════════════════════════════════════════╝
         try:
-            from common.rag.vector_store import get_vector_store
+            from common.agentic.vector_store import get_vector_store
             vector_store = get_vector_store()
             if not vector_store.is_healthy():
                 health_status = vector_store.get_health_status()
@@ -431,7 +431,7 @@ class SchemaGenerationDeepAgent:
         start_time = time.time()
 
         try:
-            from ...llm_specs_generator import generate_llm_specs
+            from common.agentic.deep_agent.specifications.generation.llm_generator import generate_llm_specs
 
             result = generate_llm_specs(
                 product_type=product_type,

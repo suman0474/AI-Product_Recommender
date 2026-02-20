@@ -1,10 +1,11 @@
-DEPRECATED COMPATIBILITY SHIM FOR OLD PROMPTS MODULE
+# -*- coding: utf-8 -*-
+"""DEPRECATED COMPATIBILITY SHIM FOR OLD PROMPTS MODULE
 
 This module provides backward compatibility for code still referencing the old
 'prompts' module pattern (e.g., prompts.sales_agent_greeting_prompt).
 
 ALL NEW CODE SHOULD USE:
-    from common.prompts_library import load_prompt
+    from common.prompts import load_prompt
     PROMPT = load_prompt("prompt_name")
 
 This file will be removed in a future version.
@@ -126,6 +127,7 @@ advanced_parameter_selection_prompt = ""
 # ========================================================================================
 
 # Validation prompt for requirement extraction
+# Validation prompt for requirement extraction
 validation_prompt_template = ChatPromptTemplate.from_template("""
 You are Engenie - an expert assistant for industrial requisitioners and buyers. Your job is to validate technical product requirements in a way that helps procurement professionals make informed decisions.
  
@@ -148,20 +150,20 @@ Tasks:
 2. Extract the requirements that were provided, focusing on what matters to buyers
  
 CRITICAL: Dynamic Product Type Intelligence:
-Your job is to determine the most appropriate and standardized product category based on the user's input. Use your knowledge of industrial instruments and measurement devices to:
+Your job is to determine the most appropriate and standardized product category based on the user input. Use your knowledge of industrial instruments and measurement devices to:
  
 1. **Identify the core measurement function** - What is being measured? (pressure, temperature, flow, level, pH, etc.)
 2. **Determine the appropriate device type** - What type of instrument is needed? (sensor, transmitter, meter, gauge, controller, valve, etc.)
 3. **Remove technology-specific modifiers** - Focus on function over implementation (remove terms like "differential", "vortex", "radar", "smart", etc.)
 4. **Standardize terminology** - Use consistent, industry-standard naming conventions
  
-EXAMPLES (learn the pattern, don't memorize):
-- "differential pressure transmitter" → analyze: measures pressure + transmits signal → "pressure transmitter"
-- "vortex flow meter" → analyze: measures flow + meter device → "flow meter"
-- "RTD temperature sensor" → analyze: measures temperature + sensing function → "temperature sensor"
-- "smart level indicator" → analyze: measures level + indicates/transmits → "level transmitter"
-- "pH electrode" → analyze: measures pH + sensing function → "ph sensor"
-- "Isolation Valve" → analyze: valve used for isolation → "isolation valve"
+EXAMPLES (learn the pattern, do not memorize):
+- "differential pressure transmitter" -> analyze: measures pressure + transmits signal -> "pressure transmitter"
+- "vortex flow meter" -> analyze: measures flow + meter device -> "flow meter"
+- "RTD temperature sensor" -> analyze: measures temperature + sensing function -> "temperature sensor"
+- "smart level indicator" -> analyze: measures level + indicates/transmits -> "level transmitter"
+- "pH electrode" -> analyze: measures pH + sensing function -> "ph sensor"
+- "Isolation Valve" -> analyze: valve used for isolation -> "isolation valve"
  
 YOUR APPROACH:
 1. Analyze what physical parameter is being measured
@@ -193,14 +195,14 @@ Focus on:
 - Compliance or certification needs
 - Any business or operational considerations relevant to buyers
  
-Return a clear, structured summary of requirements, using language that is actionable and easy for buyers to use in procurement. Only include sections and details for which information is explicitly present in the user's input. Do not add any inferred requirements or placeholders for missing information.
+Return a clear, structured summary of requirements, using language that is actionable and easy for buyers to use in procurement. Only include sections and details for which information is explicitly present in the user input. Do not add any inferred requirements or placeholders for missing information.
 Validate the outputs and adherence to the output structure.
  
 """)
 
 # Standardization prompt
 standardization_prompt = ChatPromptTemplate.from_template("""
-You are Engenie — an expert in industrial instrumentation and procurement standardization.
+You are Engenie - an expert in industrial instrumentation and procurement standardization.
 Your task is to standardize naming conventions for industrial products, vendors, and specifications
 to create consistency across procurement systems.
  
@@ -220,13 +222,13 @@ Instructions:
    - If uncertain, keep the original vendor name without guessing.
  
 2. **Product Type Standardization**
-   - Preserve all descriptors that meaningfully distinguish the instrument's measurement technology, method, or operating principle.
+   - Preserve all descriptors that meaningfully distinguish the instrument measurement technology, method, or operating principle.
      *Do NOT remove or generalize technology descriptors.*
      Examples of descriptors to keep (conceptually, not limited to specific words):
-       • measurement principle
-       • sensing technology
-       • operating method
-       • functional variant that affects procurement category
+       - measurement principle
+       - sensing technology
+       - operating method
+       - functional variant that affects procurement category
    - The goal is to produce a standardized, clean, procurement-friendly name
      *while retaining every detail needed to map to the correct procurement subcategory*.
    - Do not simplify or collapse product types into broader categories
@@ -273,16 +275,16 @@ Your task is to generate a short, human-readable description for the schema fiel
  
 Guidelines:
 - Write a clear, concise description that non-technical users can understand
-- Focus on what this field represents and why it's important for product selection
+- Focus on what this field represents and why it is important for product selection
 - Do NOT mention the specific product type in the description
 - Include 2-3 realistic example values that would be typical for this field
 - Keep the entire description to 1-2 sentences maximum
 - Use plain language, avoiding technical jargon where possible
  
 Examples of good descriptions:
-- For 'accuracy': "The precision of measurements, typically expressed as a percentage. Examples: ±0.1%, ±0.25%, ±1.0%"
+- For 'accuracy': "The precision of measurements, typically expressed as a percentage. Examples: +-0.1%, +-0.25%, +-1.0%"
 - For 'outputSignal': "The type of electrical signal the device sends to control systems. Examples: 4-20mA, 0-10V, Digital"
-- For 'operatingTemperature': "The temperature range where the device can function properly. Examples: -40°C to 85°C, 0°C to 60°C"
+- For 'operatingTemperature': "The temperature range where the device can function properly. Examples: -40 degC to 85 degC, 0 degC to 60 degC"
  
 Field to describe: {field}
 Context Product Type: {product_type}
@@ -474,9 +476,9 @@ Guidelines:
 - Use plain language, avoiding technical jargon where possible
 
 Examples of good descriptions:
-- For 'accuracy': "The precision of measurements, typically expressed as a percentage. Examples: ±0.1%, ±0.25%, ±1.0%"
+- For 'accuracy': "The precision of measurements, typically expressed as a percentage. Examples: +-0.1%, +-0.25%, +-1.0%"
 - For 'outputSignal': "The type of electrical signal the device sends to control systems. Examples: 4-20mA, 0-10V, Digital"
-- For 'operatingTemperature': "The temperature range where the device can function properly. Examples: -40°C to 85°C, 0°C to 60°C"
+- For 'operatingTemperature': "The temperature range where the device can function properly. Examples: -40 degC to 85 degC, 0 degC to 60 degC"
 
 Field to describe: {field_name}
 Context Product Type: {product_type}

@@ -37,7 +37,7 @@ from .solution_deep_agent import (
     mark_phase_complete,
     add_system_message,
 )
-from .intent_classifier import SolutionIntentClassifier
+from .intent_analyzer import SolutionIntentClassifier
 from .context_manager import SolutionContextManager
 from .identification_agents import (
     InstrumentIdentificationAgent,
@@ -45,9 +45,12 @@ from .identification_agents import (
     identify_instruments_and_accessories_parallel,
 )
 from .flash_personality import FlashPersonality, ExecutionStrategy
-from .cross_over_validator import (
-    validate_no_spec_crossover,
-    generate_all_sample_inputs,
+from common.agentic.workflows.specification_utils import build_sample_input
+from .orchestration import (
+    OrchestrationContext,
+    get_current_context,
+    get_orchestration_logger,
+    get_solution_orchestrator,
 )
 
 from common.agentic.deep_agent.memory import DeepAgentMemory
@@ -758,21 +761,20 @@ def deep_identification_node(state: SolutionDeepAgentState) -> SolutionDeepAgent
 
 
 # =============================================================================
-# NODE 6: PARALLEL ENRICHMENT
+# NODE 6: STANDARDS-BASED SPECIFICATION ENRICHMENT
 # =============================================================================
 
 def parallel_enrichment_node(state: SolutionDeepAgentState) -> SolutionDeepAgentState:
     """
-    Phase 6: Parallel 3-Source Specification Enrichment.
+    Phase 6: Standards-Based Specification Enrichment (Simplified).
 
-    Uses the existing optimized parallel enrichment infrastructure:
-    - Thread 1: User Specification Extraction (MANDATORY, confidence 1.0)
-    - Thread 2: LLM Specification Generation (confidence 0.8)
-    - Thread 3: Standards Deep Agent (confidence 0.9)
-
-    With strict per-item isolation (no cross-over).
+    For each identified instrument/accessory:
+    1. Retrieve relevant standards content from common/standards/ RAG (greedy, no domain filter)
+    2. Call LLM with SOLUTION_STANDARDS_EXTRACTION prompt to extract ALL applicable specs
+    3. LLM tags each extracted value with [STANDARDS]
+    4. Merge into item's specifications dict — existing values (user/inferred) take precedence
     """
-    logger.info("[SolutionDeepAgent] Phase 6: Parallel Enrichment...")
+    logger.info("[SolutionDeepAgent] Phase 6: Standards-Based Specification Enrichment...")
 
     all_items = state.get("all_items", [])
     plan = state.get("personality_plan", {})
@@ -799,141 +801,136 @@ def parallel_enrichment_node(state: SolutionDeepAgentState) -> SolutionDeepAgent
         return state
 
     try:
-        # Detect standards requirements
-        from common.standards.shared import detect_standards_indicators
-        detection = detect_standards_indicators(
-            user_input=state.get("user_input", ""),
-            provided_requirements=state.get("provided_requirements", {}),
-        )
-        state["standards_detected"] = detection["detected"]
-        state["standards_confidence"] = detection["confidence"]
-        state["standards_indicators"] = detection["indicators"]
+        from common.standards.rag.enrichment import enrich_identified_items_with_standards
+        from langchain_core.prompts import ChatPromptTemplate
+        from langchain_core.output_parsers import JsonOutputParser
+        from common.prompts import STANDARDS_DEEP_AGENT_PROMPTS
 
-        # === STANDARDS DEEP AGENT CALL PLANNING ===
-        # Use STANDARDS_DEEP_AGENT_CALL prompt to decide which standards to query
-        _standards_call_plan = _plan_standards_calls(state, all_items)
-        if _standards_call_plan:
-            state["provided_requirements"]["standards_call_plan"] = _standards_call_plan
-            logger.info(
-                f"[SolutionDeepAgent] Standards call plan: "
-                f"{_standards_call_plan.get('total_standards_calls', 0)} calls planned"
-            )
+        extraction_prompt_text = STANDARDS_DEEP_AGENT_PROMPTS.get("SOLUTION_STANDARDS_EXTRACTION", "")
 
-        # Import optimized parallel enrichment
-        from common.agentic.deep_agent.parallel.optimized_agent import run_optimized_parallel_enrichment
-
-        solution_analysis = state.get("solution_analysis", {})
-        domain = solution_analysis.get("industry", "")
-        safety_requirements = solution_analysis.get("safety_requirements", {})
-
-        # Deduplicate items by category+name
-        items_by_key = {}
-        item_to_key = {}
-        for item in all_items:
-            key = (item.get("category", "unknown"), item.get("name", "unknown"))
-            if key not in items_by_key:
-                items_by_key[key] = []
-            items_by_key[key].append(item)
-            item_to_key[item.get("number")] = key
-
-        unique_items = [group[0] for group in items_by_key.values()]
-        dup_count = len(all_items) - len(unique_items)
-
-        if dup_count > 0:
-            logger.info(f"[SolutionDeepAgent] Dedup: {len(all_items)} -> {len(unique_items)} unique")
-
-        # Run enrichment on unique items only
-        result = run_optimized_parallel_enrichment(
-            items=unique_items,
-            user_input=state.get("user_input", ""),
-            session_id=state.get("session_id", "solution-deep-agent"),
-            domain_context=domain,
-            safety_requirements=safety_requirements,
-            standards_detected=state.get("standards_detected", True),
-            max_parallel_products=5,
+        llm = create_llm_with_fallback(
+            model=AgenticConfig.FLASH_MODEL,
+            temperature=0.1,
+            google_api_key=os.getenv("GOOGLE_API_KEY"),
+            timeout=180,
         )
 
-        if result.get("success"):
-            enriched_unique = result.get("items", unique_items)
-            metadata = result.get("metadata", {})
-
-            # Map enriched results back by key
-            enriched_by_key = {}
-            for item in enriched_unique:
-                key = (item.get("category", "unknown"), item.get("name", "unknown"))
-                enriched_by_key[key] = item
-
-            # Apply to ALL items (including duplicates)
-            enriched_items = []
-            for original in all_items:
-                key = item_to_key.get(original.get("number"))
-                if key and key in enriched_by_key:
-                    enriched_copy = enriched_by_key[key].copy()
-                    enriched_copy["number"] = original.get("number")
-                    enriched_copy["name"] = original.get("name") or enriched_copy.get("name")
-                    enriched_items.append(enriched_copy)
-                else:
-                    enriched_items.append(original)
-
-            state["all_items"] = enriched_items
-
-            processing_time = metadata.get("processing_time_ms", 0)
-            tools_called.append("run_optimized_parallel_enrichment")
-            tool_results_summary["run_optimized_parallel_enrichment"] = {
-                "items_enriched": len(enriched_items),
-                "unique_items": len(unique_items),
-                "processing_time_ms": processing_time,
-                "success": True,
-            }
-            add_system_message(
-                state,
-                f"Enrichment complete: {processing_time}ms for {len(enriched_items)} items"
-            )
-        else:
-            logger.error(f"[SolutionDeepAgent] Enrichment failed: {result.get('error')}")
-            state["all_items"] = result.get("items", all_items)
-            tools_called.append("run_optimized_parallel_enrichment")
-            tool_results_summary["run_optimized_parallel_enrichment"] = {
-                "items_enriched": len(result.get("items", all_items)),
-                "success": False,
-                "error": result.get("error", ""),
-            }
-            quality_flags.append(f"enrichment_failed: {str(result.get('error', ''))[:80]}")
-
-        # Validate against domain standards if applicable
-        if domain or safety_requirements:
+        def _enrich_single_item_with_standards(item: dict) -> dict:
+            """
+            For a single item:
+            1. Retrieve relevant standards content via RAG (greedy, top_k=6)
+            2. Call LLM with SOLUTION_STANDARDS_EXTRACTION to extract specs tagged [STANDARDS]
+            3. Merge into item specs — existing values take precedence
+            """
             try:
-                from common.standards.rag import validate_items_against_domain_standards
-                validation = validate_items_against_domain_standards(
-                    items=state["all_items"],
-                    domain=domain,
-                    safety_requirements=safety_requirements,
+                item_desc = (
+                    f"{item.get('name', '')} ({item.get('category', '')})\n"
+                    f"Specifications: {json.dumps(item.get('specifications', {}))}\n"
+                    f"Context: {item.get('sample_input', '')}"
                 )
-                state["crossover_validation"]["domain_validation"] = validation
-            except Exception as ve:
-                logger.debug(f"[SolutionDeepAgent] Domain validation skipped: {ve}")
 
-    except ImportError as ie:
-        logger.error(f"[SolutionDeepAgent] Enrichment import failed: {ie}")
-        quality_flags.append(f"enrichment_import_error: {str(ie)[:80]}")
-        # Fallback to basic standards enrichment
-        try:
-            from common.standards.rag import enrich_identified_items_with_standards
-            domain = state.get("solution_analysis", {}).get("industry", "")
-            enriched = enrich_identified_items_with_standards(
-                items=all_items, product_type=None, domain=domain, top_k=3
+                # Step 1: Retrieve standards content
+                enriched_list = enrich_identified_items_with_standards(
+                    items=[item.copy()],
+                    product_type=item.get("category"),
+                    top_k=6,
+                    max_workers=1,
+                )
+                standards_info = (
+                    enriched_list[0].get("standards_info", {}) if enriched_list else {}
+                )
+                standards_content = json.dumps(standards_info, indent=2) if standards_info else ""
+
+                if not standards_content or not extraction_prompt_text:
+                    logger.debug(
+                        f"[SolutionDeepAgent] No standards content for '{item.get('name')}'; skipping LLM extraction"
+                    )
+                    return item
+
+                # Step 2: LLM extracts and tags specs with [STANDARDS]
+                prompt = ChatPromptTemplate.from_template(extraction_prompt_text)
+                chain = prompt | llm | JsonOutputParser()
+                result = chain.invoke({
+                    "item_description": item_desc,
+                    "standards_content": standards_content,
+                })
+
+                extracted_specs = result.get("specifications", {})
+
+                # Step 3: Merge — existing specs take precedence
+                merged_specs = dict(item.get("specifications") or {})
+                for key, val in extracted_specs.items():
+                    if key not in merged_specs:
+                        merged_specs[key] = val
+
+                enriched_item = dict(item)
+                enriched_item["specifications"] = merged_specs
+                enriched_item["standards_applied"] = True
+                return enriched_item
+
+            except Exception as exc:
+                logger.warning(
+                    f"[SolutionDeepAgent] Standards enrichment failed for "
+                    f"'{item.get('name', 'unknown')}': {exc}"
+                )
+                return item
+
+        # ── Run enrichment via identity-aware orchestrator ──────────────────────
+        start_ts = time.time()
+        enriched_items = list(all_items)  # preserve order slot-by-slot
+
+        # Resolve orchestration context from state
+        orch_ctx_data = state.get("orchestration_ctx") or {}
+        if orch_ctx_data:
+            root_orch_ctx = OrchestrationContext.from_dict(orch_ctx_data)
+        else:
+            root_orch_ctx = OrchestrationContext.root(
+                session_id=state.get("session_id", "default")
             )
-            state["all_items"] = enriched
-            tools_called.append("enrich_identified_items_with_standards_fallback")
-        except Exception as e2:
-            logger.error(f"[SolutionDeepAgent] Fallback enrichment failed: {e2}")
-            quality_flags.append(f"enrichment_fallback_failed: {str(e2)[:80]}")
+
+        orchestrator = get_solution_orchestrator()
+
+        results = orchestrator.run_parallel(
+            fn=_enrich_single_item_with_standards,
+            items=all_items,
+            root_ctx=root_orch_ctx,
+            label_fn=lambda i: f"enrich:{i.get('category', i.get('name', '?'))}",
+            timeout_seconds=180.0,
+        )
+
+        # Rebuild list in original order — zip preserves submission order
+        for idx, (iid, enriched) in enumerate(results.items()):
+            if isinstance(enriched, dict) and not enriched.get("_orchestration_error"):
+                enriched_items[idx] = enriched
+            else:
+                quality_flags.append(
+                    f"enrichment_thread_error: {str(enriched.get('error', '?'))[:80]}"
+                )
+
+        state["all_items"] = enriched_items
+        processing_ms = int((time.time() - start_ts) * 1000)
+
+        standards_applied_count = sum(1 for i in enriched_items if i.get("standards_applied"))
+        tools_called.append("standards_enrichment")
+        tool_results_summary["standards_enrichment"] = {
+            "items_enriched": standards_applied_count,
+            "total_items": len(enriched_items),
+            "processing_time_ms": processing_ms,
+        }
+        add_system_message(
+            state,
+            f"Standards enrichment: {standards_applied_count}/{len(enriched_items)} items enriched in {processing_ms}ms"
+        )
+        logger.info(
+            "[SolutionDeepAgent] Standards enrichment complete: %d/%d items in %dms",
+            standards_applied_count, len(enriched_items), processing_ms,
+        )
 
     except Exception as e:
-        logger.error(f"[SolutionDeepAgent] Enrichment failed: {e}")
+        logger.error(f"[SolutionDeepAgent] Standards enrichment node failed: {e}")
         import traceback
         traceback.print_exc()
-        quality_flags.append(f"enrichment_error: {str(e)[:80]}")
+        quality_flags.append(f"standards_enrichment_error: {str(e)[:80]}")
 
     state["tools_called"] = tools_called
     state["tool_results_summary"] = tool_results_summary
@@ -958,8 +955,9 @@ def sample_input_generation_node(state: SolutionDeepAgentState) -> SolutionDeepA
     try:
         all_items = state.get("all_items", [])
 
-        # Generate sample inputs with strict isolation
-        generate_all_sample_inputs(all_items)
+        # Generate sample inputs with natural language prose
+        for item in all_items:
+            item["sample_input"] = build_sample_input(item)
 
         # Attach parent provenance to every item so the frontend can forward
         # these IDs when it dispatches a child product-search for that item.
@@ -970,23 +968,12 @@ def sample_input_generation_node(state: SolutionDeepAgentState) -> SolutionDeepA
             item["parent_instance_id"] = parent_instance_id
             item["parent_workflow"] = "solution_deep_agent"
 
-        # Cross-over validation
-        validation = validate_no_spec_crossover(all_items)
-        state["crossover_validation"] = validation
-
-        if not validation["valid"]:
-            logger.warning(
-                f"[SolutionDeepAgent] Cross-over issues: {validation['crossover_count']}"
-            )
-            for issue in validation["issues"][:5]:
-                logger.warning(f"  - {issue}")
-
         state["all_items"] = all_items
 
         add_system_message(
             state,
             f"Sample inputs generated for {len(all_items)} items "
-            f"(crossover valid={validation['valid']})"
+            f"(isolation: structural via orchestration context)"
         )
 
     except Exception as e:
@@ -1348,7 +1335,6 @@ def reflect_enrichment_node(state: SolutionDeepAgentState) -> SolutionDeepAgentS
     logger.info("[SolutionDeepAgent] Reflecting on enrichment quality...")
 
     all_items = state.get("all_items", [])
-    crossover_validation = state.get("crossover_validation", {})
 
     tools_called = list(state.get("tools_called") or [])
     tool_results_summary = dict(state.get("tool_results_summary") or {})
@@ -1386,12 +1372,6 @@ def reflect_enrichment_node(state: SolutionDeepAgentState) -> SolutionDeepAgentS
     ):
         score = min(score + 10, 100)
 
-    # Penalty: crossover issues
-    crossover_count = crossover_validation.get("crossover_count", 0)
-    if crossover_count > 0:
-        score = max(score - crossover_count * 5, 0)
-        quality_flags.append(f"enrichment_crossover_issues: {crossover_count}")
-
     if score < 40:
         quality_flags.append(f"enrichment_quality_low: {score}")
 
@@ -1400,13 +1380,13 @@ def reflect_enrichment_node(state: SolutionDeepAgentState) -> SolutionDeepAgentS
         "total_items": len(all_items),
         "avg_specs_per_item": round(avg_specs, 1),
         "total_specs": total_specs,
-        "crossover_valid": crossover_validation.get("valid", True),
+        "isolation": "structural_via_orchestration_context",
         "score": score,
     }
 
     logger.info(
-        "[SolutionDeepAgent] reflect_enrichment: score=%d avg_specs=%.1f crossover_issues=%d",
-        score, avg_specs, crossover_count,
+        "[SolutionDeepAgent] reflect_enrichment: score=%d avg_specs=%.1f",
+        score, avg_specs,
     )
 
     state["enrichment_quality_score"] = score
@@ -1418,99 +1398,135 @@ def reflect_enrichment_node(state: SolutionDeepAgentState) -> SolutionDeepAgentS
 
 
 # =============================================================================
-# NODE 5b: TAXONOMY NORMALIZATION (ORCHESTRATOR LAYER)
+# NODE 5b: TAXONOMY NORMALIZATION (LLM-BASED)
 # =============================================================================
 
 def taxonomy_normalization_node(state: SolutionDeepAgentState) -> SolutionDeepAgentState:
     """
-    Phase 5b: Taxonomy RAG — Orchestrator-Level Term Standardization.
+    Phase 5b (runs AFTER standards enrichment): LLM-Based Taxonomy Normalization.
 
-    This node is the BRIDGE between identification and search:
-      identified_instruments (raw, user vocabulary)
-          ↓
-      [TaxonomyNormalizationAgent]  ← THIS NODE
-          ↓
-      standardized_instruments (canonical DB vocabulary)
+    Uses an LLM call with the full taxonomy list to map each item name to the
+    closest canonical organizational taxonomy name. This handles cases where
+    item names don't directly match aliases (e.g., abbreviations, synonyms,
+    vendor-specific terms).
 
-    Each item gets canonical_name, taxonomy_matched, match_source added.
-    The canonical_name is what will be passed to Search Deep Agent as product_type.
-
-    Example: "PT" → "Pressure Transmitter"
-             "TT" → "Temperature Transmitter"
-             "Level Gauge" → "Level Gauge" (already canonical — passthrough)
+    Each item in all_items receives:
+      canonical_name  — matched taxonomy name, or original if no match
+      taxonomy_matched — True if a taxonomy entry was found
     """
-    logger.info("[SolutionDeepAgent] Phase 5b: Taxonomy Normalization (Orchestrator Layer)...")
+    logger.info("[SolutionDeepAgent] Phase 5b: LLM-Based Taxonomy Normalization...")
 
     tools_called = list(state.get("tools_called") or [])
     tool_results_summary = dict(state.get("tool_results_summary") or {})
     quality_flags = list(state.get("quality_flags") or [])
 
+    all_items = state.get("all_items", [])
+
     try:
-        from .taxonomy_rag import TaxonomyNormalizationAgent
+        from taxonomy_rag.loader import load_taxonomy
+        from langchain_core.prompts import ChatPromptTemplate
+        from langchain_core.output_parsers import JsonOutputParser
 
-        memory = _SESSION_MEMORIES.get(state.get("session_id", ""))
-        normalizer = TaxonomyNormalizationAgent(memory=memory)
+        prompts = _get_prompts()
+        norm_prompt_text = prompts.get("SOLUTION_TAXONOMY_NORMALIZATION", "")
 
-        instruments = state.get("identified_instruments", [])
-        accessories = state.get("identified_accessories", [])
+        if not norm_prompt_text:
+            logger.warning(
+                "[SolutionDeepAgent] SOLUTION_TAXONOMY_NORMALIZATION prompt not found; "
+                "falling back to passthrough"
+            )
+            for item in all_items:
+                item.setdefault("canonical_name", item.get("name", ""))
+                item.setdefault("taxonomy_matched", False)
+            state["taxonomy_normalization_applied"] = False
+            mark_phase_complete(state, "taxonomy_normalization")
+            return state
 
-        result = normalizer.normalize_all(
-            instruments=instruments,
-            accessories=accessories,
+        # Load taxonomy
+        taxonomy = load_taxonomy()
+        instruments_taxonomy = "\n".join(
+            "- {name}{aliases}".format(
+                name=item["name"],
+                aliases=(
+                    f" (aliases: {', '.join(item['aliases'])})"
+                    if item.get("aliases") else ""
+                ),
+            )
+            for item in taxonomy.get("instruments", [])
+        )
+        accessories_taxonomy = "\n".join(
+            "- {name}{aliases}".format(
+                name=item["name"],
+                aliases=(
+                    f" (aliases: {', '.join(item['aliases'])})"
+                    if item.get("aliases") else ""
+                ),
+            )
+            for item in taxonomy.get("accessories", [])
         )
 
-        std_instruments = result["standardized_instruments"]
-        std_accessories = result["standardized_accessories"]
+        if not all_items:
+            mark_phase_complete(state, "taxonomy_normalization")
+            return state
 
-        state["standardized_instruments"] = std_instruments
-        state["standardized_accessories"] = std_accessories
-        state["taxonomy_normalization_applied"] = True
+        # Build items list for the LLM
+        items_list = "\n".join(
+            f"{i + 1}. {item.get('name', 'Unknown')} [{item.get('type', 'instrument')}]"
+            for i, item in enumerate(all_items)
+        )
 
-        # Also propagate canonical names into the unified all_items list
-        # so that the item cards shown to the user and passed to search
-        # carry the canonical_name field.
-        all_items = state.get("all_items", [])
-        # Build lookup: original name → canonical_name
-        canonical_lookup: dict = {}
-        for item in std_instruments + std_accessories:
-            raw = item.get("product_name") or item.get("name") or ""
-            canonical_lookup[raw] = item.get("canonical_name", raw)
+        llm = create_llm_with_fallback(
+            model=AgenticConfig.FLASH_MODEL,
+            temperature=0.0,
+            google_api_key=os.getenv("GOOGLE_API_KEY"),
+            timeout=60,
+        )
 
+        prompt = ChatPromptTemplate.from_template(norm_prompt_text)
+        chain = prompt | llm | JsonOutputParser()
+
+        result = chain.invoke({
+            "items_list": items_list,
+            "instruments_taxonomy": instruments_taxonomy or "No instruments taxonomy available.",
+            "accessories_taxonomy": accessories_taxonomy or "No accessories taxonomy available.",
+        })
+
+        # Build lookup from original_name → normalization entry
+        normalized_map: Dict[str, Any] = {
+            entry["original_name"]: entry
+            for entry in result.get("normalized", [])
+            if "original_name" in entry
+        }
+
+        # Apply results to all_items
         for item in all_items:
-            raw = item.get("name", "")
-            if raw in canonical_lookup:
-                item["canonical_name"] = canonical_lookup[raw]
-                item["taxonomy_matched"] = True
+            raw_name = item.get("name", "")
+            entry = normalized_map.get(raw_name)
+            if entry:
+                item["canonical_name"] = entry.get("canonical_name", raw_name)
+                item["taxonomy_matched"] = bool(entry.get("taxonomy_matched", False))
             else:
-                item["canonical_name"] = raw
+                item["canonical_name"] = raw_name
                 item["taxonomy_matched"] = False
 
         state["all_items"] = all_items
+        state["taxonomy_normalization_applied"] = True
 
-        # Collect stats for observability
-        inst_matched = sum(1 for i in std_instruments if i.get("taxonomy_matched"))
-        acc_matched = sum(1 for a in std_accessories if a.get("taxonomy_matched"))
-        total_matched = inst_matched + acc_matched
-        total_items = len(std_instruments) + len(std_accessories)
-
+        total_matched = sum(1 for i in all_items if i.get("taxonomy_matched"))
         tools_called.append("taxonomy_normalization")
         tool_results_summary["taxonomy_normalization"] = {
-            "total_items": total_items,
+            "total_items": len(all_items),
             "matched": total_matched,
-            "unmatched": total_items - total_matched,
-            "instruments_matched": inst_matched,
-            "accessories_matched": acc_matched,
+            "unmatched": len(all_items) - total_matched,
         }
 
         add_system_message(
             state,
-            f"Taxonomy normalization: {total_matched}/{total_items} items mapped to canonical names"
+            f"Taxonomy normalization: {total_matched}/{len(all_items)} items mapped to canonical names"
         )
-
         logger.info(
-            "[SolutionDeepAgent] Taxonomy normalization complete: "
-            "%d/%d items standardized",
-            total_matched, total_items,
+            "[SolutionDeepAgent] Taxonomy normalization complete: %d/%d items matched",
+            total_matched, len(all_items),
         )
 
     except Exception as e:
@@ -1519,8 +1535,9 @@ def taxonomy_normalization_node(state: SolutionDeepAgentState) -> SolutionDeepAg
         )
         quality_flags.append(f"taxonomy_norm_error: {str(e)[:80]}")
         # Graceful passthrough — items keep their original names
-        state["standardized_instruments"] = state.get("identified_instruments", [])
-        state["standardized_accessories"] = state.get("identified_accessories", [])
+        for item in all_items:
+            item.setdefault("canonical_name", item.get("name", ""))
+            item.setdefault("taxonomy_matched", False)
         state["taxonomy_normalization_applied"] = False
 
     state["tools_called"] = tools_called
@@ -1688,7 +1705,12 @@ def modification_node(state: SolutionDeepAgentState) -> SolutionDeepAgentState:
                 "calling update_requirements() for delta extraction"
             )
             try:
-                from .modification_agent import update_requirements
+                # Inlined logic from modification_agent.update_requirements
+                prompts = _get_prompts()
+                mod_prompt_text = prompts.get("MODIFICATION_PROMPT", "")
+                
+                if not mod_prompt_text:
+                    raise ValueError("MODIFICATION_PROMPT not found in prompts")
 
                 # Derive the "original requirements" from the earliest user turn
                 original_requirements = ""
@@ -1699,11 +1721,45 @@ def modification_node(state: SolutionDeepAgentState) -> SolutionDeepAgentState:
                 if not original_requirements:
                     original_requirements = modification_request
 
-                req_result = update_requirements(
-                    modification_request=enriched_request,
-                    original_requirements=original_requirements,
-                    session_id=state.get("session_id", "default"),
+                # Step 1: Fetch user documents
+                user_documents_context = _fetch_user_documents(session_id)
+
+                # Step 2: Extract delta via LLM (text output)
+                llm_delta = create_llm_with_fallback(
+                    model=AgenticConfig.FLASH_MODEL,
+                    temperature=0.1,
+                    google_api_key=os.getenv("GOOGLE_API_KEY"),
                 )
+                
+                mod_prompt = ChatPromptTemplate.from_template(mod_prompt_text)
+                mod_chain = mod_prompt | llm_delta | StrOutputParser()
+
+                raw_analysis = mod_chain.invoke({
+                    "original_requirements": original_requirements,
+                    "modification_request": enriched_request,
+                    "user_documents_context": user_documents_context,
+                })
+
+                # Parse fields from the plain-text LLM output
+                op_type = _extract_field(raw_analysis, "OPERATION_TYPE")
+                changes_raw = _extract_block(raw_analysis, "CHANGES_DETECTED")
+                updated_reqs_raw = _extract_block(raw_analysis, "UPDATED_REQUIREMENTS")
+                re_id_needed = "YES" in _extract_field(raw_analysis, "RE_IDENTIFICATION_NEEDED").upper()
+
+                changes_detected = [
+                    line.lstrip("- ").strip()
+                    for line in changes_raw.splitlines()
+                    if line.strip().startswith("-")
+                ]
+                
+                req_result = {
+                    "success": True,
+                    "operation_type": op_type or "MIXED",
+                    "changes_detected": changes_detected,
+                    "updated_requirements": updated_reqs_raw or modification_request,
+                    "re_identification": re_id_needed,
+                    "raw_analysis": raw_analysis
+                }
 
                 if req_result.get("success"):
                     updated_reqs = req_result.get("updated_requirements", modification_request)
@@ -2093,38 +2149,68 @@ def standards_application_node(state: SolutionDeepAgentState) -> SolutionDeepAge
         return item
 
     try:
-        # ── Enrich instruments using a pool of workers ──────────────────────────
-        max_workers = min(5, len(items_to_enrich_inst) + len(items_to_enrich_acc) + 1)
+        # ── Resolve root orchestration context from state ───────────────────────
+        orch_ctx_data = state.get("orchestration_ctx") or {}
+        if orch_ctx_data:
+            root_orch_ctx = OrchestrationContext.from_dict(orch_ctx_data)
+        else:
+            root_orch_ctx = OrchestrationContext.root(
+                session_id=state.get("session_id", "default")
+            )
+
+        orchestrator = get_solution_orchestrator()
+        _node_log = get_orchestration_logger(logger)
+
+        # ── Wrapper to bind is_accessory into closure ───────────────────────────
+        def _make_inst_task(is_acc: bool):
+            def _task(item: Dict[str, Any]) -> Dict[str, Any]:
+                _log = get_orchestration_logger(logger)
+                _log.debug(f"[apply_standards] Starting enrichment for '{item.get('category', '?')}'")
+                return _enrich_item_with_standards(item.copy(), is_acc)
+            return _task
+
+        # ── Instruments: each runs in isolated child context ────────────────────
+        inst_results = orchestrator.run_parallel(
+            fn=_make_inst_task(False),
+            items=items_to_enrich_inst,
+            root_ctx=root_orch_ctx,
+            label_fn=lambda i: f"apply_std:inst:{i.get('category', '?')}",
+            timeout_seconds=120.0,
+        )
+
+        # ── Accessories: same pattern ────────────────────────────────────────────
+        acc_results = orchestrator.run_parallel(
+            fn=_make_inst_task(True),
+            items=items_to_enrich_acc,
+            root_ctx=root_orch_ctx,
+            label_fn=lambda a: f"apply_std:acc:{a.get('category', '?')}",
+            timeout_seconds=120.0,
+        )
+
+        # ── Map instance_id results back to category for quick lookup ────────────
+        # items_to_enrich_inst list order matches the submission order in orchestrator,
+        # so we zip with the keys (which are ordered dicts in Python 3.7+).
         enriched_inst_map: Dict[str, Dict] = {}
-        enriched_acc_map:  Dict[str, Dict] = {}
+        for (iid, enriched), orig_inst in zip(inst_results.items(), items_to_enrich_inst):
+            cat = (orig_inst.get("category") or "").strip().lower()
+            if isinstance(enriched, dict) and not enriched.get("error"):
+                enriched_inst_map[cat] = enriched
+                standards_applied_count += 1
+            else:
+                quality_flags.append(
+                    f"apply_standards_inst_failed:{cat}:{str(enriched.get('error','?'))[:60]}"
+                )
 
-        inst_futures = {}
-        acc_futures  = {}
-
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            for inst in items_to_enrich_inst:
-                cat = (inst.get("category") or "").strip().lower()
-                fut  = pool.submit(_enrich_item_with_standards, inst.copy(), False)
-                inst_futures[fut] = cat
-
-            for acc in items_to_enrich_acc:
-                cat = (acc.get("category") or "").strip().lower()
-                fut  = pool.submit(_enrich_item_with_standards, acc.copy(), True)
-                acc_futures[fut] = cat
-
-            for fut, cat in inst_futures.items():
-                try:
-                    enriched_inst_map[cat] = fut.result()
-                    standards_applied_count += 1
-                except Exception as fe:
-                    quality_flags.append(f"apply_standards_inst_failed:{cat}:{str(fe)[:60]}")
-
-            for fut, cat in acc_futures.items():
-                try:
-                    enriched_acc_map[cat] = fut.result()
-                    standards_applied_count += 1
-                except Exception as fe:
-                    quality_flags.append(f"apply_standards_acc_failed:{cat}:{str(fe)[:60]}")
+        enriched_acc_map: Dict[str, Dict] = {}
+        for (iid, enriched), orig_acc in zip(acc_results.items(), items_to_enrich_acc):
+            cat = (orig_acc.get("category") or "").strip().lower()
+            if isinstance(enriched, dict) and not enriched.get("error"):
+                enriched_acc_map[cat] = enriched
+                standards_applied_count += 1
+            else:
+                quality_flags.append(
+                    f"apply_standards_acc_failed:{cat}:{str(enriched.get('error','?'))[:60]}"
+                )
 
         # ── Write enriched items back, preserving order ─────────────────────────
         updated_instruments = []
@@ -2177,7 +2263,7 @@ def standards_application_node(state: SolutionDeepAgentState) -> SolutionDeepAge
             f"Standards applied to {standards_applied_count} items "
             f"({len(items_to_enrich_inst)} instruments, {len(items_to_enrich_acc)} accessories)"
         )
-        logger.info(
+        _node_log.info(
             f"[SolutionDeepAgent] apply_standards complete: "
             f"{standards_applied_count} items enriched"
         )
@@ -2235,8 +2321,6 @@ def concise_bom_node(state: SolutionDeepAgentState) -> SolutionDeepAgentState:
         return state
 
     try:
-        from .modification_agent import concise_bom
-
         # Recover the original first-turn requirements from conversation history
         original_requirements = ""
         for msg in state.get("conversation_history", []):
@@ -2246,21 +2330,67 @@ def concise_bom_node(state: SolutionDeepAgentState) -> SolutionDeepAgentState:
         if not original_requirements:
             original_requirements = state.get("user_input", "")
 
-        result = concise_bom(
-            conciseness_request=state.get("user_input", ""),
-            current_instruments=instruments,
-            current_accessories=accessories,
-            original_requirements=original_requirements,
-            session_id=state.get("session_id", "default"),
+        # Inlined logic from modification_agent.concise_bom
+        prompts = _get_prompts()
+        concise_prompt_text = prompts.get("BOM_CONCISENESS_PROMPT", "")
+        
+        if not concise_prompt_text:
+            raise ValueError("BOM_CONCISENESS_PROMPT not found in prompts")
+
+        # Step 1: Fetch user documents
+        user_documents_context = _fetch_user_documents(state.get("session_id", "default"))
+
+        # Build current BOM context
+        current_bom = json.dumps(
+            {"instruments": instruments, "accessories": accessories},
+            indent=2,
         )
 
-        if result.get("success"):
-            scored_instruments = result.get("scored_instruments", instruments)
-            scored_accessories = result.get("scored_accessories", accessories)
+        llm_concise = create_llm_with_fallback(
+            model=AgenticConfig.FLASH_MODEL,
+            temperature=0.1,
+            google_api_key=os.getenv("GOOGLE_API_KEY"),
+        )
 
-            # Keep only items with keep=True, preserve relevance_score on all
-            kept_instruments = [i for i in scored_instruments if i.get("keep", True)]
-            kept_accessories = [a for a in scored_accessories if a.get("keep", True)]
+        concise_prompt = ChatPromptTemplate.from_template(concise_prompt_text)
+        concise_parser = JsonOutputParser()
+        concise_chain = concise_prompt | llm_concise | concise_parser
+
+        result = concise_chain.invoke({
+            "current_bom": current_bom,
+            "conciseness_request": state.get("user_input", ""),
+            "original_requirements": original_requirements or "Not provided",
+            "user_documents_context": user_documents_context,
+        })
+
+        if result.get("success"):
+            scored_inst_map = {
+                (i.get("category") or "").strip().lower(): i 
+                for i in result.get("scored_instruments", [])
+            }
+            scored_acc_map = {
+                (a.get("category") or "").strip().lower(): a 
+                for a in result.get("scored_accessories", [])
+            }
+
+            # Merge scores back into originals and filter
+            kept_instruments = []
+            for inst in instruments:
+                cat = (inst.get("category") or "").strip().lower()
+                score_info = scored_inst_map.get(cat, {})
+                inst["relevance_score"] = score_info.get("relevance_score", 100)
+                inst["keep"] = score_info.get("keep", True)
+                if inst["keep"]:
+                    kept_instruments.append(inst)
+
+            kept_accessories = []
+            for acc in accessories:
+                cat = (acc.get("category") or "").strip().lower()
+                score_info = scored_acc_map.get(cat, {})
+                acc["relevance_score"] = score_info.get("relevance_score", 100)
+                acc["keep"] = score_info.get("keep", True)
+                if acc["keep"]:
+                    kept_accessories.append(acc)
 
             state["identified_instruments"] = kept_instruments
             state["identified_accessories"] = kept_accessories
@@ -2575,33 +2705,20 @@ def create_solution_deep_agent_workflow() -> StateGraph:
         "reflect_identification",
         route_after_identification,
         {
-            # enrich path → taxonomy normalization FIRST, then enrichment
-            "enrich":       "taxonomy_normalization",
-            # fast path → taxonomy normalization still runs (lightweight), skip enrichment
+            # enrich path → standards enrichment first, then taxonomy normalization
+            "enrich":       "enrich_specs",
+            # fast path → skip standards, go directly to taxonomy normalization
             "skip_enrich":  "taxonomy_normalization",
             # hard error → bypass everything
             "error":        "compose_response",
         },
     )
 
-    # After taxonomy normalization: route based on original decision
-    # (stored in state["_reflect_id_decision"] by reflect_identification_node)
-    def _route_after_taxonomy(state: SolutionDeepAgentState) -> str:
-        decision = state.get("_reflect_id_decision", "enrich")
-        return "enrich_specs" if decision == "enrich" else "generate_samples"
-
-    workflow.add_conditional_edges(
-        "taxonomy_normalization",
-        _route_after_taxonomy,
-        {
-            "enrich_specs":      "enrich_specs",
-            "generate_samples":  "generate_samples",
-        },
-    )
-
-    # Quality gate after enrichment (non-blocking — always proceeds)
+    # Quality gate after standards enrichment (non-blocking — always proceeds)
     workflow.add_edge("enrich_specs", "reflect_enrichment")
-    workflow.add_edge("reflect_enrichment", "generate_samples")
+    # Taxonomy normalization runs AFTER standards enrichment
+    workflow.add_edge("reflect_enrichment", "taxonomy_normalization")
+    workflow.add_edge("taxonomy_normalization", "generate_samples")
 
     workflow.add_edge("generate_samples", "compose_response")
 
@@ -2917,4 +3034,62 @@ def _register_workflow():
 
 # Register on module load
 _register_workflow()
-    
+
+# =============================================================================
+# INTERNAL HELPERS (Inlined from modification_agent)
+# =============================================================================
+
+def _fetch_user_documents(session_id: str) -> str:
+    """Fetch user documents from Azure Blob for additional context."""
+    try:
+        from common.config.azure_blob_config import get_azure_blob_connection
+        blob_conn = get_azure_blob_connection()
+        documents_collection = blob_conn["collections"]["documents"]
+        user_docs = documents_collection.find({"session_id": session_id})
+
+        if user_docs:
+            docs_summary = []
+            for doc in user_docs[:3]:
+                name = doc.get("filename", doc.get("name", "Unknown Document"))
+                summary = (
+                    f"Document: {name}\n"
+                    f"Type: {doc.get('document_type', 'General')}\n"
+                    f"Description: {doc.get('description', '')}"
+                )
+                docs_summary.append(summary)
+
+            if docs_summary:
+                return "\n---\n".join(docs_summary)
+    except Exception as e:
+        logger.warning(f"[SolutionDeepAgent] Azure Blob document fetch failed: {e}")
+
+    return "No user specific documents found."
+
+
+def _extract_field(text: str, label: str) -> str:
+    """Extract a single-line field value from structured plain-text LLM output."""
+    for line in text.splitlines():
+        if line.strip().upper().startswith(label.upper() + ":"):
+            return line.split(":", 1)[-1].strip()
+    return ""
+
+
+def _extract_block(text: str, label: str) -> str:
+    """Extract a multi-line block from plain-text output."""
+    lines = text.splitlines()
+    collecting = False
+    block = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.upper().startswith(label.upper() + ":"):
+            collecting = True
+            remainder = line.split(":", 1)[-1].strip()
+            if remainder:
+                block.append(remainder)
+            continue
+        if collecting:
+            # Stop at next uppercase label
+            if stripped and stripped.endswith(":") and stripped[:-1].isupper():
+                break
+            block.append(line)
+    return "\n".join(block).strip()

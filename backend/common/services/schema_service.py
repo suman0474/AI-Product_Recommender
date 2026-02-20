@@ -76,7 +76,7 @@ class SchemaService:
             >>> print(schema.get('mandatory'))
             ['measurement_range', 'accuracy', 'output_signal']
         """
-        if not self.collection:
+        if self.collection is None:
             return self._get_schema_fallback(product_type)
 
         normalized = self._normalize_product_type(product_type)
@@ -114,16 +114,25 @@ class SchemaService:
         return None
 
     def _extract_schema_data(self, schema_doc: Dict) -> Dict:
-        """Extract schema data from document"""
-        # If document has 'data' field, return it
-        if 'data' in schema_doc:
-            return schema_doc['data']
-
-        # Otherwise, return document without metadata fields
-        return {
-            k: v for k, v in schema_doc.items()
-            if k not in ['_id', 'metadata', 'product_type', 'created_at', 'updated_at']
+        """Extract schema data from document into standardized format"""
+        # Get the inner data dictionary
+        data = schema_doc.get('data', {})
+        
+        # Start with top-level fields
+        response = {
+            "product_type": schema_doc.get('product_type'),
+            "metadata": schema_doc.get('metadata', {})
         }
+        
+        # Merge all fields from 'data' (mandatory, optional, etc.)
+        response.update(data)
+        
+        # Ensure critical sections exist
+        response.setdefault('mandatory', [])
+        response.setdefault('optional', [])
+        response.setdefault('field_descriptions', {})
+        
+        return response
 
     def _get_schema_fallback(self, product_type: str) -> Optional[Dict]:
         """Fallback to Azure Blob if MongoDB not available"""
@@ -159,7 +168,7 @@ class SchemaService:
             ... })
             True
         """
-        if not self.collection:
+        if self.collection is None:
             print("⚠️ MongoDB not available - cannot save schema")
             return False
 
@@ -196,7 +205,7 @@ class SchemaService:
         Returns:
             True if deleted
         """
-        if not self.collection:
+        if self.collection is None:
             return False
 
         normalized = self._normalize_product_type(product_type)
@@ -222,7 +231,7 @@ class SchemaService:
             >>> print(types)
             ['Pressure Transmitter', 'Temperature Transmitter', ...]
         """
-        if not self.collection:
+        if self.collection is None:
             return self._get_all_product_types_fallback()
 
         return self.collection.distinct('product_type')
@@ -253,7 +262,7 @@ class SchemaService:
             >>> print([r['product_type'] for r in results])
             ['Pressure Transmitter', 'Temperature Transmitter', ...]
         """
-        if not self.collection:
+        if self.collection is None:
             return []
 
         cursor = self.collection.find({
@@ -329,7 +338,7 @@ class SchemaService:
 
     def get_schema_count(self) -> int:
         """Get total number of schemas"""
-        if not self.collection:
+        if self.collection is None:
             return 0
         return self.collection.count_documents({})
 

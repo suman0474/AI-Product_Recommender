@@ -200,7 +200,7 @@ class SolutionContextManager:
             self._extracted_entities.safety_requirements["atex_zone"] = f"Zone {atex_match.group(1)}"
 
         # Extract domain keywords
-        from .intent_classifier import DOMAIN_KEYWORDS
+        from .intent_analyzer import DOMAIN_KEYWORDS
         for domain, keywords in DOMAIN_KEYWORDS.items():
             for kw in keywords:
                 if kw in text_lower and domain not in self._extracted_entities.domains:

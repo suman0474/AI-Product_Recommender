@@ -240,3 +240,89 @@ class TaxonomyNormalizationAgent:
             "reverse_instruments": self.reverse_normalize(instruments, "instrument"),
             "reverse_accessories": self.reverse_normalize(accessories, "accessory"),
         }
+
+    def batch_normalize_solution_items(
+        self,
+        instruments: List[Dict[str, Any]],
+        accessories: List[Dict[str, Any]],
+        conversation_history: List[Dict[str, str]] = None,
+        user_input: str = ""
+    ) -> Dict[str, Any]:
+        """
+        Batch normalize all instruments and accessories from Solution Deep Agent.
+        
+        This is the main entry point for processing identified items from the
+        Solution workflow before they are passed to the Search workflow.
+        
+        Args:
+            instruments: List of identified instruments with 'product_type', 'quantity', etc.
+            accessories: List of identified accessories
+            conversation_history: Optional conversation context for anaphora resolution
+            user_input: Original user input for context enrichment
+            
+        Returns:
+            {
+                "standardized_instruments": [...],  # Normalized instruments
+                "standardized_accessories": [...],  # Normalized accessories
+                "normalization_stats": {
+                    "total_items": 30,
+                    "instruments_processed": 10,
+                    "accessories_processed": 20,
+                    "instruments_matched": 8,
+                    "accessories_matched": 18,
+                    "match_rate": 0.867
+                }
+            }
+        """
+        logger.info(
+            f"[TaxonomyNorm] Batch normalization: "
+            f"{len(instruments)} instruments, {len(accessories)} accessories"
+        )
+        
+        # If context is provided, use context-aware normalization
+        if conversation_history and user_input:
+            standardized_instruments = self.normalize_with_context(
+                instruments, user_input, conversation_history, "instrument"
+            )
+            standardized_accessories = self.normalize_with_context(
+                accessories, user_input, conversation_history, "accessory"
+            )
+        else:
+            # Standard normalization
+            standardized_instruments = self.normalize(instruments, "instrument")
+            standardized_accessories = self.normalize(accessories, "accessory")
+        
+        # Calculate statistics
+        total_items = len(instruments) + len(accessories)
+        instruments_matched = sum(
+            1 for item in standardized_instruments 
+            if item.get("taxonomy_matched", False)
+        )
+        accessories_matched = sum(
+            1 for item in standardized_accessories 
+            if item.get("taxonomy_matched", False)
+        )
+        
+        total_matched = instruments_matched + accessories_matched
+        match_rate = total_matched / total_items if total_items > 0 else 0.0
+        
+        stats = {
+            "total_items": total_items,
+            "instruments_processed": len(instruments),
+            "accessories_processed": len(accessories),
+            "instruments_matched": instruments_matched,
+            "accessories_matched": accessories_matched,
+            "total_matched": total_matched,
+            "match_rate": round(match_rate, 3)
+        }
+        
+        logger.info(
+            f"[TaxonomyNorm] Batch complete: {total_matched}/{total_items} matched "
+            f"({stats['match_rate']*100:.1f}%)"
+        )
+        
+        return {
+            "standardized_instruments": standardized_instruments,
+            "standardized_accessories": standardized_accessories,
+            "normalization_stats": stats
+        }

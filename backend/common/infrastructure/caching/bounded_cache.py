@@ -86,8 +86,8 @@ class BoundedCache:
 
             value, timestamp = self._cache[key]
 
-            # Check TTL expiration
-            if time.time() - timestamp > self.ttl_seconds:
+            # Check TTL expiration (if enabled)
+            if self.ttl_seconds > 0 and (time.time() - timestamp > self.ttl_seconds):
                 self._evict(key)
                 self._stats["misses"] += 1
                 return None
@@ -180,6 +180,9 @@ class BoundedCache:
         Returns:
             Number of entries removed
         """
+        if self.ttl_seconds <= 0:
+            return 0
+
         with self._lock:
             now = time.time()
             expired = [
