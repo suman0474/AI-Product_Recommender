@@ -176,7 +176,7 @@ export interface WorkflowSuggestion {
 
 export interface IntentClassificationResult {
   intent: "greeting" | "knowledgeQuestion" | "productRequirements" | "solution" | "workflow" | "chitchat" | "chat" | "other";
-  nextStep: "greeting" | "initialInput" | "solutionWorkflow" | "awaitAdditionalAndLatestSpecs" | "awaitAdvancedSpecs" | "showSummary" | "finalAnalysis" | null;
+  nextStep: "greeting" | "initialInput" | "awaitAdditionalAndLatestSpecs" | "awaitAdvancedSpecs" | "showSummary" | "finalAnalysis" | null;
   resumeWorkflow?: boolean;
   isSolution?: boolean;  // True if the input is a complex engineering challenge
   suggestWorkflow?: WorkflowSuggestion;  // Suggestion for UI to display as clickable option

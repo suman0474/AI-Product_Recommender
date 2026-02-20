@@ -313,24 +313,7 @@ export const validateRequirements = async (
 
 
 
-/**
- * Analyzes products based on user input.
- * @deprecated Use runFinalProductAnalysis for new product search workflow
- */
-export const analyzeProducts = async (
-  userInput: string
-): Promise<AnalysisResult> => {
-  try {
-    // Send the full, un-normalized userInput to /analyze so the analysis LLM
-    // receives complete context (numbers, units, and punctuation) needed
-    // for accurate product type detection and requirement matching.
-    const response = await axios.post(`/analyze`, { user_input: userInput });
-    return convertKeysToCamelCase(response.data) as AnalysisResult;
-  } catch (error: any) {
-    console.error("Analysis error:", error.response?.data || error.message);
-    throw new Error(error.response?.data?.error || "Analysis failed");
-  }
-};
+
 
 /**
  * Run final product analysis (Steps 4-5: Vendor Analysis + Ranking)
@@ -657,7 +640,7 @@ export const callAgenticSalesAgent = async (
       hasSchema: !!(dataContext?.schema)
     });
 
-    const response = await axios.post('/api/agentic/sales-agent', payload);
+    const response = await axios.post('/api/sales-agent', payload);
 
     if (!response.data.success) {
       throw new Error(response.data.error || "Sales agent response generation failed");
@@ -796,13 +779,6 @@ export const approveOrRejectUser = async (
 // ====================================================================
 
 /**
- * Calls the backend LLM agent to generate a conversational response.
- * @param step - The current conversation step (e.g., 'initialInput', 'awaitOptional').
- * @param dataContext - All collected data relevant to the current step.
- * @param userMessage - The user's most recent message.
- * @returns A promise that resolves with the LLM's text response.
- */
-/**
  * Classifies user intent and determines next workflow step
  * Uses SessionManager for workflow state (cross-tab persistence)
  */
@@ -910,47 +886,6 @@ export const classifyRoute = async (
       classification_time_ms: 0,
       timestamp: new Date().toISOString(),
       reject_message: null
-    };
-  }
-};
-
-/**
- * Generates agent response based on workflow step with enhanced response structure
- */
-export const generateAgentResponse = async (
-  step: string,
-  dataContext: any,
-  userMessage: string,
-  intent?: string,
-  searchSessionId?: string
-): Promise<AgentResponse> => {
-  try {
-    const payload: any = {
-      step,
-      dataContext,
-      userMessage,
-      intent,
-    };
-
-    // Include session ID if provided
-    if (searchSessionId) {
-      payload.search_session_id = searchSessionId;
-      console.log(`[SESSION_${searchSessionId}] Generating agent response for step: ${step}`);
-    }
-
-    const response = await axios.post(`/api/sales-agent`, payload);
-
-    // Return the enhanced response structure
-    return {
-      content: response.data.content,
-      nextStep: response.data.nextStep,
-      maintainWorkflow: response.data.maintainWorkflow
-    };
-  } catch (error: any) {
-    console.error("LLM agent response error:", error.response?.data || error.message);
-    return {
-      content: "I'm having trouble connecting to my brain right now. Please try again in a moment.",
-      nextStep: null
     };
   }
 };
@@ -1222,6 +1157,10 @@ export interface SolutionWorkflowResult {
     keyParameters?: Record<string, string>;
   };
   fieldDescriptions?: Record<string, string>;
+  // Redirect fields - set when the solution deep agent determines input is out-of-context
+  shouldRedirect?: boolean;
+  routedTo?: string;
+  intentType?: string;
 }
 
 /**
@@ -1264,6 +1203,23 @@ export const callSolutionWorkflow = async (
     // Extract the result
     const result = responseData.data?.result || responseData.data || {};
     const agenticResponse = result.response_data || result;
+
+    // Check if the solution deep agent is redirecting this input to another workflow
+    if (agenticResponse.should_redirect) {
+      console.log('[SOLUTION_WORKFLOW] Backend redirecting to:', agenticResponse.routed_to);
+      return {
+        success: true,
+        responseType: 'solution',
+        message: result.response || '',
+        instruments: [],
+        accessories: [],
+        items: [],
+        shouldRedirect: true,
+        routedTo: agenticResponse.routed_to || 'chat',
+        intentType: agenticResponse.intent_type || '',
+      };
+    }
+
     const items = agenticResponse.items || [];
 
     // Separate items into instruments and accessories
@@ -1450,12 +1406,14 @@ export interface UnifiedRoutingResult {
  * It replaces direct calls to identifyInstruments or other workflows.
  * 
  * Flow:
- * 1. Calls /api/intent to classify the user's input
- * 2. Based on intent, routes to appropriate workflow:
- *    - "solution" → callSolutionWorkflow (complex engineering challenges)
- *    - "productRequirements" → identifyInstruments (simple product requests)
- *    - "greeting" / "question" → Returns chat response
- *    - Other → Returns error or fallback
+ * 1. Calls the Solution Deep Agent (/api/agentic/solution) FIRST for ALL inputs.
+ * 2. If the deep agent determines the input is out-of-context, it internally calls
+ *    the router and returns should_redirect=true with a routed_to target.
+ * 3. Based on routed_to:
+ *    - "out_of_domain"        → Block the query with a rejection message
+ *    - "search" / "instrument_identifier" → identifyInstruments (product search)
+ *    - "chat" / "engenie_chat" / others   → callEnGenieChat (conversational)
+ * 4. If no redirect → returns the solution workflow result directly.
  * 
  * @param userInput User's input text
  * @param currentInstruments Optional - existing instruments for modification detection
@@ -1470,137 +1428,79 @@ export const routeUserInputByIntent = async (
   sessionId?: string
 ): Promise<UnifiedRoutingResult> => {
   try {
-    // Step 1: Classify the intent (Updated to use classifyRoute)
-    console.log('[INTENT_ROUTER] Starting intent classification (classifyRoute)...');
-    const routeResult = await classifyRoute(userInput, undefined, sessionId);
+    // Step 1: Call the Solution Deep Agent FIRST for ALL inputs.
+    // The deep agent handles solution context internally and calls the router
+    // only when the input is out-of-context for the ongoing solution workflow.
+    console.log('[INTENT_ROUTER] Calling Solution Deep Agent as primary entry point...');
+    const solutionResult = await callSolutionWorkflow(userInput, sessionId);
 
-    console.log('[INTENT_ROUTER] Routing result:', {
-      target: routeResult.target_workflow,
-      intent: routeResult.intent,
-      confidence: routeResult.confidence
-    });
+    // Step 2: Check if the deep agent redirected this input to another workflow
+    if (solutionResult.shouldRedirect) {
+      const routedTo = solutionResult.routedTo || 'chat';
+      console.log('[INTENT_ROUTER] Solution Deep Agent redirecting to:', routedTo);
 
-    // Map classifyRoute result to legacy intent structure for compatibility
-    let legacyIntent = routeResult.intent;
-    const target = routeResult.target_workflow;
-
-    if (target === 'solution') {
-      legacyIntent = 'solution';
-    } else if (target === 'instrument_identifier') {
-      legacyIntent = 'productRequirements';
-    } else if (target === 'engenie_chat') {
-      // Keep 'greeting', 'chitchat' as is, map others to 'knowledgeQuestion'
-      if (!['greeting', 'chitchat', 'other'].includes(legacyIntent)) {
-        legacyIntent = 'knowledgeQuestion';
-      }
-    } else if (target === 'out_of_domain') {
-      legacyIntent = 'other';
-    } else if (target === 'greeting') {
-      legacyIntent = 'greeting';
-    } else if (target === 'conversational') {
-      legacyIntent = 'chitchat';
-    }
-
-    // Construct workflow suggestion manually (backend agent doesn't send it in to_dict)
-    const suggestion = (legacyIntent === 'knowledgeQuestion') ? {
-      name: 'EnGenie Chat',
-      workflow_id: 'engenie_chat',
-      description: 'Get answers about products, standards, and industrial topics',
-      action: 'openEnGenieChat'
-    } : undefined;
-
-    // Create compatibility object
-    const intentResult = {
-      intent: legacyIntent,
-      isSolution: target === 'solution',
-      suggestWorkflow: suggestion,
-      nextStep: null
-    };
-
-    console.log('[INTENT_ROUTER] Mapped legacy intent:', intentResult.intent);
-
-    // Step 2: Route based on intent
-    const intent = intentResult.intent;
-    const isSolution = intentResult.isSolution || intent === 'solution';
-
-    // ROUTE 1: Solution Workflow (complex engineering challenges)
-    if (isSolution) {
-      console.log('[INTENT_ROUTER] 🔧 Routing to SOLUTION workflow');
-
-      const solutionResult = await callSolutionWorkflow(userInput, sessionId);
-
-      return {
-        intent: 'solution',
-        responseType: 'solution',
-        message: solutionResult.message,
-        instruments: solutionResult.instruments,
-        accessories: solutionResult.accessories,
-        projectName: solutionResult.projectName,
-        awaitingSelection: solutionResult.awaitingSelection,
-        items: solutionResult.items,
-        isSolution: true,
-        fieldDescriptions: solutionResult.fieldDescriptions,
-        field_descriptions: solutionResult.fieldDescriptions,
-      };
-    }
-
-    // ROUTE 2: Product Requirements (simple instrument identification)
-    if (intent === 'productRequirements') {
-      console.log('[INTENT_ROUTER] 📦 Routing to INSTRUMENT IDENTIFIER workflow');
-
-      const identifyResult = await identifyInstruments(
-        userInput,
-        currentInstruments,
-        currentAccessories,
-        sessionId
-      );
-
-      return {
-        intent: 'productRequirements',
-        responseType: identifyResult.responseType || 'requirements',
-        message: identifyResult.message,
-        instruments: identifyResult.instruments,
-        accessories: identifyResult.accessories,
-        projectName: identifyResult.projectName,
-        awaitingSelection: identifyResult.awaitingSelection,
-        items: identifyResult.items,
-        isSolution: false,
-        changesMade: identifyResult.changesMade,
-      };
-    }
-
-    // ROUTE 3: Greeting - Use EnGenie Chat for friendly response
-    if (intent === 'greeting' || intent === 'chitchat' || intent === 'other') {
-      console.log(`[INTENT_ROUTER] 👋 Routing to ENGENIE CHAT for ${intent}`);
-
-      // OPTIMIZATION: Use direct response if available (from fast path or LLM classifier)
-      if (routeResult.direct_response) {
-        console.log(`[INTENT_ROUTER] Using direct response for ${intent}`);
+      // ROUTE A: Out-of-domain - block the query immediately
+      if (routedTo === 'out_of_domain') {
+        console.log('[INTENT_ROUTER] OUT_OF_DOMAIN detected - blocking query');
         return {
-          intent: intent as any,
-          responseType: 'greeting', // Use 'greeting' type for simple text responses
-          message: routeResult.direct_response,
+          intent: 'out_of_domain',
+          responseType: 'error',
+          message:
+            "I can only help with industrial instrumentation and process control equipment. " +
+            "This includes transmitters, sensors, valves, actuators, flow meters, and similar devices.\n\n" +
+            "I cannot help with:\n" +
+            "- General knowledge questions (weather, sports, entertainment)\n" +
+            "- PLC/SCADA programming or control logic\n" +
+            "- Pricing, purchasing, or availability\n" +
+            "- Installation, troubleshooting, or maintenance\n\n" +
+            "Please describe the instrumentation or equipment you need.",
           instruments: currentInstruments || [],
           accessories: currentAccessories || [],
           isSolution: false,
         };
       }
 
+      // ROUTE B: Product search / instrument identification
+      if (routedTo === 'search' || routedTo === 'instrument_identifier') {
+        console.log('[INTENT_ROUTER] Routing to INSTRUMENT IDENTIFIER workflow');
+        const identifyResult = await identifyInstruments(
+          userInput,
+          currentInstruments,
+          currentAccessories,
+          sessionId
+        );
+        return {
+          intent: 'productRequirements',
+          responseType: identifyResult.responseType || 'requirements',
+          message: identifyResult.message,
+          instruments: identifyResult.instruments,
+          accessories: identifyResult.accessories,
+          projectName: identifyResult.projectName,
+          awaitingSelection: identifyResult.awaitingSelection,
+          items: identifyResult.items,
+          isSolution: false,
+          changesMade: identifyResult.changesMade,
+        };
+      }
 
+      // ROUTE C: Chat / conversational (greeting, chitchat, knowledge question)
+      console.log('[INTENT_ROUTER] Routing to ENGENIE CHAT for:', routedTo);
       try {
         const chatResult = await callEnGenieChat(userInput, sessionId);
+        const intentType = solutionResult.intentType || routedTo;
+        const isGreeting = ['greeting', 'chitchat', 'conversational'].includes(intentType);
         return {
-          intent: 'greeting',
-          responseType: 'greeting',
-          message: chatResult.response_text || "Hello! I'm Engenie, your industrial procurement assistant. How can I help you find the right instruments for your project today?",
+          intent: intentType,
+          responseType: isGreeting ? 'greeting' : 'question',
+          message: chatResult.response_text ||
+            "Hello! I'm Engenie, your industrial procurement assistant. How can I help you today?",
           instruments: currentInstruments || [],
           accessories: currentAccessories || [],
           isSolution: false,
         };
       } catch (e) {
-        // Fallback for greetings if EnGenie Chat fails
         return {
-          intent: 'greeting',
+          intent: routedTo,
           responseType: 'greeting',
           message: "Hello! I'm Engenie, your industrial procurement assistant. How can I help you find the right instruments for your project today?",
           instruments: currentInstruments || [],
@@ -1610,118 +1510,21 @@ export const routeUserInputByIntent = async (
       }
     }
 
-    // ROUTE 4: Knowledge Question - Suggest EnGenie Chat (don't auto-route)
-    if (intent === 'knowledgeQuestion') {
-      console.log('[INTENT_ROUTER] 💡 Detected knowledge question - suggesting EnGenie Chat');
-
-      // Check if there's a workflow suggestion from the backend
-      const suggestion = intentResult.suggestWorkflow;
-
-      if (suggestion) {
-        // Return suggestion for UI to display as clickable option
-        return {
-          intent: 'knowledgeQuestion',
-          responseType: 'workflowSuggestion',
-          message: `This looks like a question I can help with. Click below to open **${suggestion.name}** for detailed answers.`,
-          instruments: currentInstruments || [],
-          accessories: currentAccessories || [],
-          isSolution: false,
-          suggestWorkflow: suggestion,  // Frontend will display this as clickable
-        };
-      }
-
-      // Fallback: if no suggestion, still don't auto-route
-      return {
-        intent: 'knowledgeQuestion',
-        responseType: 'workflowSuggestion',
-        message: 'This looks like a product or knowledge question. Click **EnGenie Chat** to get detailed answers.',
-        instruments: currentInstruments || [],
-        accessories: currentAccessories || [],
-        isSolution: false,
-        suggestWorkflow: {
-          name: 'EnGenie Chat',
-          workflow_id: 'engenie_chat',
-          description: 'Get answers about products, standards, and industrial topics',
-          action: 'openEnGenieChat'
-        },
-      };
-    }
-
-    // ROUTE 5: Workflow (continuing existing workflow)
-    if (intent === 'workflow') {
-      console.log('[INTENT_ROUTER] 🔄 Continuing WORKFLOW');
-      const identifyResult = await identifyInstruments(
-        userInput,
-        currentInstruments,
-        currentAccessories,
-        sessionId
-      );
-
-      return {
-        intent: 'workflow',
-        responseType: identifyResult.responseType || 'requirements',
-        message: identifyResult.message,
-        instruments: identifyResult.instruments,
-        accessories: identifyResult.accessories,
-        projectName: identifyResult.projectName,
-        isSolution: false,
-      };
-    }
-
-    // ROUTE 6: Chitchat / Other conversational intents - Use EnGenie Chat
-    if (intent === 'chitchat' || intent === 'other' || intent === 'chat') {
-      console.log('[INTENT_ROUTER] 💬 Routing to ENGENIE CHAT for conversational intent:', intent);
-
-      try {
-        const chatResult = await callEnGenieChat(userInput, sessionId);
-        return {
-          intent: intent,
-          responseType: 'question',
-          message: chatResult.response_text || "I'm here to help with industrial instrumentation questions. How can I assist you?",
-          instruments: currentInstruments || [],
-          accessories: currentAccessories || [],
-          isSolution: false,
-        };
-      } catch (e) {
-        // NO FALLBACK - stay isolated in EnGenie Chat
-        console.error('[INTENT_ROUTER] EnGenie Chat failed for chitchat:', e);
-        return {
-          intent: intent,
-          responseType: 'error',
-          message: "I'm here to help with industrial instrumentation and procurement. Please describe what instruments or equipment you're looking for.",
-          instruments: currentInstruments || [],
-          accessories: currentAccessories || [],
-          isSolution: false,
-        };
-      }
-    }
-
-    // ROUTE 7: Unhandled intents - Route to EnGenie Chat (NOT instrument identifier)
-    // This ensures EnGenie Chat workflow stays isolated
-    console.log('[INTENT_ROUTER] ⚠️ Unhandled intent:', intent, '- routing to EnGenie Chat');
-
-    try {
-      const chatResult = await callEnGenieChat(userInput, sessionId);
-      return {
-        intent: intent || 'chat',
-        responseType: 'question',
-        message: chatResult.response_text || "I'm here to help with industrial instrumentation. What would you like to know?",
-        instruments: currentInstruments || [],
-        accessories: currentAccessories || [],
-        isSolution: false,
-      };
-    } catch (e) {
-      // NO FALLBACK to other workflows - stay in EnGenie Chat
-      console.error('[INTENT_ROUTER] EnGenie Chat fallback failed:', e);
-      return {
-        intent: intent || 'chat',
-        responseType: 'error',
-        message: 'I encountered an issue. Please try rephrasing your question about industrial instrumentation.',
-        instruments: currentInstruments || [],
-        accessories: currentAccessories || [],
-        isSolution: false,
-      };
-    }
+    // Step 3: No redirect — this was a valid solution workflow response
+    console.log('[INTENT_ROUTER] Solution Deep Agent returned solution result');
+    return {
+      intent: 'solution',
+      responseType: 'solution',
+      message: solutionResult.message,
+      instruments: solutionResult.instruments,
+      accessories: solutionResult.accessories,
+      projectName: solutionResult.projectName,
+      awaitingSelection: solutionResult.awaitingSelection,
+      items: solutionResult.items,
+      isSolution: true,
+      fieldDescriptions: solutionResult.fieldDescriptions,
+      field_descriptions: solutionResult.fieldDescriptions,
+    };
 
   } catch (error: any) {
     console.error("[INTENT_ROUTER] Error:", error.message);
@@ -2066,10 +1869,12 @@ export const callAgenticProductSearch = async (
   message: string,
   threadId?: string,
   searchSessionId?: string,
-  productType?: string,           // NEW: Product type for schema lookup
-  sourceWorkflow?: string,        // NEW: Source workflow identifier
-  itemThreadId?: string,          // CRITICAL: Item thread ID for resuming branch
-  workflowThreadIdOverride?: string // CRITICAL: Override workflow thread ID
+  productType?: string,              // Product type for schema lookup
+  sourceWorkflow?: string,           // Source workflow identifier
+  itemThreadId?: string,             // CRITICAL: Item thread ID for resuming branch
+  workflowThreadIdOverride?: string, // CRITICAL: Override workflow thread ID
+  parentSessionId?: string,          // Solution session that spawned this search
+  parentInstanceId?: string          // Solution workflow_thread_id for observability
 ): Promise<AgenticProductSearchResponse> => {
   try {
     // Get thread context from SessionManager
@@ -2117,6 +1922,14 @@ export const callAgenticProductSearch = async (
       payload.source_workflow = sourceWorkflow;
     }
 
+    // Parent linkage — forward when item was spawned by Solution Deep Agent
+    if (parentSessionId) {
+      payload.parent_session_id = parentSessionId;
+    }
+    if (parentInstanceId) {
+      payload.parent_instance_id = parentInstanceId;
+    }
+
     console.log('[AGENTIC_PS] Calling product search:', {
       messagePreview: message.substring(0, 50),
       mainThreadId,
@@ -2124,6 +1937,8 @@ export const callAgenticProductSearch = async (
       itemThreadId,
       productType,
       sourceWorkflow,
+      parentSessionId: parentSessionId?.substring(0, 16),
+      parentInstanceId: parentInstanceId?.substring(0, 16),
       isResume: !!threadId,
       isResumeExistingBranch: !!itemThreadId
     });
@@ -2196,14 +2011,14 @@ export const callAgenticProductSearch = async (
  * - Ready for Step 3: Vendor Search
  * 
  * @param userInput User's requirements description
- * @param source Source of the request: "direct", "instruments_identifier", or "solution_workflow"
+ * @param source Source of the request: "direct", "instrument_identifier", or "solution"
  * @param sourceData Optional data from source workflow
  * @param searchSessionId Optional session ID
  * @returns Product search workflow result
  */
 export const callProductSearchWorkflow = async (
   userInput: string,
-  source: "direct" | "instruments_identifier" | "solution_workflow" = "direct",
+  source: "direct" | "instrument_identifier" | "solution" = "direct",
   sourceData?: any,
   searchSessionId?: string
 ): Promise<any> => {

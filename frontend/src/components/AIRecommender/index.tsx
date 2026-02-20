@@ -18,7 +18,6 @@ import ChatInterface from "./ChatInterface";
 import RightPanel from "./RightPanel";
 import {
   validateRequirements,
-  analyzeProducts,
   runFinalProductAnalysis,
   getRequirementSchema,
   structureRequirements,
@@ -1042,11 +1041,34 @@ const AIRecommender = ({
     }
   }, [collectedData, state.productType, performAnalysis, streamAssistantMessage, addMessage, searchSessionId, isDirectSearch]);
 
-  // Helper function to run direct product search from RightPanel
-  const handleRunProductSearch = useCallback(async (sampleInput: string) => {
+  // Helper function to run direct product search from RightPanel.
+  // parentSessionId / parentInstanceId are forwarded from the solution BOM item
+  // so the Search Deep Agent can be traced back to its parent Solution run.
+  // When not supplied directly, they are looked up from state.identifiedItems
+  // by matching on sampleInput — avoids changing the RightPanel callback chain.
+  const handleRunProductSearch = useCallback(async (
+    sampleInput: string,
+    parentSessionId?: string,
+    parentInstanceId?: string,
+  ) => {
+    // Resolve parent IDs: prefer explicit args, then look up from BOM items
+    let resolvedParentSessionId = parentSessionId;
+    let resolvedParentInstanceId = parentInstanceId;
+    if (!resolvedParentSessionId && state.identifiedItems) {
+      const matchedItem = state.identifiedItems.find(
+        (item: any) => (item.sampleInput || item.sample_input) === sampleInput
+      );
+      if (matchedItem) {
+        resolvedParentSessionId = matchedItem.parent_session_id || matchedItem.parentSessionId;
+        resolvedParentInstanceId = matchedItem.parent_instance_id || matchedItem.parentInstanceId;
+      }
+    }
+
     console.log(`[${searchSessionId}] ====== PRODUCT SEARCH TRIGGERED ======`);
     console.log(`[${searchSessionId}] sampleInput: ${sampleInput?.substring(0, 100)}...`);
     console.log(`[${searchSessionId}] searchSessionId: ${searchSessionId}`);
+    console.log(`[${searchSessionId}] parentSessionId: ${resolvedParentSessionId?.substring(0, 16) ?? 'standalone'}`);
+    console.log(`[${searchSessionId}] parentInstanceId: ${resolvedParentInstanceId?.substring(0, 16) ?? 'none'}`);
 
     setState((prev) => ({ ...prev, isLoading: true }));
     // Add user message to chat to reflect the action
@@ -1082,8 +1104,10 @@ const AIRecommender = ({
         searchSessionId,
         effectiveProductType,
         sourceWorkflow,
-        propItemThreadId,  // CRITICAL: Pass item thread ID for branch resumption
-        propWorkflowThreadId  // CRITICAL: Pass workflow thread ID for context
+        propItemThreadId,              // CRITICAL: Pass item thread ID for branch resumption
+        propWorkflowThreadId,          // CRITICAL: Pass workflow thread ID for context
+        resolvedParentSessionId,       // Solution session that spawned this search
+        resolvedParentInstanceId,      // Solution workflow_thread_id for observability
       );
 
       console.log(`[${searchSessionId}] [AGENTIC_PS] Response received:`, {
@@ -1158,9 +1182,16 @@ const AIRecommender = ({
           });
 
           // Set workflow step based on current phase - use valid WorkflowStep values
-          if (result.current_phase === 'await_missing_fields' || result.current_phase === 'collect_missing_fields') {
+          if (
+            result.current_phase === 'await_missing_fields' ||
+            result.current_phase === 'collect_missing_fields' ||
+            result.current_phase === 'hil_schema_review'   // HIL Checkpoint 1
+          ) {
             setCurrentStep('awaitMissingInfo');
-          } else if (result.current_phase === 'await_advanced_params') {
+          } else if (
+            result.current_phase === 'await_advanced_params' ||
+            result.current_phase === 'hil_advanced_review'  // HIL Checkpoint 2
+          ) {
             setCurrentStep('awaitAdditionalAndLatestSpecs');
           } else {
             // Map other phases to valid WorkflowStep values
@@ -1213,9 +1244,81 @@ const AIRecommender = ({
       const trimmedInput = userInput.trim();
       if (!trimmedInput) return;
 
-      // NEW: Intercept Direct Search (manual trigger) - Route to Product Search Workflow
-      // This ensures we use the correct workflow context (thread IDs) passed via props
-      if (isDirectSearch && state.messages.length === 0) {
+      // NEW: Intercept Direct Search — ALL messages in isDirectSearch mode bypass
+      // classifyRoute and the old multi-phase workflow entirely.
+      // classifyRoute must NEVER be invoked in this context — it would misroute
+      // short follow-ups ("yes", "continue") to EnGenie Chat or out_of_domain.
+      if (isDirectSearch) {
+        // If a HIL checkpoint is active (workflow paused), resume it with the user's message.
+        // Otherwise treat as a new search query.
+        if (productSearchWorkflow?.awaitingUserInput && productSearchWorkflow?.threadId) {
+          console.log(`[${searchSessionId}] [HIL] Resuming paused workflow — decision: "${trimmedInput}"`);
+          setState((prev) => ({ ...prev, isLoading: true }));
+          addMessage({ type: "user", content: trimmedInput, role: undefined });
+          setState((prev) => ({ ...prev, inputValue: "" }));
+          try {
+            const resumeResult = await resumeProductSearch(
+              productSearchWorkflow.threadId,
+              trimmedInput,   // user_decision
+              undefined,       // userProvidedFields (text decision only; backend merges on re-call if needed)
+              trimmedInput,
+              searchSessionId,
+            );
+            // Reuse handleRunProductSearch result processing by calling it as a pseudo-result
+            // Instead, process directly like handleRunProductSearch does
+            if (resumeResult?.success) {
+              if (resumeResult.schema) {
+                const schemaForSidebar = {
+                  mandatoryRequirements: resumeResult.schema.mandatoryRequirements || resumeResult.schema.mandatory || {},
+                  optionalRequirements: resumeResult.schema.optionalRequirements || resumeResult.schema.optional || {},
+                  default: {
+                    mandatory: resumeResult.schema.mandatoryRequirements || resumeResult.schema.mandatory || {},
+                    optional: resumeResult.schema.optionalRequirements || resumeResult.schema.optional || {}
+                  }
+                };
+                setState((prev) => ({
+                  ...prev,
+                  requirementSchema: schemaForSidebar as any,
+                  currentProductType: resumeResult.product_type || prev.currentProductType,
+                  productType: resumeResult.product_type || prev.productType
+                }));
+                setIsDocked(false);
+              }
+              if (resumeResult.awaiting_user_input) {
+                // Another HIL checkpoint — update tracking
+                setProductSearchWorkflow({
+                  threadId: resumeResult.thread_id || productSearchWorkflow.threadId,
+                  currentPhase: resumeResult.current_phase,
+                  awaitingUserInput: true,
+                  missingFields: resumeResult.missing_fields || []
+                });
+              } else {
+                // Workflow completed — clear HIL tracking
+                setProductSearchWorkflow({ threadId: null, currentPhase: null, awaitingUserInput: false, missingFields: [] });
+              }
+              if (resumeResult.sales_agent_response) {
+                await streamAssistantMessage(resumeResult.sales_agent_response);
+              }
+              // Show ranked products if workflow completed
+              if (resumeResult.ranked_products?.length > 0) {
+                setState((prev) => ({
+                  ...prev,
+                  analysisResult: { overallRanking: { rankedProducts: resumeResult.ranked_products } } as any,
+                  identifiedItems: null
+                }));
+              }
+            } else {
+              await streamAssistantMessage(`Sorry, resume failed: ${resumeResult?.error || 'Unknown error'}`);
+            }
+          } catch (err) {
+            console.error(`[${searchSessionId}] [HIL] Resume failed:`, err);
+            await streamAssistantMessage("Sorry, I couldn't resume the search workflow. Please try your search again.");
+          } finally {
+            setState((prev) => ({ ...prev, isLoading: false }));
+          }
+          return;
+        }
+        // No active HIL checkpoint — treat as a fresh search query
         handleRunProductSearch(trimmedInput);
         setState((prev) => ({ ...prev, inputValue: "" }));
         return;
@@ -1619,13 +1722,13 @@ const AIRecommender = ({
 
           const message = targetPage === 'search'
             ? `This looks like a **simple product search** query.\n\n` +
-              `For better results with single-product searches, I recommend using our **Search** page.\n\n` +
-              `<a href="${targetUrl}" target="${windowName}" rel="noopener noreferrer" style="display: inline-block; background: #0F6CBD; color: white; padding: 10px 20px; border-radius: 6px; text-decoration: none; font-weight: 500; margin: 10px 0; box-shadow: 0 4px 15px rgba(15, 108, 189, 0.4);">🔍 Open Search Page</a>\n\n` +
-              `_Or, if you'd like to continue with a complete solution here, please describe your full system requirements._`
+            `For better results with single-product searches, I recommend using our **Search** page.\n\n` +
+            `<a href="${targetUrl}" target="${windowName}" rel="noopener noreferrer" style="display: inline-block; background: #0F6CBD; color: white; padding: 10px 20px; border-radius: 6px; text-decoration: none; font-weight: 500; margin: 10px 0; box-shadow: 0 4px 15px rgba(15, 108, 189, 0.4);">🔍 Open Search Page</a>\n\n` +
+            `_Or, if you'd like to continue with a complete solution here, please describe your full system requirements._`
             : `This looks like a **complex solution** requiring multiple instruments.\n\n` +
-              `For better results with multi-instrument systems, I recommend using our **Solution** page.\n\n` +
-              `<a href="${targetUrl}" target="${windowName}" rel="noopener noreferrer" style="display: inline-block; background: #0F6CBD; color: white; padding: 10px 20px; border-radius: 6px; text-decoration: none; font-weight: 500; margin: 10px 0; box-shadow: 0 4px 15px rgba(15, 108, 189, 0.4);">📋 Open Solution Page</a>\n\n` +
-              `_Or, if you'd like a simple search instead, please specify a single product requirement._`;
+            `For better results with multi-instrument systems, I recommend using our **Solution** page.\n\n` +
+            `<a href="${targetUrl}" target="${windowName}" rel="noopener noreferrer" style="display: inline-block; background: #0F6CBD; color: white; padding: 10px 20px; border-radius: 6px; text-decoration: none; font-weight: 500; margin: 10px 0; box-shadow: 0 4px 15px rgba(15, 108, 189, 0.4);">📋 Open Solution Page</a>\n\n` +
+            `_Or, if you'd like a simple search instead, please specify a single product requirement._`;
 
           await streamAssistantMessage(message);
           setState((prev) => ({ ...prev, isLoading: false }));

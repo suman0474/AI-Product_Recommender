@@ -1,0 +1,9 @@
+{
+  "run_id": "idx_1771521031",
+  "timestamp": "2026-02-19T22:42:02.244150",
+  "total_duration": 91.24076652526855,
+  "agent_timings": {},
+  "final_quality_score": 0.4763833333333333,
+  "deployment_ready": false,
+  "product_type": "temperature sensor"
+}

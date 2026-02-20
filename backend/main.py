@@ -38,46 +38,54 @@ logging.getLogger("azure.identity").setLevel(logging.WARNING)
 from googleapiclient.discovery import build
 
 # --- NEW IMPORTS FOR AUTHENTICATION ---
-from core.auth.auth_models import db, User
-from core.auth.auth_utils import hash_password, check_password
+from common.core.auth.auth_models import db, User
+from common.core.auth.auth_utils import hash_password, check_password
 
 # --- Cosmos DB Project Management ---
-from services.azure.cosmos_manager import cosmos_project_manager
-from agentic.infrastructure.utils.auth_decorators import login_required, admin_required
+from common.services.azure.cosmos_manager import cosmos_project_manager
+from common.utils.auth_decorators import login_required, admin_required
 
 # --- LLM CHAINING IMPORTS ---
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
-from core.chaining import setup_langchain_components, create_analysis_chain, invoke_additional_requirements_chain
-# import prompts  # DEPRECATED: Replaced by direct prompts_library usage below
-from prompts_library import load_prompt, load_prompt_sections
+from common.core.chaining import setup_langchain_components, create_analysis_chain, invoke_additional_requirements_chain
+
+# from common.prompts_library import load_prompt, load_prompt_sections # REMOVED
+
+from common.prompts import (
+    INTENT_CLASSIFICATION_PROMPTS,
+    INTENT_PROMPTS,
+    INDEXING_AGENT_PROMPTS,
+    SOLUTION_DEEP_AGENT_PROMPTS,
+    SCHEMA_VALIDATION_PROMPT,
+    ANALYSIS_TOOL_VENDOR_ANALYSIS_PROMPT
+)
 
 # --- PROMPT LIBRARY SETUP ---
 # Load consolidated prompt sections
-_SALES_AGENT_PROMPTS = load_prompt_sections("sales_agent_prompts", default_section="SALES_CONSULTANT")
-_SALES_WORKFLOW_PROMPTS = load_prompt_sections("sales_workflow_prompts", default_section="GREETING")
-_INTENT_CLASSIFICATION_PROMPTS = load_prompt_sections("intent_classification_prompts", default_section="CLASSIFICATION")
-_INTENT_ANALYSIS_PROMPTS = load_prompt_sections("intent_prompts", default_section="REQUIREMENTS_EXTRACTION")
-_PPI_PROMPTS = load_prompt_sections("potential_product_index_prompts", default_section="PRODUCT_INDEX")
-_PRODUCT_ID_PROMPTS = load_prompt_sections("product_identification_prompt", default_section="INSTRUMENT_IDENTIFICATION")
+# Note: sales_workflow_prompts was consolidated into sales_agent_prompts
+# _SALES_AGENT_PROMPTS = load_prompt_sections("sales_agent_prompts", default_section="SALES_CONSULTANT")
+# _INTENT_CLASSIFICATION_PROMPTS = load_prompt_sections("intent_classification_prompts", default_section="CLASSIFICATION")
+# _INTENT_ANALYSIS_PROMPTS = load_prompt_sections("intent_prompts", default_section="REQUIREMENTS_EXTRACTION")
+# _PPI_PROMPTS = load_prompt_sections("indexing_agent_prompts", default_section="PRODUCT_INDEX")
+# _PRODUCT_ID_PROMPTS = load_prompt_sections("solution_deep_agent_prompts", default_section="INSTRUMENT_IDENTIFICATION")
 
 
 # Define Constants for Main usage
-SALES_AGENT_MAIN_PROMPT = _SALES_AGENT_PROMPTS["SALES_CONSULTANT"]
-SALES_AGENT_GREETING_PROMPT = _SALES_WORKFLOW_PROMPTS["GREETING"]
-SALES_AGENT_FINAL_ANALYSIS_PROMPT = _SALES_AGENT_PROMPTS["SALES_CONSULTANT"]
-SALES_AGENT_ERROR_PROMPT = _SALES_AGENT_PROMPTS["SALES_CONSULTANT"]
+SALES_AGENT_MAIN_PROMPT = ""
+SALES_AGENT_GREETING_PROMPT = ""
+SALES_AGENT_FINAL_ANALYSIS_PROMPT = ""
+SALES_AGENT_ERROR_PROMPT = ""
 
-SUMMARY_GENERATION_PROMPT = _SALES_WORKFLOW_PROMPTS["SUMMARY_GENERATION"]
-PARAMETER_SELECTION_PROMPT = _SALES_WORKFLOW_PROMPTS["PARAMETER_SELECTION"]
-REQUIREMENTS_EXTRACTION_PROMPT = _INTENT_ANALYSIS_PROMPTS["REQUIREMENTS_EXTRACTION"]
+SUMMARY_GENERATION_PROMPT = ""
+PARAMETER_SELECTION_PROMPT = ""
+REQUIREMENTS_EXTRACTION_PROMPT = INTENT_PROMPTS
 
-CLASSIFICATION_PROMPT = _INTENT_CLASSIFICATION_PROMPTS["CLASSIFICATION"]
-IDENTIFY_INSTRUMENT_PROMPT = _PRODUCT_ID_PROMPTS.get("INSTRUMENT_IDENTIFICATION", "")
-IDENTIFY_QUESTION_PROMPT = load_prompt("question_classification_prompt")
-VALIDATION_PROMPT = load_prompt("schema_validation_prompt")
-VENDOR_ANALYSIS_PROMPT = load_prompt("analysis_tool_vendor_analysis_prompt")
+CLASSIFICATION_PROMPT = INTENT_CLASSIFICATION_PROMPTS["DEFAULT"]
+IDENTIFY_INSTRUMENT_PROMPT = SOLUTION_DEEP_AGENT_PROMPTS.get("INSTRUMENT_IDENTIFICATION", "")
+VALIDATION_PROMPT = SCHEMA_VALIDATION_PROMPT
+VENDOR_ANALYSIS_PROMPT = ANALYSIS_TOOL_VENDOR_ANALYSIS_PROMPT
 
 
 VALIDATION_ALERT_INITIAL_PROMPT = "Please review the validation results."
@@ -85,28 +93,27 @@ VALIDATION_ALERT_REPEAT_PROMPT = "Please address the validation issues."
 FEEDBACK_POSITIVE_PROMPT = "Thank you for your positive feedback!"
 FEEDBACK_NEGATIVE_PROMPT = "Thank you for your feedback. We'll use it to improve."
 FEEDBACK_COMMENT_PROMPT = "Thank you for your comment: {comment}"
-MANUFACTURER_DOMAIN_PROMPT = _PPI_PROMPTS["VENDOR_DISCOVERY"]
+MANUFACTURER_DOMAIN_PROMPT = INDEXING_AGENT_PROMPTS["VENDOR_DISCOVERY"]
 
 
-from core.loading import load_requirements_schema, build_requirements_schema_from_web
+from common.core.loading import load_requirements_schema, build_requirements_schema_from_web
 from flask_session import Session
 
 # Import latest advanced specifications functionality
-from advanced_parameters import discover_advanced_parameters
 
 # Import Azure Blob utilities (MongoDB API compatible)
 # Import Azure Blob utilities
-from services.azure.blob_utils import azure_blob_file_manager
+from common.services.azure.blob_utils import azure_blob_file_manager
 
 # PHASE 3: Service Layer Imports (MongoDB + Azure Blob Hybrid)
 # These services provide transparent fallback from MongoDB to Azure Blob
 try:
-    from services.schema_service import schema_service
-    from services.vendor_service import vendor_service
-    from services.project_service import project_service
-    from services.document_service import document_service
-    from services.image_service import image_service
-    from core.mongodb_manager import mongodb_manager
+    from common.services.schema_service import schema_service
+    from common.services.vendor_service import vendor_service
+    from common.services.project_service import project_service
+    from common.services.document_service import document_service
+    from common.services.image_service import image_service
+    from common.core.mongodb_manager import mongodb_manager
     logging.info("[INIT] ✓ Service layer loaded successfully (MongoDB + Azure Blob hybrid)")
 except ImportError as e:
     logging.warning(f"[INIT] ⚠ Service layer not available: {e}")
@@ -308,39 +315,58 @@ Session(app)
 
 
 # --- Initialize Rate Limiting ---
-from rate_limiter import init_limiter
+from common.infrastructure.rate_limiter import init_limiter
 limiter = init_limiter(app)
 logging.info("Rate limiting initialized successfully")
 
 # --- Import and Register Agentic Workflow Blueprint ---
-from agentic.infrastructure.api.main_api import agentic_bp
+from common.infrastructure.api.main_api import agentic_bp
 app.register_blueprint(agentic_bp)
 logging.info("Agentic workflow blueprint registered at /api/agentic")
 
 # --- Import and Register Deep Agent Blueprint ---
-from agentic.deep_agent.api import deep_agent_bp
+from common.agentic.deep_agent.api import deep_agent_bp
 app.register_blueprint(deep_agent_bp, url_prefix='/api')
 logging.info("Deep Agent blueprint registered at /api/deep-agent")
 
+# --- Import and Register Product Search Blueprint (Phase C) ---
+try:
+    from product_search.product_search_api import product_search_bp
+    app.register_blueprint(product_search_bp)
+    logging.info("Product Search blueprint registered at /api/product-search/*")
+except ImportError as e:
+    logging.warning(f"Product Search blueprint not available: {e}")
+
 # --- Import and Register EnGenie Chat API Blueprint ---
-from agentic.workflows.engenie_chat.engenie_chat_api import engenie_chat_bp
+from chat.engenie_chat_api import engenie_chat_bp
 app.register_blueprint(engenie_chat_bp)
 logging.info("EnGenie Chat API blueprint registered at /api/engenie-chat")
 
 # --- Import and Register Tools API Blueprint ---
-from tools.api import tools_bp
+from common.tools.api import tools_bp
 app.register_blueprint(tools_bp, url_prefix='/api/tools')
 logging.info("Tools API blueprint registered at /api/tools")
 
 
+# --- Import and Register Sales Agent Blueprint ---
+# --- Import and Register Sales Agent Blueprint (Deep Agentic Workflow) ---
+# Direct registration to avoid circular dependencies
+try:
+    from common.infrastructure.api.sales_agent_api import sales_agent_bp
+    app.register_blueprint(sales_agent_bp, url_prefix='/api/sales-agent')
+    logging.info("Sales Agent blueprint registered at /api/sales-agent")
+except ImportError as e:
+    logging.warning(f"Sales Agent blueprint not available: {e}")
+
 # --- Import and Register Session API Blueprints ---
-from agentic.infrastructure.api.session import register_session_blueprints
+from common.infrastructure.api.session import register_session_blueprints
 register_session_blueprints(app)
 logging.info("Session and Instance blueprints registered")
 
 
 # LangChain and Utility Imports
-from api_utils import (
+# Note: api_utils was consolidated into agentic.infrastructure.api.utils
+from common.infrastructure.api.utils import (
     convert_keys_to_camel_case,
     clean_empty_values,
     map_provided_to_schema,
@@ -353,12 +379,12 @@ from api_utils import (
 # =========================================================================
 # --- Import and Register Resource Monitoring Blueprint ---
 try:
-    from agentic.resource_monitoring_api import resource_bp
+    from common.infrastructure.api.monitoring import resource_bp
     app.register_blueprint(resource_bp)
     logging.info("Resource Monitoring blueprint registered at /api/resources")
 except ImportError:
     logging.warning("Resource Monitoring API not available")
-from core.extraction_engine import (
+from common.services.extraction.extraction_engine import (
     extract_data_from_pdf,
     send_to_language_model,
     aggregate_results,
@@ -369,7 +395,7 @@ from core.extraction_engine import (
 )
 
 # Import standardization utilities
-from services.products.standardization import (
+from common.services.products.standardization import (
     standardize_vendor_analysis_result,
     standardize_ranking_result,
     enhance_submodel_mapping,
@@ -560,7 +586,7 @@ def api_intent():
     # - LLM-based intent classification
     # - Workflow routing decisions
     # =========================================================================
-    from agentic.intent_classification_routing_agent import (
+    from common.agentic.intent_classification_routing_agent import (
         IntentClassificationRoutingAgent,
         WorkflowTarget,
         get_workflow_memory
@@ -918,8 +944,8 @@ def database_health():
 
         # Check MongoDB
         try:
-            from core.mongodb_manager import mongodb_manager
-            from services.azure.cosmos_manager import cosmos_project_manager
+            from common.core.mongodb_manager import mongodb_manager
+            from common.services.azure.cosmos_manager import cosmos_project_manager
 
             if mongodb_manager.is_connected():
                 db = mongodb_manager.database
@@ -952,7 +978,7 @@ def database_health():
 
         # Check Azure Blob
         try:
-            from services.azure.blob_utils import azure_blob_file_manager
+            from common.services.azure.blob_utils import azure_blob_file_manager
             # Simple connectivity test
             test_result = azure_blob_file_manager.is_healthy() if hasattr(azure_blob_file_manager, 'is_healthy') else True
             health_status["azure_blob"] = {
@@ -964,31 +990,31 @@ def database_health():
 
         # Check Service Layer
         try:
-            from services.schema_service import schema_service
+            from common.services.schema_service import schema_service
             health_status["services"]["schema_service"] = True
         except:
             pass
 
         try:
-            from services.vendor_service import vendor_service
+            from common.services.vendor_service import vendor_service
             health_status["services"]["vendor_service"] = True
         except:
             pass
 
         try:
-            from services.project_service import project_service
+            from common.services.project_service import project_service
             health_status["services"]["project_service"] = True
         except:
             pass
 
         try:
-            from services.document_service import document_service
+            from common.services.document_service import document_service
             health_status["services"]["document_service"] = True
         except:
             pass
 
         try:
-            from services.image_service import image_service
+            from common.services.image_service import image_service
             health_status["services"]["image_service"] = True
         except:
             pass
@@ -1335,66 +1361,13 @@ def get_generic_image_fast(product_type):
 @login_required
 def regenerate_generic_image_endpoint(product_type):
     """
-    Force regeneration of a generic product image using LLM.
-    
-    Called by UI when initial image fetch failed and user wants to retry.
-    Includes rate limiting:
-    - 30 second cooldown between attempts per product type
-    - Maximum 3 attempts per hour per product type
-    
-    Args:
-        product_type: URL-encoded product type name
-        
-    Returns:
-        {
-            "success": true/false,
-            "image": {...} or null,
-            "product_type": "...",
-            "wait_seconds": int (if rate limited)
-        }
+    [DEPRECATED] Endpoint removed as LLM generation is disabled.
     """
-    try:
-        from generic_image_utils import regenerate_generic_image
-        import urllib.parse
-        
-        decoded_product_type = urllib.parse.unquote(product_type)
-        logging.info(f"[API_REGEN] Regeneration request: {decoded_product_type}")
-        
-        result = regenerate_generic_image(decoded_product_type)
-        
-        if result.get('success'):
-            logging.info(f"[API_REGEN] ✓ Regeneration successful for: {decoded_product_type}")
-            return jsonify({
-                "success": True,
-                "image": result,
-                "product_type": decoded_product_type
-            }), 200
-        else:
-            reason = result.get('reason', 'failed')
-            wait_seconds = result.get('wait_seconds', 0)
-            message = result.get('message', 'Image generation failed')
-            
-            logging.warning(f"[API_REGEN] ✗ Regeneration failed for {decoded_product_type}: {reason}")
-            
-            # Return 429 for rate limiting, 500 for other failures
-            status_code = 429 if reason == 'rate_limited' else 500
-            
-            return jsonify({
-                "success": False,
-                "error": message,
-                "reason": reason,
-                "product_type": decoded_product_type,
-                "wait_seconds": wait_seconds
-            }), status_code
-            
-    except Exception as e:
-        logging.exception(f"[API_REGEN] Error: {e}")
-        return jsonify({
-            "success": False,
-            "error": str(e),
-            "reason": "error",
-            "product_type": product_type
-        }), 500
+    return jsonify({
+        "success": False,
+        "error": "Image regeneration is no longer supported.",
+        "reason": "deprecated"
+    }), 410
 
 
 @app.route('/api/generic_images/batch', methods=['POST'])
@@ -1498,7 +1471,7 @@ def upload_requirements_file():
     Returns: Extracted text from the file
     """
     try:
-        from file_extraction_utils import extract_text_from_file
+        from common.services.extraction.file_extraction_utils import extract_text_from_file
         
         logging.info("[API] ===== File Upload Request START =====")
         
@@ -1557,610 +1530,7 @@ def upload_requirements_file():
         }), 500
 
 
-# =========================================================================
-# === CORE LLM-BASED SALES AGENT ENDPOINT ===
-# =========================================================================
-@app.route("/api/sales-agent", methods=["POST"])
-@login_required
-def api_sales_agent():
-    """
-    AI Sales Agent - Workflow Engine
-    ---
-    tags:
-      - Workflow
-    summary: Process sales agent workflow step
-    description: |
-      Core AI-powered endpoint that handles the step-based product selection workflow.
-      Supports session tracking, knowledge question handling, and maintains conversation flow.
-      
-      **Workflow Steps:**
-      - `initialInput` - Initial product requirements
-      - `awaitMissingInfo` - Waiting for missing mandatory fields
-      - `awaitAdditionalAndLatestSpecs` - Additional specifications
-      - `awaitAdvancedSpecs` - Advanced parameter specifications
-      - `showSummary` - Display requirements summary
-    consumes:
-      - application/json
-    produces:
-      - application/json
-    parameters:
-      - in: body
-        name: body
-        description: Workflow step data
-        required: true
-        schema:
-          type: object
-          properties:
-            step:
-              type: string
-              description: Current workflow step
-              example: "initialInput"
-            userMessage:
-              type: string
-              description: User's message or input
-              example: "I need a pressure transmitter"
-            intent:
-              type: string
-              description: Classified intent from /api/intent
-            dataContext:
-              type: object
-              description: Context data for the current step
-            search_session_id:
-              type: string
-              description: Session ID for workflow isolation
-    responses:
-      200:
-        description: Workflow response
-        schema:
-          type: object
-          properties:
-            content:
-              type: string
-              description: AI-generated response message
-            nextStep:
-              type: string
-              description: Next workflow step
-            maintainWorkflow:
-              type: boolean
-              description: Whether to maintain current workflow
-      401:
-        description: Unauthorized - login required
-      503:
-        description: Service unavailable - LLM not ready
-    """
-    if not components or not components.get('llm'):
-        return jsonify({"error": "LLM component is not ready."}), 503
 
-    try:
-        # NOTE: request.get_json(force=True) is used for debugging/non-standard headers
-        data = request.get_json(force=True)
-        # Debug log incoming product_type information to trace saving issues (sales agent)
-        incoming_pt = data.get('product_type') if isinstance(data, dict) else None
-        incoming_detected = data.get('detected_product_type') if isinstance(data, dict) else None
-        logging.info(f"[SALES_AGENT_INCOMING] Incoming product_type='{incoming_pt}' detected_product_type='{incoming_detected}' project_name='{data.get('project_name') if isinstance(data, dict) else None}'")
-        
-
-        
-        # Continue with normal sales-agent workflow if no CSV vendors
-        step = data.get("step")
-        data_context = data.get("dataContext", {})
-        user_message = data.get("userMessage", "")
-        intent = data.get("intent", "")
-        search_session_id = data.get("search_session_id", "default")
-
-        # Log session-specific request for debugging
-        logging.info(f"[SALES_AGENT] Session {search_session_id}: Step={step}, Intent={intent}")
-
-        # Get session state for workflow continuity (session-isolated)
-        current_step_key = f'current_step_{search_session_id}'
-        current_intent_key = f'current_intent_{search_session_id}'
-        current_step = session.get(current_step_key)
-        current_intent = session.get(current_intent_key)
-        
-        # --- Helper function for formatting advanced parameters ---
-        def format_available_parameters(params):
-            """
-            Return parameter keys one by one, each on a separate line.
-            Each item in `params` can be:
-            - A dict with 'key' field: {"key": "parameter_key_name", ...}
-            - A string: "parameter_key_name"
-            Replaces underscores with spaces and formats for display.
-            """
-            formatted = []
-            for param in params:
-                # Extract the key from dict or use string directly
-                if isinstance(param, dict):
-                    # Priority: prefer human-friendly 'name' field, then 'key',
-                    # then fall back to the first dict key if present.
-                    name = param.get('name') or param.get('key') or (list(param.keys())[0] if param else '')
-                else:
-                    # Parameter keys are typically strings like "parameter_key_name"
-                    name = str(param).strip()
-
-                # Replace underscores with spaces
-                name = name.replace('_', ' ')
-                # Remove any parenthetical or bracketed content by taking text
-                # before the first bracket. Example: "X (Y)" -> "X"
-                name = re.split(r'[\(\[\{]', name, 1)[0].strip()
-                # Normalize spacing (remove extra spaces)
-                name = " ".join(name.split())
-                # Title case for display (first letter of each word capitalized)
-                name = name.title()
-
-                # Prefix with a bullet so the list appears as points one per line
-                formatted.append(f"- {name}")
-            return "\n".join(formatted)
-
-        # Treat short affirmative/negative replies (e.g., 'yes', 'no') as
-        # workflow input regardless of the classifier. The frontend's
-        # intent classifier can sometimes label brief confirmations as
-        # knowledge questions; we prefer to route them into the sales-agent
-        # workflow so steps like awaitAdditionalAndLatestSpecs and
-        # awaitAdvancedSpecs behave deterministically.
-        try:
-            short_yesno_re = re.compile(r"^\s*(?:yes|y|yeah|yep|sure|ok|okay|no|n|nope|skip)\b[\.\!\?\s]*$", re.IGNORECASE)
-        except Exception:
-            short_yesno_re = None
-
-        if isinstance(user_message, str) and short_yesno_re and short_yesno_re.match(user_message):
-            matched = short_yesno_re.match(user_message).group(0).strip()
-            if intent == 'knowledgeQuestion':
-                logging.info(f"[SALES_AGENT] Overriding intent 'knowledgeQuestion' for short reply: '{user_message}' (matched='{matched}')")
-            intent = 'workflow'
-            logging.info(f"[SALES_AGENT] Routed short reply to workflow branch: '{user_message}' (matched='{matched}', step={step})")
-
-        # Handle knowledge questions - answer and resume workflow
-        if intent == "knowledgeQuestion":
-            # Determine context-aware response based on current workflow step
-            if step == "awaitMissingInfo":
-                context_hint = "Once you have the information you need, please provide the missing details so we can continue with your product selection or Would you like to continue anyway?"
-            elif step == "awaitAdditionalAndLatestSpecs":
-                context_hint = "Now, let's continue - would you like to add additional and latest specifications?"
-            elif step == "awaitAdvancedSpecs":
-                context_hint = "Now, let's continue with advanced specifications."
-            elif step == "showSummary":
-                context_hint = "Now, let's proceed with your product analysis."
-            else:
-                context_hint = "Now, let's continue with your product selection."
-            
-            # Build and execute LLM chain
-            response_chain = SALES_AGENT_MAIN_PROMPT | components['llm'] | StrOutputParser()
-            llm_response = response_chain.invoke({"user_message": user_message, "context_hint": context_hint})
-            
-            # Return response without changing workflow step - use the step sent by frontend
-            return jsonify({
-                "content": llm_response,
-                "nextStep": step,  # Resume the exact step where user was interrupted
-                "maintainWorkflow": True
-            }), 200
-
-        # === Step-Based Workflow Responses (Preserving Original Prompts) ===
-        
-        # --- Original Prompt Selection Based on Step ---
-        if step == 'initialInput':
-            product_type = data_context.get('productType', 'a product')
-            # If frontend indicated this request should save immediately (e.g., initial full-spec submit),
-            # bypass the greeting prompt and persist the detected product type in session.
-            save_flag = False
-            if isinstance(data, dict):
-                # Accept both `saveImmediately` boolean and `action: 'save'` patterns
-                save_flag = bool(data.get('saveImmediately')) or data.get('action') == 'save'
-            if save_flag:
-                session[f'product_type_{search_session_id}'] = product_type
-                session[f'current_step_{search_session_id}'] = 'initialInput'
-                session.modified = True
-                # Return quick confirmation to frontend so it can proceed without receiving the greeting prompt
-                return jsonify({
-                    "content": f"Saved product type: {product_type}",
-                    "nextStep": "awaitAdditionalAndLatestSpecs"
-                }), 200
-            
-            
-            current_prompt_template = SALES_AGENT_MAIN_PROMPT
-            next_step = "awaitAdditionalAndLatestSpecs"
-            next_step = "awaitAdditionalAndLatestSpecs"
-            
-        elif step == 'awaitAdditionalAndLatestSpecs':
-            # Handle the combined "Additional and Latest Specs" step
-            user_lower = user_message.lower().strip()
-            
-            # Define yes/no keywords
-            affirmative_keywords = ['yes', 'y', 'yeah', 'yep', 'sure', 'ok', 'okay']
-            negative_keywords = ['no', 'n', 'nope', 'skip']
-            
-            # Check if we're waiting for yes/no or collecting specs input
-            # Track state in session to know if we've asked the question
-            asking_state_key = f'awaiting_additional_specs_yesno_{search_session_id}'
-            is_awaiting_yesno = session.get(asking_state_key, True)
-            
-            # Check if user response is valid yes/no
-            is_yes = any(keyword in user_lower for keyword in affirmative_keywords)
-            is_no = any(keyword in user_lower for keyword in negative_keywords)
-            
-            if is_awaiting_yesno:
-                # First interaction - asking yes/no question
-                if is_no:
-                    # User says NO -> skip directly to showSummary
-                    session[asking_state_key] = False
-                    # Use LLM to produce the fixed summary-intro sentence
-                    current_prompt_template = SALES_AGENT_MAIN_PROMPT
-                    next_step = "showSummary"
-                    next_step = "showSummary"
-                elif is_yes:
-                    # User says YES -> ask them to enter their additional/latest specifications
-                    session[asking_state_key] = False  # Now we're collecting input
-                    # Use LLM to remind them of the latest advanced specifications, then ask for input
-                    available_parameters = data_context.get('availableParameters', [])
-                    if available_parameters:
-                        params_display = format_available_parameters(available_parameters)
-                        current_prompt_template = SALES_AGENT_MAIN_PROMPT
-                    # else:
-                    #     prompt_template = "Great! Please enter your additional or latest specifications."
-
-                    next_step = "awaitAdditionalAndLatestSpecs"  # Stay in step to collect input
-                else:
-                    # Invalid response - ask for yes/no
-                    llm_response = "Please respond with yes or no. Additional and latest specifications are available. Would you like to add them?"
-                    current_prompt_template = None
-                    next_step = "awaitAdditionalAndLatestSpecs"  # Stay in step until valid answer
-            else:
-                # We're collecting the actual specifications input
-                # User has provided their additional/latest specs - process and move to advanced parameters
-                product_type = data_context.get('productType') or session.get(f'product_type_{search_session_id}')
-                
-                # Process the additional requirements using additional_requirements endpoint logic
-                # Store the user input for processing - frontend will call /additional_requirements to extract and merge
-                session[f'additional_specs_input_{search_session_id}'] = user_message
-                session[asking_state_key] = True  # Reset for next time
-                
-                current_prompt_template = SALES_AGENT_MAIN_PROMPT
-                next_step = "awaitAdvancedSpecs"
-                next_step = "awaitAdvancedSpecs"
-        
-        elif step == 'awaitAdvancedSpecs':
-            # Handle advanced parameters step
-            user_lower = user_message.lower().strip()
-
-            # Get context data (session-isolated)
-            product_type = data_context.get('productType') or session.get(f'product_type_{search_session_id}')
-            # NOTE: available_parameters is expected to be a list of strings or dicts
-            available_parameters = data_context.get('availableParameters', [])
-            selected_parameters = data_context.get('selectedParameters', {})
-            total_selected = data_context.get('totalSelected', 0)
-            
-            # Define trigger keywords
-            display_keywords = ['show', 'display', 'list', 'see', 'view', 'what are', 'remind']
-            affirmative_keywords = ['yes', 'y', 'yeah', 'yep', 'sure', 'proceed', 'continue', 'ok', 'okay', 'go ahead']
-            negative_keywords = ['no', 'n', 'skip', 'none', 'not needed', 'done', 'not interested']
-
-            # Debug logging
-            logging.info(f"awaitAdvancedSpecs - product_type: {product_type}")
-            logging.info(f"awaitAdvancedSpecs - available_parameters count: {len(available_parameters)}")
-            logging.info(f"awaitAdvancedSpecs - user_message: {user_message}")
-            
-            # Check if this is first time (no parameters discovered yet)
-            if not available_parameters or len(available_parameters) == 0:
-                
-                # --- Handling retry/skip when discovery yielded 0 results or after an error ---
-                parameter_error = data_context.get('parameterError', False)
-                no_params_found = data_context.get('no_params_found', False)
-                
-                if parameter_error and user_lower in affirmative_keywords:
-                    # User confirms they want to skip after an error
-                    current_prompt_template = SALES_AGENT_MAIN_PROMPT
-                    next_step = "showSummary"
-                elif parameter_error and user_lower in negative_keywords:
-                    # User wants to retry (or says 'no' to skipping) - fall through to discovery
-                    prompt_template = "" # Clears the error state prompt
-                    pass
-                elif user_lower in affirmative_keywords or user_lower == "":
-                    # User agreed to proceed with discovery (or sent empty message) - run discovery
-                    prompt_template = "" # Clears any prior prompt
-                    pass
-                elif user_lower in negative_keywords:
-                    # User says 'no' or 'skip' - they want to skip advanced parameters entirely
-                    # Proceed directly to showSummary without discovering parameters
-                    llm_response = "No problem! Proceeding without advanced specifications."
-                    current_prompt_template = None
-                    next_step = "showSummary"
-                else:
-                    # Default action for unexpected input when no params are known
-                    llm_response = "I'm not sure how to proceed. Would you like me to try discovering the parameters, or shall we skip to the summary?"
-                    current_prompt_template = None
-                    next_step = "awaitAdvancedSpecs"
-                    
-                # --- Initial Discovery Block (Runs on first entry or retry) ---
-                # Only run discovery if no specific prompt_template has been set above
-                if not prompt_template.strip() and 'llm_response' not in locals():
-                    logging.info(f"Attempting discovery for product_type: {product_type}")
-                    try:
-                        if product_type:
-                            # Discover advanced parameters (works for both MongoDB cache and LLM discovery)
-                            parameters_result = discover_advanced_parameters(product_type)
-                            # Handle both 'unique_parameters' and 'unique_specifications' keys (MongoDB uses 'unique_specifications')
-                            discovered_params = parameters_result.get('unique_parameters') or parameters_result.get('unique_specifications', [])
-                            discovered_params = discovered_params[:15] if discovered_params else []
-                            filtered_count = parameters_result.get('existing_parameters_filtered', 0) or parameters_result.get('existing_specifications_filtered', 0)
-
-                            # Store discovered parameters in session for future use
-                            data_context['availableParameters'] = discovered_params
-                            # Track whether discovery returned zero parameters
-                            data_context['no_params_found'] = len(discovered_params) == 0
-                            session['data'] = data_context
-                            session.modified = True
-
-                            if len(discovered_params) == 0:
-                                # CASE 2 — No advanced parameters found: ask if user wants to proceed to summary
-                                filter_info = (
-                                    f" All {filtered_count} potential advanced parameters were already covered in your mandatory/optional requirements."
-                                    if filtered_count > 0
-                                    else " No new advanced parameters were found for this product type."
-                                )
-
-                                # Direct deterministic response (no extra LLM prompting)
-                                llm_response = (
-                                    f"No advanced parameters were found.{filter_info}\n\n"
-                                    "No advanced parameters were found. Do you want to proceed to summary?"
-                                )
-                                prompt_template = ""
-                            else:
-                                # CASE 1 — Advanced parameters found: show list and ask if user wants to add them
-                                params_display = format_available_parameters(discovered_params)
-
-                                # Direct deterministic response listing parameters
-                                llm_response = (
-                                    "These advanced parameters were identified:\n\n"
-                                    f"{params_display}\n\n"
-                                    "Do you want to add these advanced parameters?"
-                                )
-                                # Set prompt_template to empty so LLM is not called
-                                prompt_template = ""
-                                current_prompt_template = None
-                        else:
-                            # No product type found
-                            data_context['parameterError'] = True
-                            session['data'] = data_context
-                            session.modified = True
-                            llm_response = "I'm having trouble accessing advanced parameters because the product type isn't clear. Would you like to skip this step?"
-                            current_prompt_template = None
-
-                    except Exception as e:
-                        # General error case
-                        logging.error(f"Error during parameter discovery: {e}", exc_info=True)
-                        data_context['parameterError'] = True
-                        session['data'] = data_context
-                        session.modified = True
-                        prompt_template = "I encountered an issue discovering advanced parameters. Would you like to skip this step?"
-                
-                # Now interpret user reply when no available_parameters exist (only if we didn't run discovery or discovery yielded 0)
-                if data_context.get('no_params_found', False) or parameter_error:
-                    # CASE 2 — Follow-up after "No advanced parameters were found. Do you want to proceed to summary?"
-                    if user_lower in affirmative_keywords:
-                        # User said YES -> go directly to summary
-                        llm_response = "Okay, I'll proceed to the summary without advanced parameters."
-                        prompt_template = ""
-                        next_step = "showSummary"
-                    elif user_lower in negative_keywords:
-                        # User said NO -> retry discovery (loop will run discovery again)
-                        data_context['parameterError'] = False
-                        data_context['no_params_found'] = False  # Force a retry
-                        session['data'] = data_context
-                        session.modified = True
-                        llm_response = "No problem, I'll try discovering advanced parameters again."
-                        prompt_template = ""
-                        next_step = "awaitAdvancedSpecs"
-                    elif parameter_error and not user_message.strip():
-                        llm_response = "I encountered an issue discovering advanced parameters. Would you like to skip this step?"
-                        current_prompt_template = None
-                        next_step = "awaitAdvancedSpecs"
-                    elif not user_message.strip():
-                        # Empty message while in no_params_found state - repeat the question
-                        llm_response = "No advanced parameters were found. Do you want to proceed to summary?"
-                        prompt_template = ""
-                        next_step = "awaitAdvancedSpecs"
-                    else:
-                        # If user gave something else, ask the clarifying question again
-                        llm_response = "Please answer with yes or no. Do you want to proceed to summary without advanced parameters?"
-                        prompt_template = ""
-                        next_step = "awaitAdvancedSpecs"
-                else:
-                    # Default: stay in awaitAdvancedSpecs and attempt discovery based on affirmative/empty
-                    next_step = "awaitAdvancedSpecs"
-            else:
-                # --- Parameters already discovered - handle user response ---
-                parameter_error = data_context.get('parameterError', False)
-
-                wants_display = any(keyword in user_lower for keyword in display_keywords)
-                user_affirmed = any(keyword in user_lower for keyword in affirmative_keywords)
-                user_denied = any(keyword in user_lower for keyword in negative_keywords)
-                wants_all = user_lower.strip() == 'all' or 'include all' in user_lower or 'add all' in user_lower
-
-                # CASE 0: User says 'all' to include all parameters with default values
-                if wants_all and available_parameters:
-                    # Include all parameters
-                    all_params = {}
-                    for param in available_parameters:
-                        if isinstance(param, dict):
-                            key = param.get('key') or param.get('name') or (list(param.keys())[0] if param else '')
-                            all_params[key] = param.get('value', 'enabled')
-                        else:
-                            all_params[str(param)] = 'enabled'
-
-                    # Store in data context
-                    data_context['selectedParameters'] = all_params
-                    session['data'] = data_context
-
-                    param_names = [k.replace('_', ' ').title() for k in all_params.keys()]
-                    llm_response = f"**Added all {len(all_params)} advanced parameters:** {', '.join(param_names)}\n\nProceeding to the summary now."
-                    current_prompt_template = None
-                    next_step = "showSummary"
-
-                # CASE 1: User says 'yes' to adding parameters - show keys and ask them to provide values
-                # Check this FIRST before CASE 2, so "yes" doesn't get caught by the display condition
-                if user_affirmed:
-                    # CASE 1 — User said YES: Show parameters and ask for values
-                    params_display = format_available_parameters(available_parameters)
-                    llm_response = f"""Great! Here are the advanced parameters you can configure:
-
-{params_display}
-
-Please provide values for the parameters you'd like to add. You can:
-- Specify values like: "AI-Powered Predictive Diagnostics: enabled, Wireless Mesh Networking: ISA100.11a"
-- Or simply type the parameter names you want to include
-- Type "all" to include all parameters with default values
-- Type "skip" to proceed without adding any"""
-                    current_prompt_template = None  # Use direct response, no LLM call
-                    next_step = "awaitAdvancedSpecs"  # Stay in step to collect values
-                    
-                # CASE 2: User says 'no' to adding parameters (normal flow)
-                elif user_denied:
-                    # User explicitly declined adding advanced parameters -> go directly to SUMMARY
-                    # Use the same summary-intro sentence as in awaitAdditionalAndLatestSpecs
-                    current_prompt_template = SALES_AGENT_MAIN_PROMPT
-                    next_step = "showSummary"
-                    
-                # CASE 3: Force the list to display if the user explicitly asks to see it, or empty message
-                elif wants_display or (not user_message.strip() and not total_selected > 0):
-                    params_display = format_available_parameters(available_parameters)
-
-                    current_prompt_template = SALES_AGENT_MAIN_PROMPT
-                    next_step = "awaitAdvancedSpecs"
-                    
-                # CASE 4: User provided parameter selections/values
-                elif total_selected > 0 or user_message.strip():
-                    # User provided values for parameters
-                    selected_names = [param.replace('_', ' ').title() for param in selected_parameters.keys()] if selected_parameters else []
-                    if selected_names:
-                        selected_display = ", ".join(selected_names)
-                        # Use a direct response for this common feedback
-                        llm_response = f"**Added Advanced Parameters:** {selected_display}\n\nProceeding to the summary now."
-                        current_prompt_template = None
-                    else:
-                        llm_response = "Thank you for providing the advanced specifications. Proceeding to the summary now."
-                        current_prompt_template = None
-                    next_step = "showSummary"
-                    
-                # CASE 5: No parameters matched or user provided other input (Default fallback)
-                else:
-                    llm_response = "Please respond with yes or no. These additional advanced parameters were identified. Would you like to add them?"
-                    current_prompt_template = None
-                    next_step = "awaitAdvancedSpecs"
-            
-        elif step == 'confirmAfterMissingInfo':
-            # Discover advanced parameters to show in the response
-            product_type = data_context.get('productType') or session.get(f'product_type_{search_session_id}')
-            
-            # Initial prompt is set as a fallback
-            current_prompt_template = SALES_AGENT_MAIN_PROMPT
-            
-            if product_type:
-                try:
-                    # Discover advanced parameters
-                    parameters_result = discover_advanced_parameters(product_type)
-                    discovered_params = parameters_result.get('unique_parameters', []) or parameters_result.get('unique_specifications', [])
-                    discovered_params = discovered_params[:15] if discovered_params else []
-                    
-                    if len(discovered_params) > 0:
-                        # Format parameters for display
-                        params_display = format_available_parameters(discovered_params)
-                        
-                        # Store discovered parameters in session for later use
-                        data_context['availableParameters'] = discovered_params
-                        session['data'] = data_context
-                        session.modified = True
-
-                        # Use LLM with a strict prompt so it returns the exact desired message
-                        current_prompt_template = SALES_AGENT_MAIN_PROMPT
-                    # Else: prompt_template remains the one set before the try block
-                except Exception as e:
-                    logging.error(f"Error discovering parameters in confirmAfterMissingInfo: {e}", exc_info=True)
-                    # Fallback prompt is already set
-            
-            next_step = "awaitAdditionalAndLatestSpecs"
-            
-        elif step == 'showSummary':
-            # Check if user is confirming to proceed with analysis
-            user_lower = user_message.lower().strip()
-            if user_lower in ['yes', 'y', 'proceed', 'continue', 'run', 'analyze', 'ok', 'okay']:
-                current_prompt_template = SUMMARY_GENERATION_PROMPT
-                next_step = "finalAnalysis"
-            else:
-                # First time showing summary - trigger summary generation
-                # The frontend will call handleShowSummaryAndProceed which generates the summary
-                current_prompt_template = SUMMARY_GENERATION_PROMPT
-                next_step = "showSummary"  # Stay in showSummary to trigger summary display
-            
-        elif step == 'finalAnalysis':
-            ranked_products = data_context.get('analysisResult', {}).get('overallRanking', {}).get('rankedProducts', [])
-            # NOTE: Logic to determine 'matching_products' based on 'requirementsMatch' is in the original code.
-            # Assuming 'requirementsMatch' is a boolean key in each product dict.
-            matching_products = [p for p in ranked_products if p.get('requirementsMatch') is True] 
-            count = len(matching_products)
-            current_prompt_template = SALES_AGENT_FINAL_ANALYSIS_PROMPT
-            next_step = None  # End of workflow
-            
-        elif step == 'analysisError':
-            current_prompt_template = SALES_AGENT_ERROR_PROMPT
-            next_step = "showSummary"  # Allow retry from summary
-            
-        elif step == 'default':
-            current_prompt_template = SALES_AGENT_MAIN_PROMPT
-            next_step = current_step or None
-            
-        # === NEW WORKFLOW STEPS (Added for enhanced functionality) ===
-        elif step == 'greeting':
-            current_prompt_template = SALES_AGENT_GREETING_PROMPT
-            next_step = "initialInput"
-            
-        else:
-            # Default fallback for unrecognized steps
-            current_prompt_template = SALES_AGENT_MAIN_PROMPT
-            next_step = current_step or "greeting"
-
-        # --- Build Chain and Generate Response ---
-        # Initialize llm_response if not already set (for direct responses without LLM)
-        if 'llm_response' not in locals():
-            llm_response = ""
-            
-        if current_prompt_template:
-            if isinstance(current_prompt_template, str):
-                full_prompt = ChatPromptTemplate.from_template(current_prompt_template)
-            else:
-                full_prompt = current_prompt_template
-                
-            response_chain = full_prompt | components['llm'] | StrOutputParser()
-            llm_response = response_chain.invoke({
-                "user_input": user_message, 
-                "product_type": data_context.get('productType'), 
-                "count": count if 'count' in locals() else 0, 
-                "params_display": params_display if 'params_display' in locals() else 'No parameters.', 
-                "search_session_id": search_session_id
-            })
-
-        # Update session with new step (session-isolated)
-        if next_step:
-            session[f'current_step_{search_session_id}'] = next_step
-            session[f'current_intent_{search_session_id}'] = 'workflow'
-
-        # Prepare response
-        response_data = {
-            "content": llm_response,
-            "nextStep": next_step
-        }
-
-        # Store the sales agent response as system response for logging
-
-        return jsonify(response_data), 200
-
-    except Exception as e:
-        logging.exception("Sales agent response generation failed.")
-        # Retrieve current step for fallback, defaulting to 'initialInput' if not found
-        fallback_step = session.get(f'current_step_{search_session_id}', 'initialInput')
-        return jsonify({
-            "error": "Failed to generate response: " + str(e),
-            "content": "I apologize, but I'm having technical difficulties. Please try again.",
-            "nextStep": fallback_step
-        }), 500
 
 
 # =========================================================================
@@ -2280,16 +1650,22 @@ def handle_feedback():
 
 # =========================================================================
 # === INSTRUMENT IDENTIFICATION ENDPOINT ===
+# === DEPRECATED: Use /api/agentic/instrument-identifier instead ===
 # =========================================================================
 @app.route("/api/identify-instruments", methods=["POST"])
 @login_required
 def identify_instruments():
     """
+    DEPRECATED: Use /api/agentic/instrument-identifier instead.
+
     Handles user input in project page with three cases:
     1. Greeting - Returns friendly greeting response
     2. Requirements - Returns identified instruments and accessories
     3. Industrial Question - Returns answer or redirect if not related
     """
+    # DEPRECATION WARNING: This endpoint will be removed in a future version
+    logging.warning("[DEPRECATED] /api/identify-instruments called - Use /api/agentic/instrument-identifier instead")
+
     if not components or not components.get('llm_pro'):
         return jsonify({"error": "LLM component is not ready."}), 503
 
@@ -2450,40 +1826,15 @@ def identify_instruments():
 
         # CASE 4: Question - Answer industrial questions or redirect
         elif input_type == "question":
-            question_chain = IDENTIFY_QUESTION_PROMPT | components['llm'] | StrOutputParser()
-            question_response = question_chain.invoke({"user_input": requirements})
-            
-            # Clean and parse question response
-            cleaned_question = question_response.strip()
-            if cleaned_question.startswith("```json"):
-                cleaned_question = cleaned_question[7:]
-            elif cleaned_question.startswith("```"):
-                cleaned_question = cleaned_question[3:]
-            if cleaned_question.endswith("```"):
-                cleaned_question = cleaned_question[:-3]
-            cleaned_question = cleaned_question.strip()
-            
-            try:
-                question_result = json.loads(cleaned_question)
-                return standardized_jsonify({
-                    "response_type": "question",
-                    "is_industrial": question_result.get("is_industrial", True),
-                    "message": question_result.get("answer", ""),
-                    "instruments": [],
-                    "accessories": []
-                }, 200)
-            except:
-                # Fallback if parsing fails - generate response from LLM without JSON constraint
-                fallback_chain = CLASSIFICATION_PROMPT | components['llm'] | StrOutputParser()
-                fallback_message = fallback_chain.invoke({"requirements": requirements})
-                
-                return standardized_jsonify({
-                    "response_type": "question",
-                    "is_industrial": False,
-                    "message": fallback_message.strip(),
-                    "instruments": [],
-                    "accessories": []
-                }, 200)
+            fallback_chain = CLASSIFICATION_PROMPT | components['llm'] | StrOutputParser()
+            fallback_message = fallback_chain.invoke({"requirements": requirements})
+            return standardized_jsonify({
+                "response_type": "question",
+                "is_industrial": False,
+                "message": fallback_message.strip(),
+                "instruments": [],
+                "accessories": []
+            }, 200)
         
         # CASE 5: Unexpected classification type - Default fallback
         else:
@@ -2510,19 +1861,26 @@ def identify_instruments():
             "summary": ""
         }), 500
 
+# DEPRECATED: Use /api/agentic/tools/search-vendors instead (uses DB, not CSV)
 @app.route("/api/search-vendors", methods=["POST"])
 @login_required
 def search_vendors():
     """
+    DEPRECATED: Use /api/agentic/tools/search-vendors instead.
+    This endpoint uses CSV-based lookup which is outdated.
+
     Search for vendors
     ---
     tags:
       - Vendors
-    summary: Search vendors by product criteria
+      - Deprecated
+    summary: "[DEPRECATED] Search vendors by product criteria"
     description: |
+      **DEPRECATED**: Use `/api/agentic/tools/search-vendors` instead.
+
       Search for vendors based on selected instrument/accessory details.
       Maps category, product name, and strategy to CSV data and returns filtered vendor list.
-      
+
       Uses fuzzy matching to find the best matching vendors based on:
       - Product category
       - Product/accessory name
@@ -2531,6 +1889,7 @@ def search_vendors():
       - application/json
     produces:
       - application/json
+    deprecated: true
     parameters:
       - in: body
         name: body
@@ -2585,6 +1944,9 @@ def search_vendors():
       500:
         description: Vendor data not available
     """
+    # DEPRECATION WARNING: This endpoint will be removed in a future version
+    logging.warning("[DEPRECATED] /api/search-vendors called - Use /api/agentic/tools/search-vendors instead")
+
     try:
         data = request.get_json(force=True)
         category = data.get("category", "").strip()
@@ -2742,7 +2104,7 @@ def search_vendors():
 # === API ENDPOINTS ===
 # =========================================================================
 # PHASE 1 FIX: Use API Key Manager instead of hardcoded fallbacks
-from config.api_key_manager import api_key_manager
+from common.config.api_key_manager import api_key_manager
 
 SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
@@ -3510,7 +2872,7 @@ def fetch_product_images_with_fallback_sync(vendor_name: str, product_name: str 
     
     # Step 0: Check MongoDB cache first (if model_family is provided)
     if vendor_name and model_family:
-        from services.azure.blob_utils import get_cached_image, cache_image
+        from common.services.azure.blob_utils import get_cached_image, cache_image
         
         cached_image = get_cached_image(vendor_name, model_family)
         if cached_image:
@@ -3543,7 +2905,7 @@ def fetch_product_images_with_fallback_sync(vendor_name: str, product_name: str 
         logging.info(f"Using Google CSE images for {vendor_name}")
         # Cache the top image if model_family is provided
         if vendor_name and model_family and len(images) > 0:
-            from services.azure.blob_utils import cache_image
+            from common.services.azure.blob_utils import cache_image
             cache_image(vendor_name, model_family, images[0])
         return images, "google_cse"
     
@@ -3558,7 +2920,7 @@ def fetch_product_images_with_fallback_sync(vendor_name: str, product_name: str 
         logging.info(f"Using SerpAPI images for {vendor_name}")
         # Cache the top image if model_family is provided
         if vendor_name and model_family and len(images) > 0:
-            from services.azure.blob_utils import cache_image
+            from common.services.azure.blob_utils import cache_image
             cache_image(vendor_name, model_family, images[0])
         return images, "serpapi"
     
@@ -3589,7 +2951,7 @@ def fetch_vendor_logo_sync(vendor_name: str, manufacturer_domains: list = None):
     
     # Step 0: Check Azure cache first
     try:
-        from services.azure.blob_utils import azure_blob_file_manager, download_image_from_url
+        from common.services.azure.blob_utils import azure_blob_file_manager, download_image_from_url
         
         logos_collection = azure_blob_file_manager.conn['collections'].get('vendor_logos')
         if logos_collection is not None:
@@ -3694,7 +3056,7 @@ def fetch_vendor_logo_sync(vendor_name: str, manufacturer_domains: list = None):
      # Step 2: Cache the logo in Azure Blob if found
     if logo_result:
         try:
-            from services.azure.blob_utils import azure_blob_file_manager, download_image_from_url
+            from common.services.azure.blob_utils import azure_blob_file_manager, download_image_from_url
             
             logo_url = logo_result.get('url')
             if logo_url and not logo_url.startswith('/api/images/'):  # Don't re-cache GridFS URLs
@@ -4712,9 +4074,17 @@ def clear_session_state(session_id):
 
 
 
+# DEPRECATED: Use /api/agentic/validate instead
 @app.route("/api/validate", methods=["POST"])
 @login_required
 def api_validate():
+    """
+    DEPRECATED: Use /api/agentic/validate instead.
+    The agentic version provides split validation steps (validate-product-input, get-product-schema).
+    """
+    # DEPRECATION WARNING: This endpoint will be removed in a future version
+    logging.warning("[DEPRECATED] /api/validate called - Use /api/agentic/validate instead")
+
     if not components:
         return jsonify({"error": "Backend is not ready. LangChain failed."}), 503
     try:
@@ -5006,47 +4376,7 @@ def api_structure_requirements():
         logging.exception("Requirement structuring failed.")
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/advanced_parameters", methods=["POST"])
-@login_required
-def api_advanced_parameters():
-    """
-    Discovers latest advanced specifications with series numbers from top vendors for a product type
-    """
-    try:
-        data = request.get_json(force=True)
-        product_type = data.get("product_type", "").strip()
-        search_session_id = data.get("search_session_id", "default")
-        
-        if not product_type:
-            return jsonify({"error": "Missing 'product_type' parameter"}), 400
 
-        # Store for logging (session-isolated)
-        session[f'log_user_query_{search_session_id}'] = f"Latest advanced specifications for {product_type}"
-        
-        # Discover advanced specifications with series numbers
-        logging.info(f"Starting latest advanced specifications discovery for: {product_type}")
-        result = discover_advanced_parameters(product_type)
-        
-        # Log detailed information about filtering
-        unique_count = len(result.get('unique_specifications', result.get('unique_parameters', [])))
-        filtered_count = result.get('existing_specifications_filtered', result.get('existing_parameters_filtered', 0))
-        total_found = unique_count + filtered_count
-        
-        logging.info(f"Advanced specifications discovery complete: {total_found} total specifications found, {filtered_count} filtered out (already in schema), {unique_count} new specifications returned")
-        
-        # Store result for logging
-        session['log_system_response'] = result
-        
-        # Convert to camelCase for frontend
-        camel_case_result = convert_keys_to_camel_case(result)
-        
-        logging.info(f"Advanced specifications discovery complete: {len(result.get('unique_specifications', result.get('unique_parameters', [])))} new specifications found (filtered out {result.get('existing_specifications_filtered', result.get('existing_parameters_filtered', 0))} existing specifications)")
-        
-        return jsonify(camel_case_result), 200
-
-    except Exception as e:
-        logging.exception("Advanced specifications discovery failed.")
-        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/add_advanced_parameters", methods=["POST"])
 @login_required
@@ -5155,9 +4485,17 @@ def api_add_advanced_parameters():
         logging.exception("Latest advanced specifications addition failed.")
         return jsonify({"error": str(e)}), 500
 
+# DEPRECATED: Use /api/agentic/run-analysis instead
 @app.route("/api/analyze", methods=["POST"])
 @login_required
 def api_analyze():
+    """
+    DEPRECATED: Use /api/agentic/run-analysis instead.
+    The agentic version uses ProductSearchWorkflow with image fetching.
+    """
+    # DEPRECATION WARNING: This endpoint will be removed in a future version
+    logging.warning("[DEPRECATED] /api/analyze called - Use /api/agentic/run-analysis instead")
+
     try:
         # Check if analysis chain is initialized
         if analysis_chain is None:
@@ -5339,7 +4677,7 @@ def api_get_field_description():
         # Uses comprehensive standards specifications from schema_field_extractor
         # =====================================================
         try:
-            from agentic.deep_agent.schema_field_extractor import get_default_value_for_field
+            from common.agentic.deep_agent.schema_field_extractor import get_default_value_for_field
             
             default_value = get_default_value_for_field(product_type, field_name)
             
@@ -5471,7 +4809,7 @@ def api_describe_field():
 
         # Try default lookup first (fast path)
         try:
-            from agentic.deep_agent.schema_field_extractor import get_default_value_for_field
+            from common.agentic.deep_agent.schema_field_extractor import get_default_value_for_field
             default_value = get_default_value_for_field(product_type, field_name)
             if default_value:
                 return jsonify({"success": True, "description": default_value}), 200
@@ -5554,7 +4892,7 @@ def api_get_all_field_descriptions():
         # Import template specifications for actual descriptions
         template_descriptions = {}
         try:
-            from agentic.deep_agent.specification_templates import get_all_specs_for_product_type
+            from common.agentic.deep_agent.specification_templates import get_all_specs_for_product_type
             template_specs = get_all_specs_for_product_type(product_type)
             if template_specs:
                 for spec_key, spec_def in template_specs.items():
@@ -6156,7 +5494,7 @@ def save_project():
         try:
             displayed_media = data.get('displayed_media_map', {}) if isinstance(data, dict) else {}
             if displayed_media:
-                from services.azure.blob_utils import azure_blob_file_manager
+                from common.services.azure.blob_utils import azure_blob_file_manager
                 # For each displayed media entry, fetch the URL and store bytes in GridFS
                 for key, entry in displayed_media.items():
                     try:
@@ -6327,7 +5665,7 @@ def serve_project_file(file_id):
     Serve a file stored in Azure Blob by its file ID (path).
     """
     try:
-        from services.azure.blob_utils import azure_blob_file_manager
+        from common.services.azure.blob_utils import azure_blob_file_manager
         
         # Try 'documents' collection corresponding to save_project uploads
         blob_path = f"{azure_blob_file_manager.base_path}/documents/{file_id}"
@@ -6553,7 +5891,7 @@ def upload_strategy_file():
 
             # Trigger background processing
             try:
-                from services.strategy_background_processor import process_strategy_document_async
+                from common.strategy_rag.ingestion.background_processor import process_strategy_document_async
 
                 process_strategy_document_async(
                     document_id=document_id,
@@ -6662,7 +6000,7 @@ def get_strategy_processing_status(document_id):
     try:
         logging.info(f"[STRATEGY-STATUS] Checking status for document {document_id}")
 
-        from services.strategy_background_processor import get_processing_status
+        from common.strategy_rag.ingestion.background_processor import get_processing_status
 
         status_info = get_processing_status(document_id)
 
@@ -7005,7 +6343,7 @@ except Exception as e:
 # Prevents unbounded memory growth from checkpoint accumulation
 checkpoint_manager = None
 try:
-    from agentic.checkpointing import CheckpointManager, start_auto_checkpoint_cleanup
+    from common.agentic.checkpointing import CheckpointManager, start_auto_checkpoint_cleanup
 
     # Create checkpoint manager with Azure Blob Storage (production-ready)
     # Falls back to memory if Azure credentials not configured
@@ -7032,7 +6370,7 @@ except Exception as e:
 # Prevents memory leaks from accumulated session files
 session_cleanup_manager = None
 try:
-    from agentic.session_cleanup_manager import SessionCleanupManager
+    from common.infrastructure.state.session.cleanup import SessionCleanupManager
 
     session_dir = app.config.get("SESSION_FILE_DIR", "/tmp/flask_session")
     session_cleanup_manager = SessionCleanupManager(
@@ -7048,7 +6386,7 @@ except Exception as e:
 # Initialize bounded workflow state management (Phase 4 improvement)
 # Prevents OOM crashes from unbounded state accumulation
 try:
-    from agentic.workflow_state_manager import stop_workflow_state_manager
+    from common.infrastructure.caching.workflow_state_cache import stop_workflow_state_manager
     logging.info("Workflow state manager initialized with bounded memory and auto-cleanup")
 except Exception as e:
     logging.warning(f"Failed to initialize workflow state manager: {e}")
@@ -7082,7 +6420,7 @@ atexit.register(shutdown_cleanup)
 # Pre-warm standards document cache (Task #6 - Performance Optimization)
 # Loads all standard documents into memory at startup to eliminate cache-miss delays
 try:
-    from agentic.deep_agent.standards_deep_agent import prewarm_document_cache
+    from common.standards.generation.deep_agent import prewarm_document_cache
 
     logging.info("Pre-warming standards document cache...")
     cache_stats = prewarm_document_cache()

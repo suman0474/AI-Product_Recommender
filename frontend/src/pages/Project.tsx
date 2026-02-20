@@ -1814,13 +1814,13 @@ const Project = () => {
                     current_step: showResults ? 'results' : 'initial',
                     has_results: instruments.length > 0 || accessories.length > 0,
                     results_timestamp: showResults ? new Date().toISOString() : null,
-                    workflow_type: 'solution_workflow'
+                    workflow_type: 'solution'
                 },
 
                 // ✅ ADD: Intent data preservation
                 intent_data: {
                     project_intent: 'solution',  // Always 'solution' for Project page
-                    workflow_type: 'solution_workflow',
+                    workflow_type: 'solution',
                     saved_timestamp: new Date().toISOString()
                 },
                 conversation_histories: conversationHistories,

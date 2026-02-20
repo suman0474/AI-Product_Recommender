@@ -76,6 +76,13 @@ access_log_format = (
 # Process Settings
 # =============================================================================
 
+# Centralize all __pycache__ bytecode into one folder instead of scattering
+# next to every .py file across the project tree
+os.environ.setdefault(
+    "PYTHONPYCACHEPREFIX",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), ".pycache")
+)
+
 proc_name = "aipr-gunicorn"
 daemon = False
 pidfile = "/tmp/gunicorn.pid"

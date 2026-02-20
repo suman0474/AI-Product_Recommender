@@ -1,46 +1,53 @@
-"""
 DEPRECATED COMPATIBILITY SHIM FOR OLD PROMPTS MODULE
 
 This module provides backward compatibility for code still referencing the old
 'prompts' module pattern (e.g., prompts.sales_agent_greeting_prompt).
 
 ALL NEW CODE SHOULD USE:
-    from prompts_library import load_prompt
+    from common.prompts_library import load_prompt
     PROMPT = load_prompt("prompt_name")
 
 This file will be removed in a future version.
 """
 
 import warnings
-from prompts_library import load_prompt, load_prompt_sections
+from common.prompts import (
+    INDEXING_AGENT_PROMPTS,
+    INTENT_PROMPTS,
+    RANKING_PROMPTS,
+    RAG_PROMPTS,
+    SOLUTION_DEEP_AGENT_PROMPTS,
+    ANALYSIS_TOOL_VENDOR_ANALYSIS_PROMPT,
+    SCHEMA_VALIDATION_PROMPT
+)
 from langchain_core.prompts import ChatPromptTemplate
 from typing import Optional, List
 
 # Show deprecation warning when this module is imported
 warnings.warn(
-    "The 'prompts' module is deprecated. Please use 'from prompts_library import load_prompt' instead.",
+    "The 'prompts' module is deprecated. Please use 'common.prompts' constants instead.",
     DeprecationWarning,
     stacklevel=2
 )
 
 # Load consolidated prompt files
-_SALES_AGENT_PROMPTS = load_prompt_sections("sales_agent_prompts", default_section="SALES_CONSULTANT")
-_SALES_AGENT_MAIN_PROMPT = _SALES_AGENT_PROMPTS["SALES_CONSULTANT"]
-_SALES_WORKFLOW_PROMPTS = load_prompt_sections("sales_workflow_prompts", default_section="GREETING")
+# Sales agent prompts removed as they are legacy
+# _SALES_AGENT_PROMPTS = load_prompt_sections("sales_agent_prompts", default_section="SALES_CONSULTANT")
+# _SALES_AGENT_MAIN_PROMPT = _SALES_AGENT_PROMPTS["SALES_CONSULTANT"]
+# _SALES_WORKFLOW_PROMPTS = load_prompt_sections("sales_agent_prompts", default_section="GREETING_GENERATION")
 # NOTE: Intent prompts have been reorganized:
 # - intent_classification_prompts.txt -> CLASSIFICATION, QUICK_CLASSIFICATION (for routing)
 # - intent_prompts.txt -> REQUIREMENTS_EXTRACTION (for intent analysis)
 # This file (prompts.py) is DEPRECATED/Legacy. New code should use tools/intent_tools.py.
-# Loading intent_prompts.txt as single prompt (contains REQUIREMENTS_EXTRACTION only)
-_INTENT_CLASSIFICATION_PROMPT = load_prompt("intent_prompts")
+
+# Using INTENT_PROMPTS string directly
+_INTENT_CLASSIFICATION_PROMPT = INTENT_PROMPTS
+
 # PPI prompts loaded from combined file
-_PPI_PROMPTS = load_prompt_sections("potential_product_index_prompts", default_section="PRODUCT_INDEX")
-_PPI_VENDOR_DISCOVERY_PROMPT = _PPI_PROMPTS["VENDOR_DISCOVERY"]
-_RANKING_PROMPTS = load_prompt_sections("ranking_prompts", default_section="RANKING")
-_STRATEGY_STANDARDIZATION_PROMPTS = load_prompt_sections(
-    "strategy_standardization_prompts",
-    default_section="CATEGORY_STANDARDIZATION"
-)
+_PPI_PROMPTS = INDEXING_AGENT_PROMPTS
+_PPI_VENDOR_DISCOVERY_PROMPT = _PPI_PROMPTS.get("VENDOR_DISCOVERY", "")
+_RANKING_PROMPTS = RANKING_PROMPTS
+_STRATEGY_STANDARDIZATION_PROMPTS = RAG_PROMPTS
 
 
 # ========================================================================================
@@ -49,22 +56,23 @@ _STRATEGY_STANDARDIZATION_PROMPTS = load_prompt_sections(
 # ========================================================================================
 
 # Legacy sales agent prompts - use the main prompt for all
-sales_agent_knowledge_question_prompt = _SALES_AGENT_MAIN_PROMPT
-sales_agent_initial_input_prompt = _SALES_AGENT_MAIN_PROMPT
-sales_agent_no_additional_specs_prompt = _SALES_AGENT_MAIN_PROMPT
-sales_agent_yes_additional_specs_prompt = _SALES_AGENT_MAIN_PROMPT
-sales_agent_acknowledge_additional_specs_prompt = _SALES_AGENT_MAIN_PROMPT
-sales_agent_default_prompt = _SALES_AGENT_MAIN_PROMPT
-sales_agent_advanced_specs_yes_prompt = _SALES_AGENT_MAIN_PROMPT
-sales_agent_advanced_specs_no_prompt = _SALES_AGENT_MAIN_PROMPT
-sales_agent_advanced_specs_display_prompt = _SALES_AGENT_MAIN_PROMPT
-sales_agent_confirm_after_missing_info_prompt = _SALES_AGENT_MAIN_PROMPT
-sales_agent_confirm_after_missing_info_with_params_prompt = _SALES_AGENT_MAIN_PROMPT
-sales_agent_show_summary_proceed_prompt = _SALES_WORKFLOW_PROMPTS["SUMMARY_GENERATION"]
-sales_agent_show_summary_intro_prompt = _SALES_WORKFLOW_PROMPTS["SUMMARY_GENERATION"]
-sales_agent_final_analysis_prompt = _SALES_AGENT_MAIN_PROMPT
-sales_agent_analysis_error_prompt = _SALES_AGENT_MAIN_PROMPT
-sales_agent_greeting_prompt = _SALES_WORKFLOW_PROMPTS["GREETING"]
+# Legacy sales agent prompts removed
+sales_agent_knowledge_question_prompt = ""
+sales_agent_initial_input_prompt = ""
+sales_agent_no_additional_specs_prompt = ""
+sales_agent_yes_additional_specs_prompt = ""
+sales_agent_acknowledge_additional_specs_prompt = ""
+sales_agent_default_prompt = ""
+sales_agent_advanced_specs_yes_prompt = ""
+sales_agent_advanced_specs_no_prompt = ""
+sales_agent_advanced_specs_display_prompt = ""
+sales_agent_confirm_after_missing_info_prompt = ""
+sales_agent_confirm_after_missing_info_with_params_prompt = ""
+sales_agent_show_summary_proceed_prompt = ""
+sales_agent_show_summary_intro_prompt = ""
+sales_agent_final_analysis_prompt = ""
+sales_agent_analysis_error_prompt = ""
+sales_agent_greeting_prompt = ""
 
 # ========================================================================================
 # FEEDBACK PROMPTS (Legacy)
@@ -77,13 +85,12 @@ feedback_comment_prompt = "Thank you for your comment: {comment}"
 # ========================================================================================
 # IDENTIFICATION PROMPTS (Legacy - replaced by identify_instruments_tool)
 # ========================================================================================
-_PRODUCT_ID_PROMPTS = load_prompt_sections("product_identification_prompt", default_section="INSTRUMENT_IDENTIFICATION")
+_PRODUCT_ID_PROMPTS = SOLUTION_DEEP_AGENT_PROMPTS
 
 identify_classification_prompt = _INTENT_CLASSIFICATION_PROMPT #["CLASSIFICATION"]
-identify_greeting_prompt = _SALES_WORKFLOW_PROMPTS["GREETING"]
+identify_greeting_prompt = ""
 identify_instrument_prompt = _PRODUCT_ID_PROMPTS.get("INSTRUMENT_IDENTIFICATION", "")  # Unified prompt
 identify_unrelated_prompt = _INTENT_CLASSIFICATION_PROMPT #["CLASSIFICATION"]
-identify_question_prompt = load_prompt("question_classification_prompt") # Still individual
 identify_fallback_prompt = _INTENT_CLASSIFICATION_PROMPT #["CLASSIFICATION"]
 identify_unexpected_prompt = _INTENT_CLASSIFICATION_PROMPT #["CLASSIFICATION"]
 
@@ -97,7 +104,7 @@ manufacturer_domain_prompt = _PPI_VENDOR_DISCOVERY_PROMPT
 # VALIDATION PROMPTS (Legacy - replaced by schema_tools.py)
 # ========================================================================================
 
-validation_prompt = load_prompt("schema_validation_prompt") # Still individual
+validation_prompt = SCHEMA_VALIDATION_PROMPT # Still individual
 validation_alert_initial_prompt = "Please review the validation results."
 validation_alert_repeat_prompt = "Please address the validation issues."
 
@@ -111,7 +118,7 @@ requirement_explanation_prompt = _INTENT_CLASSIFICATION_PROMPT #["REQUIREMENTS_E
 # ADVANCED PARAMETER PROMPTS (Legacy)
 # ========================================================================================
 
-advanced_parameter_selection_prompt = _SALES_WORKFLOW_PROMPTS["PARAMETER_SELECTION"]
+advanced_parameter_selection_prompt = ""
 
 # ========================================================================================
 # LANGCHAIN CHAT PROMPT TEMPLATES (Legacy - for chaining.py)
@@ -187,27 +194,6 @@ Focus on:
 - Any business or operational considerations relevant to buyers
  
 Return a clear, structured summary of requirements, using language that is actionable and easy for buyers to use in procurement. Only include sections and details for which information is explicitly present in the user's input. Do not add any inferred requirements or placeholders for missing information.
-Validate the outputs and adherence to the output structure.
- 
-""")
-
-# Additional requirements prompt
-additional_requirements_prompt = ChatPromptTemplate.from_template("""
-You are Engenie - an expert assistant for industrial requisitioners and buyers. The user wants to add or modify a requirement for a {product_type}.
- 
-User's new input:
-{user_input}
- 
-Current requirements schema for the product:
-{schema}
- 
-Tasks:
-1. Identify and extract any specific requirements from the user's new input.
-2. Only include requirements that are explicitly mentioned in this latest input. Do not repeat old requirements.
-3. If no new requirements are found, return an empty dictionary for the requirements.
- 
-{format_instructions}
- 
 Validate the outputs and adherence to the output structure.
  
 """)
@@ -317,13 +303,14 @@ def get_validation_prompt(user_input: str, schema: str, format_instructions: str
     Build validation prompt for requirement extraction.
     Used by chaining.py invoke_validation_chain().
     """
-    template = load_prompt("schema_validation_prompt") # Still individual
+    template = SCHEMA_VALIDATION_PROMPT # Still individual
     # Template uses: {user_input}, {product_type}, {schema}
     # format_instructions not used in this template, but we need product_type
     return template.format(
         user_input=user_input,
         product_type="",  # Will be detected from input
-        schema=schema
+        schema=schema,
+        format_instructions=format_instructions
     )
 
 
@@ -367,7 +354,7 @@ def get_vendor_prompt(
     Returns:
         Formatted prompt string ready for LLM
     """
-    template = load_prompt("analysis_tool_vendor_analysis_prompt")
+    template = ANALYSIS_TOOL_VENDOR_ANALYSIS_PROMPT
     
     # Handle optional standards parameters
     if applicable_standards is None:
@@ -403,6 +390,54 @@ def get_ranking_prompt(vendor_analysis: str, format_instructions: str) -> str:
     )
 
 
+_ADDITIONAL_REQUIREMENTS_PROMPT = """You are EnGenie, an expert in Industrial Process Control Systems. Your task is to extract ADDITIONAL technical requirements from the user's input and map them to the provided schema fields.
+
+PRODUCT TYPE: {product_type}
+
+AVAILABLE SCHEMA FIELDS:
+{schema}
+
+USER INPUT: {user_input}
+
+INSTRUCTIONS:
+1. Extract ONLY the values that the user explicitly provides in their input
+2. Map each value to the appropriate field from the schema above
+3. Use the exact camelCase field names from the schema
+4. Do NOT infer or assume values that aren't explicitly stated
+5. If a value doesn't match any schema field, ignore it
+6. Return empty dictionary for provided_requirements if no valid requirements are found
+
+CRITICAL RULES:
+- Only extract fields that exist in the provided schema
+- Use exact schema field names (camelCase)
+- Extract the exact values the user provides
+- Do NOT add default values or inferences
+
+EXPECTED OUTPUT FORMAT:
+{{
+  "provided_requirements": {{
+    "<schemaFieldName>": "<userProvidedValue>",
+    "<anotherSchemaField>": "<anotherValue>"
+  }},
+  "product_type": "{product_type}"
+}}
+
+EXAMPLE:
+User says: "Class V seat leakage, Equal Percentage flow characteristic, Cv 25, Fail-Close"
+For a Control Valve schema, output:
+{{
+  "provided_requirements": {{
+    "seatLeakageClass": "Class V",
+    "flowCharacteristic": "Equal Percentage",
+    "ratedCvKvRange": "25",
+    "actuatorAction": "Fail-Close"
+  }},
+  "product_type": "Control Valve"
+}}
+
+Now extract requirements from the user input above. Respond with ONLY valid JSON."""
+
+
 def get_additional_requirements_prompt(
     user_input: str,
     product_type: str,
@@ -413,8 +448,7 @@ def get_additional_requirements_prompt(
     Build additional requirements extraction prompt.
     Used by chaining.py invoke_additional_requirements_chain().
     """
-    template = load_prompt("additional_requirements_prompt")
-    return template.format(
+    return _ADDITIONAL_REQUIREMENTS_PROMPT.format(
         user_input=user_input,
         product_type=product_type,
         schema=schema,

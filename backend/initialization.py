@@ -32,7 +32,7 @@ def _cleanup_bounded_caches():
     Prevents memory leaks and logs final statistics.
     """
     try:
-        from agentic.infrastructure.caching.bounded_cache import (
+        from common.infrastructure.caching.bounded_cache import (
             cleanup_all_caches,
             get_all_cache_stats,
             get_registry_summary
@@ -69,7 +69,7 @@ def _shutdown_global_executor():
     Ensures all pending tasks complete before shutdown.
     """
     try:
-        from agentic.infrastructure.state.execution.executor_manager import shutdown_global_executor, get_executor_stats
+        from common.infrastructure.state.execution.executor_manager import shutdown_global_executor, get_executor_stats
 
         logger.info("[CLEANUP] Shutting down global executor...")
 
@@ -87,19 +87,6 @@ def _shutdown_global_executor():
         logger.error(f"[CLEANUP] Error shutting down global executor: {e}", exc_info=True)
 
 
-def _cleanup_image_retry_worker():
-    """
-    Stop the image generation retry worker thread.
-    """
-    try:
-        from agentic.tasks.cache_cleanup_task import stop_cache_cleanup
-        logger.info("[CLEANUP] Stopping background cleanup task...")
-        stop_cache_cleanup()
-        logger.info("[CLEANUP] ✓ Background cleanup task stopped")
-    except ImportError:
-        logger.debug("[CLEANUP] Cache cleanup task not available")
-    except Exception as e:
-        logger.error(f"[CLEANUP] Error stopping cleanup task: {e}", exc_info=True)
 
 
 def register_cleanup_handlers():
@@ -119,7 +106,6 @@ def register_cleanup_handlers():
     # They will execute in reverse order (LIFO)
     atexit.register(_shutdown_global_executor)
     atexit.register(_cleanup_bounded_caches)
-    atexit.register(_cleanup_image_retry_worker)
 
     # Register final status logging
     def _log_final_status():
@@ -155,7 +141,7 @@ def initialize_application() -> bool:
     # Step 1.5: Configure LangSmith tracing (if API key available)
     logger.info("[INIT] Step 1.5: Configuring observability...")
     try:
-        from config.langsmith_config import configure_langsmith
+        from common.config.langsmith_config import configure_langsmith
         langsmith_enabled = configure_langsmith()
         if langsmith_enabled:
             logger.info("[INIT] ✓ LangSmith tracing enabled")
@@ -211,7 +197,7 @@ def validate_all_configs() -> None:
 
     # Validate Pinecone Configuration
     try:
-        from config import PineconeConfig
+        from common.config import PineconeConfig
         PineconeConfig.validate()
         logger.info("[INIT]   ✓ PineconeConfig validated")
     except ValueError as e:
@@ -221,7 +207,7 @@ def validate_all_configs() -> None:
 
     # Validate Agentic Configuration
     try:
-        from config import AgenticConfig
+        from common.config import AgenticConfig
         AgenticConfig.validate()
         logger.info("[INIT]   ✓ AgenticConfig validated")
     except ValueError as e:
@@ -346,7 +332,7 @@ def initialize_singletons() -> None:
     """
     # Initialize MongoDB Manager (NEW - Phase 1 refactoring)
     try:
-        from core.mongodb_manager import mongodb_manager, is_mongodb_available
+        from common.core.mongodb_manager import mongodb_manager, is_mongodb_available
         if is_mongodb_available():
             logger.info("[INIT]   ✓ MongoDB Manager connected")
         else:
@@ -358,7 +344,7 @@ def initialize_singletons() -> None:
 
     # Initialize API Key Manager
     try:
-        from config.api_key_manager import api_key_manager
+        from common.config.api_key_manager import api_key_manager
         google_count = api_key_manager.get_google_key_count()
         logger.info(f"[INIT]   ✓ API Key Manager initialized: {google_count} Google key(s) available")
 
@@ -376,7 +362,7 @@ def initialize_singletons() -> None:
     # Initialize Azure Blob Manager (if configured) - NON-BLOCKING
     # We DON'T connect here to avoid blocking if Azure is unreachable
     try:
-        from azure_blob_config import azure_blob_manager
+        from common.config.azure_blob_config import azure_blob_manager
         if azure_blob_manager.is_available:
             # OPTIMIZATION: Don't trigger connection here - lazy initialization
             # Connection will happen on first actual use
@@ -389,39 +375,16 @@ def initialize_singletons() -> None:
         logger.warning(f"[INIT]   ⚠ Azure Blob Manager initialization failed: {e}")
         # Don't raise - Azure is optional
 
-    # Initialize Protected Caches (PHASE 2 FIX)
-    try:
-        from advanced_parameters import IN_MEMORY_ADVANCED_SPEC_CACHE, SCHEMA_PARAM_CACHE
+    # Initialize Protected Caches (REMOVED - 'search' module deprecated)
+    # Caches are now managed within their respective modules (e.g. product_search)
+    pass
 
-        # Set admin token for protected caches
-        cache_admin_token = os.getenv("CACHE_ADMIN_TOKEN")
-        if cache_admin_token:
-            IN_MEMORY_ADVANCED_SPEC_CACHE.set_admin_token(cache_admin_token)
-            SCHEMA_PARAM_CACHE.set_admin_token(cache_admin_token)
-            logger.info("[INIT]   ✓ Protected caches configured with admin token")
-        else:
-            logger.warning("[INIT]   ⚠ CACHE_ADMIN_TOKEN not set - caches will require token to clear")
-
-    except ImportError:
-        logger.warning("[INIT]   ⚠ Cache modules not available")
-    except Exception as e:
-        logger.error(f"[INIT]   ✗ Cache initialization failed: {e}")
-
-    # Initialize Image Generation Retry Worker (FIX 4)
-    try:
-        from services.azure.image_utils import start_retry_worker
-        start_retry_worker()
-        logger.info("[INIT]   ✓ Image generation retry worker started")
-    except ImportError:
-        logger.warning("[INIT]   ⚠ generic_image_utils not available")
-    except Exception as e:
-        logger.error(f"[INIT]   ✗ Failed to start retry worker: {e}")
 
     # Initialize Database Indexes (NEW - Phase 1 refactoring)
     try:
-        from core.mongodb_manager import is_mongodb_available
+        from common.core.mongodb_manager import is_mongodb_available
         if is_mongodb_available():
-            from core.db_indexes import ensure_indexes
+            from common.core.db_indexes import ensure_indexes
             ensure_indexes()
             logger.info("[INIT]   ✓ MongoDB indexes created/verified")
     except ImportError:
@@ -431,11 +394,11 @@ def initialize_singletons() -> None:
 
     # Initialize Service Layer (NEW - Phase 2 refactoring)
     try:
-        from services.schema_service import schema_service
-        from services.vendor_service import vendor_service
-        from services.project_service import project_service
-        from services.document_service import document_service
-        from services.image_service import image_service
+        from common.services.schema_service import schema_service
+        from common.services.vendor_service import vendor_service
+        from common.services.project_service import project_service
+        from common.services.document_service import document_service
+        from common.services.image_service import image_service
         logger.info("[INIT]   ✓ Service layer initialized (schema, vendor, project, document, image)")
     except ImportError as e:
         logger.warning(f"[INIT]   ⚠ Some services not available: {e}")
@@ -467,7 +430,7 @@ def check_initialization_status() -> dict:
 
     # Check API keys
     try:
-        from config.api_key_manager import api_key_manager
+        from common.config.api_key_manager import api_key_manager
         status["google_api_keys"] = api_key_manager.get_google_key_count()
     except:
         pass
@@ -479,16 +442,16 @@ def check_initialization_status() -> dict:
     # Check MongoDB (NEW - Phase 1 refactoring)
     status["mongodb_configured"] = bool(os.getenv("MONGODB_URI"))
     try:
-        from core.mongodb_manager import is_mongodb_available
+        from common.core.mongodb_manager import is_mongodb_available
         status["mongodb_connected"] = is_mongodb_available()
     except:
         pass
 
     # Check services availability (NEW - Phase 2 refactoring)
     try:
-        from services.schema_service import schema_service
-        from services.vendor_service import vendor_service
-        from services.project_service import project_service
+        from common.services.schema_service import schema_service
+        from common.services.vendor_service import vendor_service
+        from common.services.project_service import project_service
         status["services_available"] = all([
             schema_service is not None,
             vendor_service is not None,
@@ -522,7 +485,7 @@ def get_database_health() -> dict:
 
     # Check MongoDB
     try:
-        from core.mongodb_manager import mongodb_manager
+        from common.core.mongodb_manager import mongodb_manager
         if mongodb_manager:
             health["mongodb"] = mongodb_manager.health_check()
     except ImportError:
@@ -532,7 +495,7 @@ def get_database_health() -> dict:
 
     # Check Azure Blob
     try:
-        from core.azure_blob_file_manager import azure_blob_file_manager
+        from common.core.azure_blob_file_manager import azure_blob_file_manager
         if azure_blob_file_manager:
             health["azure_blob"] = azure_blob_file_manager.health_check()
     except ImportError:
@@ -542,21 +505,21 @@ def get_database_health() -> dict:
 
     # Check services
     try:
-        from services.schema_service import schema_service
+        from common.services.schema_service import schema_service
         if schema_service:
             health["services"]["schema"] = schema_service.health_check()
     except:
         pass
 
     try:
-        from services.vendor_service import vendor_service
+        from common.services.vendor_service import vendor_service
         if vendor_service:
             health["services"]["vendor"] = vendor_service.health_check()
     except:
         pass
 
     try:
-        from services.project_service import project_service
+        from common.services.project_service import project_service
         if project_service:
             health["services"]["project"] = project_service.health_check()
     except:
