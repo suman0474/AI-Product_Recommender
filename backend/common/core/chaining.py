@@ -31,7 +31,7 @@ from langchain_core.runnables import RunnableLambda
 from langchain_core.prompts import ChatPromptTemplate
 
 # PHASE 1 FIX: load_dotenv() removed - initialized once in initialization.py
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# NOTE: basicConfig already called by initialization.py — do not re-configure here.
 
 
 class GeminiClient(RunnableLambda):
@@ -548,6 +548,7 @@ def _invoke_vendor_chain_for_payload(
 
     return invoke_vendor_chain(
         components,
+        vendor_name,
         structured_requirements,
         products_payload,
         pdf_payload,

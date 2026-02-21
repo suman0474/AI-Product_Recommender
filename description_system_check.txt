@@ -1,0 +1,73 @@
+System-wide Standardized Description Check
+=========================================
+
+Total Items Checked: 71
+Found in Database/Catalog: 7
+Found in Vector Store RAG: 0
+Missing Built-in Descriptions: 64
+
+Missing Items:
+- Ball Valve
+- Turbidity Sensor
+- Temperature Calibrator
+- Oxygen Sensor
+- Thermocouple Assembly
+- Toc Analyzer
+- Tachometer
+- Remote Unit
+- Alarm System
+- Emission Sensor
+- Hmi System
+- Flow Meter
+- Moisture Sensor
+- Temperature Sensor
+- Energy Meter
+- Limit Switch
+- Flow Controller
+- Voltage Sensor
+- Refractometer
+- Flame Sensor
+- Pressure Gauge
+- Thickness Sensor
+- Orp Sensor
+- Controller
+- Shutdown System
+- Damper
+- Linear Encoder
+- Actuator
+- Temperature Indicator
+- Temperature Controller
+- Ph Sensor
+- Humidity Sensor
+- Current Sensor
+- Laser Displacement Sensor
+- Proximity Sensor
+- Leak Sensor
+- Safety Valve
+- Smoke Sensor
+- Gas Analyzer
+- Signal Transmitter
+- Smart Transmitter
+- Light Curtain
+- Displacement Sensor
+- Rotary Encoder
+- Scada System
+- Vibration Sensor
+- Process Control System
+- Particulate Sensor
+- Logger
+- Ultrasonic Sensor
+- Strain Gauge
+- Viscosity Sensor
+- Gas Sensor
+- Pressure Sensor
+- Density Sensor
+- Sound Sensor
+- Gateway
+- Conductivity Sensor
+- Water Sensor
+- Flow Element
+- Cable Glands And Conduit Fittings
+- Amplifier
+- Instrument Cable
+- Surge Protector

@@ -25,7 +25,6 @@ from common.services.extraction.extraction_engine import (
     save_json
 )
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Global semaphore to control concurrent LLM calls (max 2 simultaneous)

@@ -718,14 +718,26 @@ class StandardsChatAgent:
                     response_dict = extract_json_from_response(raw_text)
 
                     if response_dict is None:
-                        logger.error(
-                            f"Failed to extract JSON from response. Raw: {raw_text[:300]}"
+                        # Final fallback: the LLM returned rich markdown text instead of
+                        # valid JSON (e.g. **bold** formatting, bullet lists with \n).
+                        # Build a minimal valid response dict from the raw text so the
+                        # workflow can continue rather than hard-failing every retry.
+                        logger.warning(
+                            "[StandardsChatAgent] All JSON extraction failed - "
+                            "constructing fallback response from raw text"
                         )
-                        raise ValueError(
-                            "LLM returned invalid JSON format. "
-                            "Response must be valid JSON only."
-                        )
-                    logger.info("JSON extracted successfully (from response)")
+                        # Strip markdown bold/italic markers so the text is clean
+                        import re as _re
+                        clean_text = _re.sub(r'\*{1,2}([^*]+)\*{1,2}', r'\1', raw_text)
+                        clean_text = _re.sub(r'`([^`]+)`', r'\1', clean_text).strip()
+                        response_dict = {
+                            "answer": clean_text or raw_text,
+                            "citations": [],
+                            "confidence": 2.0,
+                            "sources": []
+                        }
+                    else:
+                        logger.info("JSON extracted successfully (from response)")
 
                 # FIX #2: Normalize response dictionary for schema compliance
                 logger.debug("Normalizing response for schema compliance...")

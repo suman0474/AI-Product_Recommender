@@ -11,7 +11,17 @@ from urllib.parse import urlparse
 from glob import glob
 import logging
 import requests
-from serpapi.google_search import GoogleSearch
+try:
+    from serpapi.google_search import GoogleSearch
+except ImportError:
+    # Fallback for serpapi versions that don't have google_search module
+    class GoogleSearch:
+        def __init__(self, params):
+            self.params = params
+
+        def get_dict(self):
+            response = requests.get("https://serpapi.com/search", params=self.params)
+            return response.json()
 from googleapiclient.discovery import build
 from langchain_core.runnables import RunnableLambda
 from concurrent.futures import ThreadPoolExecutor, as_completed

@@ -562,6 +562,17 @@ def extract_requirements_tool(user_input: str) -> Dict[str, Any]:
         }
 
     except Exception as e:
+        error_str = str(e).lower()
+        if "json" in error_str or "parse" in error_str or "parsing" in error_str or "output" in error_str:
+            logger.warning(f"Requirements extraction JSON parse failed (likely conversational input): {e}")
+            return {
+                "success": True,
+                "product_type": None,
+                "is_conversational": True,
+                "specifications": {},
+                "raw_requirements_text": user_input
+            }
+
         logger.error(f"Requirements extraction failed: {e}")
         return {
             "success": False,

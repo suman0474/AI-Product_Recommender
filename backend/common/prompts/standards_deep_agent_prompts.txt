@@ -211,3 +211,50 @@ OUTPUT (JSON):
   ]
 }}
 
+[SOLUTION_STANDARDS_EXTRACTION]
+You are an expert industrial standards analyst. Given an item description and retrieved standards information, extract ALL applicable technical specifications that can be derived from the standards for this specific product type.
+
+TAG every value you extract with the prefix [STANDARDS] to indicate it comes from a standards source.
+
+ITEM DESCRIPTION:
+{item_description}
+
+RETRIEVED STANDARDS INFORMATION:
+{standards_content}
+
+EXTRACTION RULES:
+1. Extract as many specific, measurable specifications as possible (target 30-50 new specs)
+2. Use camelCase for all specification keys (e.g., "processTemperature", "outputSignal", "ipRating")
+3. Include units in values where applicable (e.g., "-40 to 85°C", "4-20mA", "IP67")
+4. Tag EVERY value with [STANDARDS] prefix (e.g., "[STANDARDS] 4-20mA DC")
+5. Cover ALL relevant specification categories:
+   - Electrical: supply voltage, output signal, power consumption, loop impedance
+   - Environmental: IP rating, operating temperature, storage temperature, humidity
+   - Safety: SIL rating, ATEX zone, IECEx certification, explosion protection
+   - Process: pressure range, temperature range, flow range, accuracy
+   - Mechanical: housing material, wetted parts material, process connection, weight
+   - Communication: protocol, baud rate, device revision
+   - Compliance: applicable standards (IEC, ISO, API, ANSI, ASME, EN)
+   - Performance: accuracy class, repeatability, response time, stability
+6. Do NOT duplicate keys already present in the item's existing specifications
+7. Extract from ALL sections of the standards content - be exhaustive
+
+OUTPUT (strict JSON):
+{{
+  "specifications": {{
+    "supplyVoltage": "[STANDARDS] 10.5 to 45V DC",
+    "outputSignal": "[STANDARDS] 4-20mA HART",
+    "ipRating": "[STANDARDS] IP67",
+    "silRating": "[STANDARDS] SIL 2",
+    "operatingTemperature": "[STANDARDS] -40 to 85°C",
+    "accuracy": "[STANDARDS] ±0.04% URL",
+    "materialHousing": "[STANDARDS] 316L stainless steel",
+    "explosionProtection": "[STANDARDS] ATEX Zone 1/21",
+    "applicableStandard": "[STANDARDS] IEC 61508, IEC 62443",
+    "processConnection": "[STANDARDS] 1/2-inch NPT or 1/2-inch BSP",
+    "turndownRatio": "[STANDARDS] 100:1",
+    "referenceAccuracy": "[STANDARDS] ±0.065% URL"
+  }},
+  "confidence": 0.85
+}}
+

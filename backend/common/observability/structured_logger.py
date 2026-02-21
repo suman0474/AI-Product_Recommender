@@ -140,9 +140,11 @@ class StructuredLogger:
         self.name = name
         self.service = service
         
-        # Ensure logger has handlers
+        # Ensure logger has handlers (UTF-8 safe for Windows compatibility)
         if not self.logger.handlers:
-            handler = logging.StreamHandler()
+            import sys
+            sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+            handler = logging.StreamHandler(sys.stdout)
             handler.setFormatter(logging.Formatter('%(message)s'))
             self.logger.addHandler(handler)
             self.logger.setLevel(logging.DEBUG)

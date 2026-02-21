@@ -319,19 +319,48 @@ class DeepAgenticWorkflowOrchestrator:
     @property
     def advanced_params_tool(self):
         if self._advanced_params_tool is None:
-            from search.compat import AdvancedParametersTool
-            self._advanced_params_tool = AdvancedParametersTool()
+            from search.advanced_specification_agent import AdvancedSpecificationAgent
+            self._advanced_params_tool = AdvancedSpecificationAgent()
         return self._advanced_params_tool
 
     @property
     def workflow_helper(self):
+        """Workflow helper using tool-based architecture."""
         if self._workflow_helper is None:
-            from search.compat import ProductSearchWorkflow
-            self._workflow_helper = ProductSearchWorkflow(
-                enable_ppi_workflow=self.enable_ppi,
-                max_vendor_workers=self.max_workers
-            )
+            # Create a simple wrapper that delegates to the tool classes
+            self._workflow_helper = self._create_workflow_helper()
         return self._workflow_helper
+
+    def _create_workflow_helper(self):
+        """Create a workflow helper using tool-based architecture."""
+        from search.vendor_analysis_deep_agent import VendorAnalysisTool
+        from search.ranking_tool import RankingTool
+
+        class ToolBasedWorkflowHelper:
+            """Wrapper that provides workflow helper interface using tools."""
+
+            def __init__(self):
+                self.vendor_tool = VendorAnalysisTool()
+                self.ranking_tool = RankingTool(use_llm_ranking=True)
+
+            def run_vendor_analysis_step(self, structured_requirements, product_type, session_id, schema=None):
+                """Run vendor analysis using VendorAnalysisTool."""
+                return self.vendor_tool.analyze(
+                    structured_requirements=structured_requirements,
+                    product_type=product_type,
+                    session_id=session_id,
+                    schema=schema
+                )
+
+            def run_ranking_step(self, vendor_analysis, session_id, structured_requirements=None):
+                """Run ranking using RankingTool."""
+                return self.ranking_tool.rank(
+                    vendor_analysis=vendor_analysis,
+                    session_id=session_id,
+                    structured_requirements=structured_requirements
+                )
+
+        return ToolBasedWorkflowHelper()
 
     # =========================================================================
     # COSMOS DB ADAPTER (Fixes Object vs Dict mismatch)
@@ -569,7 +598,13 @@ class DeepAgenticWorkflowOrchestrator:
 
     def _handle_await_missing_fields(self, state: WorkflowState, decision: UserDecision,
                                      fields: Optional[Dict], hint: Optional[str]) -> Dict:
-        """Handle user decision on missing fields."""
+        """Handle user decision on missing fields.
+
+        IMPORTANT: The HITL message asks:
+        "do you want to add missing values... tell me YES or NO"
+        - YES = continue WITHOUT adding (proceed to advanced discovery)
+        - NO = user wants TO ADD missing values (collect fields)
+        """
         logger.info(f"[DEEP_WORKFLOW] Phase: AWAIT_MISSING_FIELDS, decision={decision.value}")
 
         if decision == UserDecision.UNKNOWN:
@@ -577,8 +612,22 @@ class DeepAgenticWorkflowOrchestrator:
             state.awaiting_user_input = True
             return {}
 
-        if decision in [UserDecision.ADD_FIELDS, UserDecision.YES]:
-            # User wants to add fields
+        # ╔══════════════════════════════════════════════════════════════════════════╗
+        # ║  FIX: Align with HITL message semantics                                   ║
+        # ║  HITL asks: "shall i continue without adding missing specs? YES or NO"   ║
+        # ║  YES = continue without adding → proceed to advanced discovery           ║
+        # ║  NO = user wants to add → collect fields                                 ║
+        # ╚══════════════════════════════════════════════════════════════════════════╝
+        if decision in [UserDecision.YES, UserDecision.CONTINUE, UserDecision.SKIP]:
+            # YES = User wants to CONTINUE without filling fields → Advanced Discovery
+            logger.info(f"[DEEP_WORKFLOW] User said YES/CONTINUE - proceeding to Advanced Params Discovery")
+            state.phase = WorkflowPhase.ADVANCED_DISCOVERY
+            state.awaiting_user_input = False
+            return self._handle_advanced_discovery(state, decision, fields, hint)
+
+        if decision in [UserDecision.NO, UserDecision.ADD_FIELDS]:
+            # NO = User wants TO ADD missing fields → Collect Fields
+            logger.info(f"[DEEP_WORKFLOW] User said NO/ADD_FIELDS - collecting missing fields")
             state.phase = WorkflowPhase.COLLECT_FIELDS
             state.awaiting_user_input = True
             state.last_message = (
@@ -586,13 +635,6 @@ class DeepAgenticWorkflowOrchestrator:
                 "\n".join([f"• **{f}**" for f in state.missing_fields[:10]])
             )
             return {}
-
-        if decision in [UserDecision.CONTINUE, UserDecision.SKIP, UserDecision.NO]:
-            # User wants to continue without filling fields
-            logger.info(f"[DEEP_WORKFLOW] User chose to continue, running Advanced Params Discovery")
-            state.phase = WorkflowPhase.ADVANCED_DISCOVERY
-            state.awaiting_user_input = False
-            return self._handle_advanced_discovery(state, decision, fields, hint)
 
         # Unknown decision - ask again
         state.awaiting_user_input = True

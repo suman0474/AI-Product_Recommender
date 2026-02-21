@@ -612,16 +612,71 @@ def create_instrument_identification_workflow() -> StateGraph:
         state["response"] = "\n".join(response_lines)
         return state
 
+    def normalize_taxonomy_node(state: WorkflowState) -> WorkflowState:
+        """Run taxonomy normalization on identified items before formatting"""
+        try:
+            from taxonomy_rag.integration import TaxonomyIntegrationAdapter
+            
+            instruments = state.get("instruments", [])
+            accessories = state.get("accessories", [])
+            
+            if not instruments and not accessories:
+                return state
+                
+            payload = {
+                "identified_instruments": instruments,
+                "identified_accessories": accessories,
+                "user_input": state.get("user_input", ""),
+                "solution_name": state.get("response_data", {}).get("project_name", "Instrument ID")
+            }
+            
+            logger.info(f"[WORKFLOW] Running Taxonomy Normalization on {len(instruments)} inst, {len(accessories)} acc...")
+            
+            integration_result = TaxonomyIntegrationAdapter.prepare_for_search_workflow(
+                solution_deep_agent_output=payload
+            )
+            
+            if integration_result.get("success"):
+                # Use standardized versions if available
+                std_inst = integration_result.get("standardized_instruments", instruments)
+                std_acc = integration_result.get("standardized_accessories", accessories)
+                
+                # Replace properties cleanly to preserve old formats if needed, but update names
+                for i, inst in enumerate(std_inst):
+                    if i < len(instruments):
+                        instruments[i]["product_name"] = inst.get("canonical_name", inst.get("product_name", instruments[i].get("product_name")))
+                        instruments[i]["category"] = inst.get("category", instruments[i].get("category"))
+                
+                for i, acc in enumerate(std_acc):
+                    if i < len(accessories):
+                        accessories[i]["accessory_name"] = acc.get("canonical_name", acc.get("accessory_name", accessories[i].get("accessory_name")))
+                        accessories[i]["category"] = acc.get("category", accessories[i].get("category"))
+                
+                state["instruments"] = instruments
+                state["accessories"] = accessories
+                
+                if "response_data" in state:
+                    state["response_data"]["instruments"] = instruments
+                    state["response_data"]["accessories"] = accessories
+                    
+                logger.info("[WORKFLOW] Taxonomy Normalization applied successfully!")
+        except Exception as e:
+            logger.error(f"[WORKFLOW] Failed to run taxonomy normalization: {e}")
+            
+        return state
+
     # Create workflow
     workflow = StateGraph(WorkflowState)
 
     workflow.add_node("identify_instruments", identify_instruments_node)
     workflow.add_node("identify_accessories", identify_accessories_node)
+    workflow.add_node("normalize_taxonomy", normalize_taxonomy_node)
     workflow.add_node("format_response", format_bom_response)
 
     workflow.set_entry_point("identify_instruments")
     workflow.add_edge("identify_instruments", "identify_accessories")
-    workflow.add_edge("identify_accessories", "format_response")
+    workflow.add_edge("identify_accessories", "normalize_taxonomy")
+    workflow.add_edge("normalize_taxonomy", "format_response")
     workflow.add_edge("format_response", END)
 
     return workflow

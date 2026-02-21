@@ -12,7 +12,6 @@ from docx import Document
 from typing import Dict, List, Any
 import logging
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Define product type mapping from filename

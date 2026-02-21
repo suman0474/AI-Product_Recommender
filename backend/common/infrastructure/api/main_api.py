@@ -1934,7 +1934,7 @@ def agentic_validate():
         )
 
         product_type = validation_result.get("product_type", "")
-        schema = validation_result.get("schema", {})
+        schema = validation_result.get("detected_schema", {})
         requirements = validation_result.get("provided_requirements", {})
         missing_fields = validation_result.get("missing_fields", [])
         ppi_used = validation_result.get("ppi_workflow_used", False)
@@ -2064,7 +2064,7 @@ def agentic_advanced_parameters():
         }
     """
     try:
-        from search.compat import AdvancedParametersTool
+        from search.advanced_specification_agent import AdvancedSpecificationAgent
 
         data = request.get_json()
 
@@ -2079,7 +2079,7 @@ def agentic_advanced_parameters():
         logger.info(f"[ADVANCED_PARAMS_TOOL] Session: {session_id}")
 
         # Initialize and run the tool
-        tool = AdvancedParametersTool()
+        tool = AdvancedSpecificationAgent()
         result = tool.discover(
             product_type=product_type,
             session_id=session_id
@@ -2174,8 +2174,8 @@ def product_search():
         }
     """
     try:
-        # Search Deep Agent workflow (replaces old DeepAgenticWorkflowOrchestrator)
-        from search import run_product_search_workflow as run_search_deep_agent, resume_product_search_workflow as run_search_deep_agent_resume
+        # Tool-based search workflow
+        from search import run_product_search_workflow
 
         data = request.get_json()
         if not data:
@@ -2197,129 +2197,88 @@ def product_search():
         item_thread_id = data.get('item_thread_id')
         parent_workflow_thread_id = data.get('parent_workflow_thread_id')
 
-        # Parent linkage — forwarded when spawned by Solution Deep Agent
-        parent_session_id = (
-            data.get('parent_session_id')
-            or data.get('parent_workflow_thread_id')  # legacy alias
-        )
-        parent_instance_id = data.get('parent_instance_id')
-
-        # Taxonomy canonical term — forwarded when item was selected from Solution workflow
-        taxonomy_canonical_term = (
-            data.get('taxonomy_canonical_term')
-            or data.get('canonical_name')
-            or ''
-        )
-
-        # ── HIL Resume Detection ──────────────────────────────────────────────
-        # When the frontend sends user_decision (e.g. "yes", "no", or additional
-        # specs text), it means the user is responding to a paused HIL checkpoint.
-        # We resume the existing LangGraph thread instead of starting a new search.
-        user_decision = data.get('user_decision') or data.get('human_decision')
-
         logger.info(
             f"\n{'='*60}\n"
-            f"[PRODUCT_SEARCH] Deep Agentic Workflow Request\n"
+            f"[PRODUCT_SEARCH] Tool-Based Workflow Request\n"
             f"   Main Thread ID: {main_thread_id}\n"
             f"   Workflow Thread ID: {workflow_thread_id}\n"
             f"   Zone: {zone}\n"
             f"   Session: {session_id}\n"
-            f"   HIL Resume: {bool(user_decision)}\n"
-            f"   Decision: {user_decision or 'N/A'}\n"
             f"   Input: {user_input[:50] if user_input else 'None'}...\n"
             f"{'='*60}"
         )
 
-        if user_decision and session_id:
-            # ── RESUME: continue paused workflow at HIL checkpoint ──────────
-            logger.info(
-                "[PRODUCT_SEARCH] Resuming HIL workflow session=%s decision=%s",
-                session_id, user_decision,
-            )
-            # Create update payload compatible with ProductSearchDeepAgentState
-            user_updates = {
-                "user_confirmed": True,
-                "sales_agent_response": user_decision,
-                "awaiting_user_input": False,
-            }
-            if provided_requirements:
-                user_updates["provided_requirements"] = provided_requirements
+        # Run tool-based search workflow
+        result = run_product_search_workflow(
+            user_input=user_input,
+            session_id=session_id,
+            expected_product_type=product_type_hint,
+            user_provided_fields=provided_requirements,
+            enable_ppi=True,
+            auto_mode=True
+        )
 
-            result = run_search_deep_agent_resume(
-                workflow_thread_id=session_id,  # UI tracks workflow thread ID as session_id for resume
-                user_updates=user_updates,
-            )
-        else:
-            # ── NEW SEARCH: run the workflow from the beginning ──────────────
-            # Routing agent is never invoked here — pure execution context.
-            result = run_search_deep_agent(
-                user_input=user_input,
-                session_id=session_id,
-                expected_product_type=product_type_hint,
-                main_thread_id=parent_session_id,
-                parent_workflow_id=parent_instance_id,
-                # taxonomy_canonical_term and provided_requirements supported via state injection if needed
-            )
+        # Map tool-based workflow result to expected API response shape.
+        # run_product_search_workflow returns {"success", "response", "response_data", "error"}.
+        response_data = result.get('response_data', {})
 
-        # Map SearchDeepAgentState fields to the expected API response shape
-        phases = result.get('phases_completed', [])
-        ranking = result.get('ranking_result') or {}
-        # vendor_matches lives inside the vendor_analysis sub-dict, not at the top level
-        vendor_analysis_dict = result.get('vendor_analysis') or {}
-        vendor_matches = vendor_analysis_dict.get('vendor_matches', result.get('vendor_matches', []))
-        awaiting = result.get('awaiting_user_input', False)
-        decision = result.get('validation_decision', '')
+        # Extract data from tool-based workflow
+        ranked_products_list = response_data.get('ranked_products', [])
+        vendor_matches_dict = response_data.get('vendor_matches', {})
+        product_type = response_data.get('product_type', product_type_hint)
+        schema = response_data.get('schema', {})
+        missing_fields = response_data.get('missing_fields', [])
+        advanced_params = response_data.get('advanced_parameters', [])
+        awaiting = response_data.get('awaiting_user_input', False)
+        current_phase = response_data.get('current_phase', 'completed')
+
+        # Convert vendor_matches to list format if it's a dict, otherwise use directly
+        vendor_matches = []
+        if isinstance(vendor_matches_dict, dict):
+            for vendor_name, vendor_data in vendor_matches_dict.items():
+                if isinstance(vendor_data, dict):
+                    vendor_matches.append({
+                        'vendor': vendor_name,
+                        **vendor_data
+                    })
+                elif isinstance(vendor_data, list):
+                    vendor_matches.extend(vendor_data)
+        elif isinstance(vendor_matches_dict, list):
+            vendor_matches = vendor_matches_dict
 
         mapped = {
             # Core identification
             'session_id': session_id,
-            'instance_id': result.get('instance_id', ''),
-            'parent_session_id': result.get('parent_session_id', ''),
-            'parent_instance_id': result.get('parent_instance_id', ''),
             'thread_id': workflow_thread_id,
-            'current_phase': phases[-1] if phases else 'init',
-            'phases_completed': phases,
+            'current_phase': current_phase,
+            'product_type': product_type,
 
             # Workflow status
-            'completed': bool(ranking or vendor_matches) and not awaiting,
-            'awaiting_user_input': awaiting or decision == 'needs_clarification',
-
-            # HIL checkpoint data (populated when awaiting_user_input=True)
-            'hil_checkpoint_type': result.get('hil_checkpoint_type', ''),
-            'hil_checkpoint_data': result.get('hil_checkpoint_data', {}),
+            'completed': response_data.get('completed', not awaiting),
+            'awaiting_user_input': awaiting,
 
             # Content
             'sales_agent_response': result.get('response', ''),
-            'schema': result.get('schema', {}),
-            'validation_result': result.get('validation_result', {}),
-            'missing_fields': result.get('missing_fields', []),
-            'available_advanced_params': result.get('advanced_parameters', result.get('discovered_specs', [])),
+            'schema': schema if ranked_products_list or awaiting else {},
+            'missing_fields': missing_fields,
+            'available_advanced_params': advanced_params,
+            'provided_requirements': response_data.get('provided_requirements', {}),
 
             # Vendor / ranking results
             'vendorAnalysis': {
                 'vendorMatches': vendor_matches,
                 'totalMatches': len(vendor_matches),
             },
-            'overallRanking': ranking,
-            # rank_products_tool stores ranked list under "overall_ranking" key;
-            # expose as "ranked_products" for frontend consumption.
-            # Also inject productType (required by RankedProduct TypeScript interface).
+            'overallRanking': {
+                'overall_ranking': ranked_products_list
+            } if ranked_products_list else {},
+            # Expose ranked products list for frontend consumption.
+            # Inject productType (required by RankedProduct TypeScript interface).
             'ranked_products': [
-                dict(p, productType=p.get('productType') or product_type_hint or result.get('product_type', ''))
-                for p in (ranking.get('overall_ranking', ranking.get('ranked_results', [])))
+                dict(p, productType=p.get('productType', product_type))
+                for p in ranked_products_list
             ],
-            # rank_products_tool stores list under "overall_ranking" key
-            'topRecommendation': (ranking.get('overall_ranking') or ranking.get('rankedProducts') or [None])[0],
-
-            # Quality signals
-            'schema_quality_score': result.get('schema_quality_score', 0),
-            'match_quality_score': result.get('match_quality_score', 0),
-            'judge_validation_score': result.get('judge_validation_score', 0),
-            'quality_flags': result.get('quality_flags', []),
-            'tools_called': result.get('tools_called', []),
-
-            # Taxonomy normalization context (for observability / frontend display)
-            'taxonomy_canonical_term': result.get('taxonomy_canonical_term', taxonomy_canonical_term),
+            'topRecommendation': ranked_products_list[0] if ranked_products_list else None,
 
             # Thread context
             'thread_info': {
@@ -2334,14 +2293,15 @@ def product_search():
         # Surface any error from the workflow
         if result.get('error'):
             mapped['error'] = result['error']
+            mapped['success'] = False
 
-        return api_response(True, data=mapped)
+        return api_response(result.get('success', True), data=mapped)
 
     except ImportError as e:
-        logger.error(f"[PRODUCT_SEARCH] Import error - Search Deep Agent not available: {e}")
+        logger.error(f"[PRODUCT_SEARCH] Import error - Search workflow not available: {e}")
         return api_response(
             False,
-            error="Search Deep Agent module not available. Please check installation.",
+            error="Search workflow module not available. Please check installation.",
             status_code=500
         )
 
@@ -2476,16 +2436,34 @@ def run_product_analysis():
         except Exception as e:
             logger.warning(f"[RUN_ANALYSIS] Image fetching failed: {e}")
 
+        # Flatten vendor_matches (dict keyed by vendor) into a list for the frontend
+        raw_vendor_matches = analysis_result.get("vendor_matches", {})
+        if isinstance(raw_vendor_matches, dict):
+            vendor_matches_list = []
+            for match_list in raw_vendor_matches.values():
+                if isinstance(match_list, list):
+                    vendor_matches_list.extend(match_list)
+                elif isinstance(match_list, dict):
+                    vendor_matches_list.append(match_list)
+        elif isinstance(raw_vendor_matches, list):
+            vendor_matches_list = raw_vendor_matches
+        else:
+            vendor_matches_list = []
+
+        top_recommendation = analysis_result.get("top_product")
+        if not top_recommendation and analysis_result.get("overall_ranking"):
+            top_recommendation = analysis_result["overall_ranking"][0]
+
         # Map to expected response format (camelCase for frontend)
         final_result = {
             "vendorAnalysis": {
-                "vendorMatches": analysis_result.get("vendor_matches", []),
-                "totalMatches": len(analysis_result.get("vendor_matches", []))
+                "vendorMatches": vendor_matches_list,
+                "totalMatches": len(vendor_matches_list)
             },
             "overallRanking": {
                 "rankedProducts": analysis_result.get("overall_ranking", [])
             },
-            "topRecommendation": analysis_result.get("top_product"),
+            "topRecommendation": top_recommendation,
             "analysisResult": analysis_result  # Pass full result for RightPanel
         }
 
@@ -2547,9 +2525,30 @@ def agentic_sales_agent():
         - finalAnalysis: Complete analysis
     """
     try:
-        # DEPRECATED: SalesAgentTool migrated to inline Flask API in main.py
-        # Use /api/sales-agent endpoints instead
-        return api_response(False, error="This endpoint is deprecated. Use /api/sales-agent endpoints instead.", status_code=410)
+        from search.sales_agent_tool import SalesAgentTool
+
+        data = request.get_json()
+        if not data:
+            return api_response(False, error="Request body is required", status_code=400)
+
+        step = data.get('step', 'initialInput')
+        user_message = data.get('user_message', '')
+        data_context = data.get('data_context', {})
+        session_id = data.get('session_id') or get_session_id()
+        intent = data.get('intent', 'workflow')
+        save_immediately = data.get('save_immediately', False)
+
+        sales_agent = SalesAgentTool()
+        result = sales_agent.process_step(
+            step=step,
+            user_message=user_message,
+            data_context=data_context,
+            session_id=session_id,
+            intent=intent,
+            save_immediately=save_immediately
+        )
+
+        return api_response(True, data=result)
 
     except Exception as e:
         logger.error(f"[SALES_AGENT] Error: {e}", exc_info=True)

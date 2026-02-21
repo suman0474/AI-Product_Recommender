@@ -76,30 +76,36 @@ def extract_json_from_response(text: str) -> Optional[Dict[str, Any]]:
     except json.JSONDecodeError:
         pass
 
-    # Try extracting from markdown code blocks (more robust patterns)
-    patterns = [
-        r'```json\s*(\{[\s\S]*?\})\s*```',   # ```json {object} ```
-        r'```\s*(\{[\s\S]*?\})\s*```',        # ``` {object} ```
-        r'```json\s*(\[\s\S]*?\])\s*```',     # ```json [array] ```
-        r'```\s*(\[\s\S]*?\])\s*```',         # ``` [array] ```
-        r'`(\{[\s\S]*?\})`',                  # `{object}` (inline code)
+    # Try extracting from markdown code blocks.
+    # Strategy: strip the fence markers and attempt to parse the FULL block content.
+    # Non-greedy patterns like `\{[\s\S]*?\}` stop at the first `}` and break
+    # nested JSON objects — so we match the whole fence body and parse it directly.
+    fence_patterns = [
+        r'```json\s*([\s\S]+?)\s*```',   # ```json ... ```
+        r'```\s*([\s\S]+?)\s*```',        # ``` ... ```
     ]
 
-    for pattern in patterns:
-        matches = re.finditer(pattern, text, re.MULTILINE | re.DOTALL)
-        for match in matches:
+    for pattern in fence_patterns:
+        for match in re.finditer(pattern, text, re.MULTILINE | re.DOTALL):
+            candidate = match.group(1).strip()
+            if not candidate:
+                continue
+            # Try direct parse first (candidate is the complete JSON body)
             try:
-                candidate = match.group(1).strip()
-                # Direct JSON load first
-                try:
-                    result = json.loads(candidate)
-                except json.JSONDecodeError:
-                    # Sanitize if direct load fails
-                    sanitized = sanitize_json_string(candidate)
-                    result = json.loads(sanitized)
-                    
-                if isinstance(result, (dict, list)):
-                    return result if isinstance(result, dict) else (result[0] if result and isinstance(result[0], dict) else None)
+                result = json.loads(candidate)
+                if isinstance(result, dict):
+                    return result
+                if isinstance(result, list) and result and isinstance(result[0], dict):
+                    return result[0]
+            except json.JSONDecodeError:
+                pass
+            # Fall back to sanitize-then-parse
+            try:
+                result = json.loads(sanitize_json_string(candidate))
+                if isinstance(result, dict):
+                    return result
+                if isinstance(result, list) and result and isinstance(result[0], dict):
+                    return result[0]
             except json.JSONDecodeError:
                 continue
 

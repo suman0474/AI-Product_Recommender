@@ -5,6 +5,7 @@ class AgenticConfig:
     """
     # Models
     FLASH_MODEL = "gemini-2.5-flash"
+    DEFAULT_MODEL = FLASH_MODEL   # Alias — used by engenie_chat_orchestrator and others
     PRO_MODEL = "gemini-2.5-pro"
     
     # Analysis settings

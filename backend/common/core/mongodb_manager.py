@@ -307,12 +307,17 @@ def get_mongodb_connection() -> Dict[str, Any]:
 def is_mongodb_available() -> bool:
     """
     Check if MongoDB is available and connected.
- 
+
     Use this to determine whether to use MongoDB or fall back to Azure Blob.
- 
+    Triggers the lazy connection on first call — is_connected() immediately
+    returns False if _setup_connection() has never run, so we access
+    .database first to force the connection attempt.
+
     Returns:
         True if MongoDB is available and connected
     """
+    # Trigger lazy connection before checking status
+    _ = mongodb_manager.database
     return mongodb_manager.is_connected()
  
  

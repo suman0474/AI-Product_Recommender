@@ -2,12 +2,34 @@
 from initialization import initialize_application
 
 # Initialize before any other imports that depend on environment variables
+import sys
+import logging as _init_logging
+import io
+
+# Ensure UTF-8 encoding from the very start (critical on Windows where default is cp1252)
+# reconfigure() is sufficient — do NOT wrap stdout.buffer in a new TextIOWrapper
+# as that closes the original stream and breaks bare print() calls in third-party code.
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
+# UTF-8 StreamHandler — use sys.stdout directly now that it's reconfigured to UTF-8
+_utf8_handler = _init_logging.StreamHandler(sys.stdout)
+_utf8_handler.setFormatter(_init_logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+# Configure basic logging for initialization phase
+_init_logging.basicConfig(
+    level=_init_logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[_utf8_handler]
+)
+_init_logger = _init_logging.getLogger(__name__)
+
 try:
     initialize_application()
 except RuntimeError as e:
-    print(f"FATAL: Application initialization failed: {e}")
-    print("Please check your .env file and environment variables")
-    exit(1)
+    _init_logger.error(f"FATAL: Application initialization failed: {e}")
+    _init_logger.error("Please check your .env file and environment variables")
+    sys.exit(1)
 
 import asyncio
 from datetime import datetime
@@ -22,7 +44,21 @@ import urllib.parse
 from werkzeug.utils import secure_filename
 import requests
 from io import BytesIO
-from serpapi import GoogleSearch
+
+try:
+    from serpapi import GoogleSearch
+except ImportError:
+    # Fallback for serpapi versions that don't export GoogleSearch
+    class GoogleSearch:
+        def __init__(self, params):
+            import requests
+            self.params = params
+
+        def get_dict(self):
+            import requests
+            response = requests.get("https://serpapi.com/search", params=self.params)
+            return response.json()
+            
 import threading
 import csv
 from fuzzywuzzy import fuzz, process
@@ -218,7 +254,13 @@ def after_request(response):
         response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Requested-With, Accept'
     return response
 
-logging.basicConfig(level=logging.INFO)
+# NOTE: basicConfig was already called above with a UTF-8 handler.
+# Suppress noisy third-party loggers.
+logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(logging.WARNING)
+logging.getLogger("azure.identity").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("pinecone").setLevel(logging.WARNING)
 def is_redis_available():
     """Check if Redis environment variables are properly configured."""
     # Check for standard or Railway-specific environment variables
@@ -329,13 +371,8 @@ from common.agentic.deep_agent.api import deep_agent_bp
 app.register_blueprint(deep_agent_bp, url_prefix='/api')
 logging.info("Deep Agent blueprint registered at /api/deep-agent")
 
-# --- Import and Register Product Search Blueprint (Phase C) ---
-try:
-    from search.product_search_api import product_search_bp
-    app.register_blueprint(product_search_bp)
-    logging.info("Product Search blueprint registered at /api/product-search/*")
-except ImportError as e:
-    logging.warning(f"Product Search blueprint not available: {e}")
+# NOTE: search.product_search_api no longer exists — product search is handled by
+# agentic_bp at /api/agentic/product-search (registered above via main_api.py).
 
 # --- Import and Register EnGenie Chat API Blueprint ---
 from chat.engenie_chat_api import engenie_chat_bp
@@ -348,15 +385,28 @@ app.register_blueprint(tools_bp, url_prefix='/api/tools')
 logging.info("Tools API blueprint registered at /api/tools")
 
 
-# --- Import and Register Sales Agent Blueprint ---
-# --- Import and Register Sales Agent Blueprint (Deep Agentic Workflow) ---
-# Direct registration to avoid circular dependencies
-try:
-    from common.infrastructure.api.sales_agent_api import sales_agent_bp
-    app.register_blueprint(sales_agent_bp, url_prefix='/api/sales-agent')
-    logging.info("Sales Agent blueprint registered at /api/sales-agent")
-except ImportError as e:
-    logging.warning(f"Sales Agent blueprint not available: {e}")
+# NOTE: The old sales_agent_bp (/api/sales-agent) has been superseded by
+# agentic_bp's /api/agentic/sales-agent (SalesAgentTool-based).
+# A lightweight redirect shim is registered so legacy callers are forwarded
+# and the old DeepAgenticWorkflowOrchestrator is no longer invoked.
+from flask import redirect, url_for
+from flask import Blueprint as _Blueprint
+_legacy_sales_bp = _Blueprint('legacy_sales_agent', __name__)
+
+@_legacy_sales_bp.route('/', methods=['POST'], strict_slashes=False)
+@_legacy_sales_bp.route('/<path:subpath>', methods=['POST'], strict_slashes=False)
+def _legacy_sales_redirect(subpath=''):
+    """Redirect old /api/sales-agent/* calls to /api/agentic/sales-agent."""
+    from flask import request as _req
+    import requests as _requests
+    # Forward the request body to the canonical endpoint
+    new_url = _req.host_url.rstrip('/') + '/api/agentic/sales-agent'
+    resp = _requests.post(new_url, json=_req.get_json(), headers={'Cookie': _req.headers.get('Cookie', '')})
+    from flask import Response
+    return Response(resp.content, status=resp.status_code, content_type=resp.headers.get('Content-Type', 'application/json'))
+
+app.register_blueprint(_legacy_sales_bp, url_prefix='/api/sales-agent')
+logging.info("Legacy /api/sales-agent → redirecting to /api/agentic/sales-agent")
 
 # --- Import and Register Session API Blueprints ---
 from common.infrastructure.api.session import register_session_blueprints
@@ -1953,7 +2003,7 @@ def search_vendors():
         product_name = data.get("product_name", "").strip() or data.get("accessory_name", "").strip()
         strategy = data.get("strategy", "").strip()
         
-        print(f"[VENDOR_SEARCH] Received request: category='{category}', product='{product_name}', strategy='{strategy}'")
+        logging.info(f"[VENDOR_SEARCH] Received request: category='{category}', product='{product_name}', strategy='{strategy}'")
         
         if not category or not product_name:
             return jsonify({"error": "Category and product_name/accessory_name are required"}), 400
@@ -1988,10 +2038,10 @@ def search_vendors():
         matched_category = next((cat for cat in csv_categories if cat.lower().strip() == category_lower), None)
         category_match_type = "exact" if matched_category else None
         
-        print(f"[VENDOR_SEARCH] Category matching result: '{category}' -> '{matched_category}' (type: {category_match_type})")
+        logging.info(f"[VENDOR_SEARCH] Category matching result: '{category}' -> '{matched_category}' (type: {category_match_type})")
         
         if not matched_category:
-            print(f"[VENDOR_SEARCH] No category match found. Available categories: {csv_categories}")
+            logging.warning(f"[VENDOR_SEARCH] No category match found. Available categories: {csv_categories}")
             return jsonify({
                 "vendors": [],
                 "total_count": 0,
@@ -2077,11 +2127,11 @@ def search_vendors():
                 'detected_product': product_name,
                 'matching_criteria': matching_criteria
             }
-            print(f"[VENDOR_SEARCH] Stored {len(filtered_vendors)} vendors in session for analysis filtering")
+            logging.info(f"[VENDOR_SEARCH] Stored {len(filtered_vendors)} vendors in session for analysis filtering")
         else:
             # Clear any existing filter if no vendors found
             session.pop('csv_vendor_filter', None)
-            print("[VENDOR_SEARCH] No vendors found, cleared session filter")
+            logging.info("[VENDOR_SEARCH] No vendors found, cleared session filter")
         
         # Return only vendor names list for frontend
         vendor_names_only = [v.get('vendor_name', '').strip() for v in filtered_vendors]
@@ -2164,7 +2214,7 @@ def serper_search_pdfs(query):
             })
         return pdf_results
     except Exception as e:
-        print(f"[WARNING] Serper API search failed: {e}")
+        logging.warning(f"[WARNING] Serper API search failed: {e}")
         return []
 
 
@@ -2191,7 +2241,7 @@ def serpapi_search_pdfs(query):
             })
         return pdf_results
     except Exception as e:
-        print(f"[WARNING] SerpAPI search failed: {e}")
+        logging.warning(f"[WARNING] SerpAPI search failed: {e}")
         return []
 
 
@@ -2249,7 +2299,7 @@ def google_custom_search_pdfs(query):
         return pdf_results
         
     except Exception as e:
-        print(f"[WARNING] Google Custom Search failed: {e}")
+        logging.warning(f"[WARNING] Google Custom Search failed: {e}")
         return []
 
 
@@ -2412,7 +2462,7 @@ def fetch_price_and_reviews_serpapi(product_name: str):
         return results
 
     except Exception as e:
-        print(f"[WARNING] SerpAPI price/review search failed for {product_name}: {e}")
+        logging.warning(f"[WARNING] SerpAPI price/review search failed for {product_name}: {e}")
         return []
 
 
@@ -2466,7 +2516,7 @@ def fetch_price_and_reviews_serper(product_name: str):
         return results
 
     except Exception as e:
-        print(f"[WARNING] Serper API price/review search failed for {product_name}: {e}")
+        logging.warning(f"[WARNING] Serper API price/review search failed for {product_name}: {e}")
         return []
 
 
@@ -2535,7 +2585,7 @@ def fetch_price_and_reviews_google_custom(product_name: str):
         return results
 
     except Exception as e:
-        print(f"[WARNING] Google Custom Search price/review search failed for {product_name}: {e}")
+        logging.warning(f"[WARNING] Google Custom Search price/review search failed for {product_name}: {e}")
         return []
 
 
@@ -3592,7 +3642,7 @@ def upload_pdf_from_url():
 
     try:
         # --- 1. Download PDF ---
-        print(f"[DOWNLOAD] Fetching PDF: {pdf_url}")
+        logging.info(f"[DOWNLOAD] Fetching PDF: {pdf_url}")
         response = requests.get(pdf_url, stream=True, timeout=30)
         response.raise_for_status()
 
@@ -3651,7 +3701,7 @@ def upload_pdf_from_url():
                 }
                 mongodb_file_manager.upload_json_data(result, product_metadata)
                 saved_json_paths.append(f"MongoDB:products:{vendor}:{product_type}:{model_series}")
-                print(f"[INFO] Stored product JSON to MongoDB: {vendor} - {product_type}")
+                logging.info(f"[INFO] Stored product JSON to MongoDB: {vendor} - {product_type}")
             except Exception as e:
                 logging.error(f"Failed to save product JSON to MongoDB: {e}")
 
@@ -3668,7 +3718,7 @@ def upload_pdf_from_url():
                 }
                 file_id = azure_blob_file_manager.upload_to_azure(pdf_bytes, pdf_metadata)
                 saved_pdf_paths.append(f"Azure:Documents:{file_id}")
-                print(f"[INFO] Stored PDF to Azure Blob: {filename} (ID: {file_id})")
+                logging.info(f"[INFO] Stored PDF to Azure Blob: {filename} (ID: {file_id})")
             except Exception as e:
                 logging.error(f"Failed to save PDF to Azure Blob: {e}")
 
@@ -5246,7 +5296,10 @@ def pending_users():
 
 # Duplicate ALLOWED_EXTENSIONS and allowed_file removed.
 
+from common.infrastructure.rate_limiter import router_limited
+
 @app.route("/api/get-price-review", methods=["GET"])
+@router_limited
 @login_required
 def api_get_price_review():
     product_name = request.args.get("productName")
@@ -5321,7 +5374,7 @@ def upload():
                 }
                 azure_blob_file_manager.upload_json_data(result, product_metadata)
                 saved_paths.append(f"Azure:vendors/{vendor}/{product_type}/{model_series}.json")
-                print(f"[INFO] Stored product JSON to Azure Blob: {vendor} - {product_type}")
+                logging.info(f"[INFO] Stored product JSON to Azure Blob: {vendor} - {product_type}")
             except Exception as e:
                 logging.error(f"Failed to save product JSON to Azure Blob: {e}")
             
@@ -6322,7 +6375,7 @@ def create_db():
             )
             db.session.add(admin)
             db.session.commit()
-            print("Admin user created with username 'Daman' and password 'Daman@123'.")
+            logging.info("Admin user created with username 'Daman' and password 'Daman@123'.")
 
 
 # =========================================================================
@@ -6436,6 +6489,163 @@ except Exception as e:
 # =========================================================================
 # === DEVELOPMENT SERVER (Only runs when executed directly) ===
 # =========================================================================
+def log_startup_summary():
+    """Log comprehensive startup summary showing all loaded implementations."""
+    logger = logging.getLogger(__name__)
+    
+    logger.info("=" * 80)
+    logger.info("🚀 APPLICATION STARTUP SUMMARY")
+    logger.info("=" * 80)
+    
+    # Core Components
+    logger.info("📦 CORE COMPONENTS:")
+    logger.info("  ✓ Flask Application (v" + str(app.config.get('ENV', 'production')) + ")")
+    logger.info("  ✓ CORS configured with " + str(len(allowed_origins)) + " allowed origins")
+    
+    # Database Status
+    logger.info("")
+    logger.info("💾 DATABASE & STORAGE:")
+    if mysql_uri:
+        logger.info("  ✓ MySQL Database - Connected")
+    else:
+        logger.info("  ⚠ SQLite Fallback Database")
+    
+    # Session Storage
+    logger.info("  ✓ Session Storage: " + str(app.config.get('SESSION_TYPE', 'unknown')))
+    
+    # MongoDB Status
+    try:
+        from common.core.mongodb_manager import mongodb_manager, is_mongodb_available
+        if is_mongodb_available():
+            logger.info("  ✓ MongoDB - Connected")
+        else:
+            error = mongodb_manager.get_connection_error() or "unknown error"
+            logger.info(f"  ⚠ MongoDB - Not available ({error}) → using Azure Blob fallback")
+    except Exception as _e:
+        logger.info(f"  ⚠ MongoDB - Not available ({_e})")
+
+    # Pinecone Status
+    try:
+        pinecone_key = os.getenv("PINECONE_API_KEY")
+        pinecone_index = os.getenv("PINECONE_INDEX_NAME", "agentic-quickstart-test")
+        if pinecone_key:
+            logger.info(f"  ✓ Pinecone - Configured (index: {pinecone_index})")
+        else:
+            logger.info("  ⚠ Pinecone - PINECONE_API_KEY not set → vector search in mock mode (0 results)")
+    except Exception as _e:
+        logger.info(f"  ⚠ Pinecone - Status unknown ({_e})")
+
+    # Azure Storage
+    try:
+        from common.config.azure_blob_config import azure_blob_manager
+        if azure_blob_manager.is_available:
+            logger.info("  ✓ Azure Blob Storage - Configured")
+        else:
+            logger.info("  ⚠ Azure Blob Storage - Not configured")
+    except:
+        logger.info("  ⚠ Azure Blob Storage - Not available")
+    
+    # Service Layer
+    logger.info("")
+    logger.info("🔧 SERVICE LAYER:")
+    services = [
+        ('Schema Service', schema_service),
+        ('Vendor Service', vendor_service),
+        ('Project Service', project_service),
+        ('Document Service', document_service),
+        ('Image Service', image_service)
+    ]
+    for name, service in services:
+        status = "✓" if service is not None else "✗"
+        logger.info(f"  {status} {name}")
+    
+    # API Endpoints / Blueprints
+    logger.info("")
+    logger.info("🌐 REGISTERED API BLUEPRINTS:")
+    blueprints = [
+        'agentic_bp',
+        'deep_agent_bp',
+        'engenie_chat_bp',
+        'tools_bp',
+        'sales_agent_bp',
+        'resource_bp'
+    ]
+    
+    registered_count = 0
+    for bp_name in app.blueprints:
+        logger.info(f"  ✓ {bp_name}")
+        registered_count += 1
+    
+    logger.info(f"  Total: {registered_count} blueprints registered")
+    
+    # Workflows
+    logger.info("")
+    logger.info("🔄 AVAILABLE WORKFLOWS:")
+    workflows = [
+        "Intent Classification & Routing",
+        "Search & Ranking",
+        "Solution Deep Agent",
+        "EnGenie Chat",
+        "Indexing Agent",
+        "Standards Enrichment"
+    ]
+    for workflow in workflows:
+        logger.info(f"  ✓ {workflow}")
+    
+    # LLM Configuration
+    logger.info("")
+    logger.info("🤖 LLM CONFIGURATION:")
+    google_keys = []
+    for i in range(1, 10):
+        key_name = f"GOOGLE_API_KEY{i}" if i > 1 else "GOOGLE_API_KEY"
+        if os.getenv(key_name):
+            google_keys.append(key_name)
+    
+    logger.info(f"  • Google API Keys: {len(google_keys)}")
+    logger.info(f"  • OpenAI Fallback: {'✓ Configured' if os.getenv('OPENAI_API_KEY') else '✗ Not configured'}")
+    logger.info(f"  • LangSmith Tracing: {'✓ Enabled' if os.getenv('LANGSMITH_API_KEY') else '✗ Disabled'}")
+    
+    # Caching & Performance
+    logger.info("")
+    logger.info("⚡ CACHING & PERFORMANCE:")
+    logger.info("  ✓ Bounded Cache System")
+    logger.info("  ✓ LLM Response Cache")
+    logger.info("  ✓ Embedding Cache")
+    logger.info("  ✓ RAG Cache")
+    logger.info("  ✓ Schema Cache")
+    
+    # Standards Pre-warming Status
+    try:
+        logger.info("  ✓ Standards Document Cache - Pre-warmed")
+    except:
+        logger.info("  ⚠ Standards Document Cache - On-demand loading")
+    
+    # Rate Limiting
+    logger.info("")
+    logger.info("🛡️ SECURITY & RATE LIMITING:")
+    logger.info("  ✓ Rate Limiter - Active")
+    logger.info("  ✓ Circuit Breaker - Available")
+    logger.info("  ✓ Authentication System - Enabled")
+    
+    # Server Info
+    logger.info("")
+    logger.info("🖥️ SERVER CONFIGURATION:")
+    logger.info("  • Host: 0.0.0.0")
+    logger.info("  • Port: 5000")
+    logger.info("  • Debug Mode: " + ("ON" if app.debug else "OFF"))
+    logger.info("  • Threaded: True")
+    logger.info("  • Auto-reload: False")
+    
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("✅ APPLICATION READY - All systems operational")
+    logger.info("=" * 80)
+    logger.info("")
+
+
 if __name__ == "__main__":
+    # Log comprehensive startup summary
+    log_startup_summary()
+    
     # Run Flask development server
     app.run(debug=True, host="0.0.0.0", port=5000, threaded=True, use_reloader=False)

@@ -79,9 +79,10 @@ def list_pdf_blobs(
     try:
         from common.config.azure_blob_config import get_azure_blob_connection, Collections
         
-        conn = get_azure_blob_connection()
-        container_client = conn['container_client']
-        base_path = conn['base_path']
+        # get_azure_blob_connection() returns an AzureBlobFileManager instance
+        blob_manager = get_azure_blob_connection()
+        container_client = blob_manager._get_container_client("product-documents")
+        base_path = "Product-Recommender"
         
         pdf_blobs = []
         

@@ -16,6 +16,7 @@ Or from code:
     from common.core.db_indexes import ensure_indexes
     ensure_indexes()
 """
+import logging
 import os
 import sys
 from typing import Dict, List, Any
@@ -24,6 +25,29 @@ from typing import Dict, List, Any
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from common.core.mongodb_manager import mongodb_manager
+
+logger = logging.getLogger(__name__)
+
+
+def _safe_create_index(collection, keys, **kwargs):
+    """
+    Create a MongoDB index, silently skipping conflicts where the same key
+    pattern already exists under a different name (error code 85 —
+    IndexOptionsConflict).  Any other error is re-raised.
+    """
+    try:
+        collection.create_index(keys, **kwargs)
+    except Exception as exc:
+        # pymongo.errors.OperationFailure code 85 = IndexOptionsConflict
+        code = getattr(exc, 'code', None)
+        if code == 85:
+            name = kwargs.get('name', str(keys))
+            logger.warning(
+                "[db_indexes] Skipping index '%s' — already exists with a different name "
+                "(IndexOptionsConflict). This is harmless.", name
+            )
+        else:
+            raise
 
 
 def ensure_indexes():
@@ -47,287 +71,114 @@ def ensure_indexes():
         # ============================================================
         # COLLECTION 1: specs (Product Schemas)
         # ============================================================
-        print("\n📦 specs collection:")
+        logger.info("specs collection:")
         specs = db['specs']
 
-        # Index for exact product type match
-        specs.create_index([("product_type", 1)], name="idx_product_type")
-        print("   ✅ Created: idx_product_type")
-
-        # Index for normalized product type search
-        specs.create_index(
-            [("metadata.normalized_product_type", 1)],
-            name="idx_normalized_product_type"
-        )
-        print("   ✅ Created: idx_normalized_product_type")
-
-        # Text index for fuzzy search
-        specs.create_index(
-            [("product_type", "text"), ("metadata.product_type", "text")],
-            name="idx_product_type_text"
-        )
-        print("   ✅ Created: idx_product_type_text")
+        _safe_create_index(specs, [("product_type", 1)], name="idx_product_type")
+        _safe_create_index(specs, [("metadata.normalized_product_type", 1)], name="idx_normalized_product_type")
+        _safe_create_index(specs, [("product_type", "text"), ("metadata.product_type", "text")], name="idx_product_type_text")
 
         # ============================================================
         # COLLECTION 2: vendors (Product Catalogs)
         # ============================================================
-        print("\n📦 vendors collection:")
+        logger.info("vendors collection:")
         vendors = db['vendors']
 
-        # Compound index for product + vendor search
-        vendors.create_index(
-            [("product_type", 1), ("vendor_name", 1)],
-            name="idx_product_vendor"
-        )
-        print("   ✅ Created: idx_product_vendor")
-
-        # Index for vendor-only search
-        vendors.create_index([("vendor_name", 1)], name="idx_vendor_name")
-        print("   ✅ Created: idx_vendor_name")
-
-        # Index for model family search
-        vendors.create_index([("model_family", 1)], name="idx_model_family")
-        print("   ✅ Created: idx_model_family")
-
-        # Index for normalized names
-        vendors.create_index(
-            [("vendor_name_normalized", 1)],
-            name="idx_vendor_name_normalized"
-        )
-        print("   ✅ Created: idx_vendor_name_normalized")
+        _safe_create_index(vendors, [("product_type", 1), ("vendor_name", 1)], name="idx_product_vendor")
+        _safe_create_index(vendors, [("vendor_name", 1)], name="idx_vendor_name")
+        _safe_create_index(vendors, [("model_family", 1)], name="idx_model_family")
+        _safe_create_index(vendors, [("vendor_name_normalized", 1)], name="idx_vendor_name_normalized")
 
         # ============================================================
         # COLLECTION 3: images (Product Image Cache)
         # ============================================================
-        print("\n📦 images collection:")
+        logger.info("images collection:")
         images = db['images']
 
-        # Compound unique index for cache lookup
-        images.create_index(
-            [("vendor_name_normalized", 1), ("model_family_normalized", 1)],
-            name="idx_image_lookup",
-            unique=True,
-            sparse=True
-        )
-        print("   ✅ Created: idx_image_lookup (unique)")
-
-        # Index for product type filter
-        images.create_index(
-            [("product_type_normalized", 1)],
-            name="idx_image_product_type"
-        )
-        print("   ✅ Created: idx_image_product_type")
-
-        # TTL index: Auto-delete after 90 days
-        images.create_index(
-            "createdAt",
-            name="idx_image_ttl",
-            expireAfterSeconds=60*60*24*90  # 90 days
-        )
-        print("   ✅ Created: idx_image_ttl (TTL: 90 days)")
+        _safe_create_index(images, [("vendor_name_normalized", 1), ("model_family_normalized", 1)], name="idx_image_lookup", unique=True, sparse=True)
+        _safe_create_index(images, [("product_type_normalized", 1)], name="idx_image_product_type")
+        _safe_create_index(images, "createdAt", name="idx_image_ttl", expireAfterSeconds=60*60*24*90)
 
         # ============================================================
         # COLLECTION 4: generic_images (AI-Generated Images)
         # ============================================================
-        print("\n📦 generic_images collection:")
+        logger.info("generic_images collection:")
         generic_images = db['generic_images']
 
-        # Unique index for product type
-        generic_images.create_index(
-            "product_type_normalized",
-            name="idx_generic_product_type",
-            unique=True
-        )
-        print("   ✅ Created: idx_generic_product_type (unique)")
-
-        # TTL index: Auto-delete after 90 days
-        generic_images.create_index(
-            "createdAt",
-            name="idx_generic_ttl",
-            expireAfterSeconds=60*60*24*90  # 90 days
-        )
-        print("   ✅ Created: idx_generic_ttl (TTL: 90 days)")
+        _safe_create_index(generic_images, "product_type_normalized", name="idx_generic_product_type", unique=True)
+        _safe_create_index(generic_images, "createdAt", name="idx_generic_ttl", expireAfterSeconds=60*60*24*90)
 
         # ============================================================
         # COLLECTION 5: vendor_logos (Vendor Logo Cache)
         # ============================================================
-        print("\n📦 vendor_logos collection:")
+        logger.info("vendor_logos collection:")
         vendor_logos = db['vendor_logos']
 
-        # Unique index for vendor name
-        vendor_logos.create_index(
-            "vendor_name_normalized",
-            name="idx_logo_vendor",
-            unique=True
-        )
-        print("   ✅ Created: idx_logo_vendor (unique)")
+        _safe_create_index(vendor_logos, "vendor_name_normalized", name="idx_logo_vendor", unique=True)
 
         # ============================================================
         # COLLECTION 6: advanced_parameters (Parameter Cache)
         # ============================================================
-        print("\n📦 advanced_parameters collection:")
+        logger.info("advanced_parameters collection:")
         advanced_parameters = db['advanced_parameters']
 
-        # Unique index for product type
-        advanced_parameters.create_index(
-            [("normalized_product_type", 1)],
-            name="idx_param_product_type",
-            unique=True
-        )
-        print("   ✅ Created: idx_param_product_type (unique)")
-
-        # TTL index: Auto-delete after 30 days
-        advanced_parameters.create_index(
-            "created_at",
-            name="idx_param_ttl",
-            expireAfterSeconds=60*60*24*30  # 30 days
-        )
-        print("   ✅ Created: idx_param_ttl (TTL: 30 days)")
+        _safe_create_index(advanced_parameters, [("normalized_product_type", 1)], name="idx_param_product_type", unique=True)
+        _safe_create_index(advanced_parameters, "created_at", name="idx_param_ttl", expireAfterSeconds=60*60*24*30)
 
         # ============================================================
         # COLLECTION 7: user_projects (Project Metadata)
         # ============================================================
-        print("\n📦 user_projects collection:")
+        logger.info("user_projects collection:")
         user_projects = db['user_projects']
 
-        # Compound index for user's project list
-        user_projects.create_index(
-            [("user_id", 1), ("project_status", 1), ("updated_at", -1)],
-            name="idx_user_projects_list"
-        )
-        print("   ✅ Created: idx_user_projects_list")
-
-        # Index for user + project name
-        user_projects.create_index(
-            [("user_id", 1), ("project_name", 1)],
-            name="idx_user_project_name"
-        )
-        print("   ✅ Created: idx_user_project_name")
-
-        # Index for user + product type filter
-        user_projects.create_index(
-            [("user_id", 1), ("product_type", 1)],
-            name="idx_user_product_type"
-        )
-        print("   ✅ Created: idx_user_product_type")
+        _safe_create_index(user_projects, [("user_id", 1), ("project_status", 1), ("updated_at", -1)], name="idx_user_projects_list")
+        _safe_create_index(user_projects, [("user_id", 1), ("project_name", 1)], name="idx_user_project_name")
+        _safe_create_index(user_projects, [("user_id", 1), ("product_type", 1)], name="idx_user_product_type")
 
         # ============================================================
         # COLLECTION 8: strategy (Strategy Documents)
         # ============================================================
-        print("\n📦 strategy collection:")
+        logger.info("strategy collection:")
         strategy = db['stratergy']
 
-        # Index for user's documents
-        strategy.create_index(
-            [("user_id", 1), ("uploaded_at", -1)],
-            name="idx_strategy_user_date"
-        )
-        print("   ✅ Created: idx_strategy_user_date")
-
-        # Index for filename search
-        strategy.create_index(
-            [("user_id", 1), ("filename", 1)],
-            name="idx_strategy_filename"
-        )
-        print("   ✅ Created: idx_strategy_filename")
+        _safe_create_index(strategy, [("user_id", 1), ("uploaded_at", -1)], name="idx_strategy_user_date")
+        _safe_create_index(strategy, [("user_id", 1), ("filename", 1)], name="idx_strategy_filename")
 
         # ============================================================
         # COLLECTION 9: keyword_standardization (Strategy Keywords)
         # ============================================================
-        print("\n📦 keyword_standardization collection:")
+        logger.info("keyword_standardization collection:")
         keyword_standardization = db['keyword_standardization']
 
-        # Index for canonical_full + field_type lookup
-        keyword_standardization.create_index(
-            [("canonical_full", 1), ("field_type", 1)],
-            name="idx_keyword_canonical_full"
-        )
-        print("   ✅ Created: idx_keyword_canonical_full")
-
-        # Index for canonical_abbrev + field_type lookup
-        keyword_standardization.create_index(
-            [("canonical_abbrev", 1), ("field_type", 1)],
-            name="idx_keyword_canonical_abbrev"
-        )
-        print("   ✅ Created: idx_keyword_canonical_abbrev")
-
-        # Index for aliases array + field_type (for query expansion)
-        keyword_standardization.create_index(
-            [("aliases", 1), ("field_type", 1)],
-            name="idx_keyword_aliases"
-        )
-        print("   ✅ Created: idx_keyword_aliases")
-
-        # Index for user_id + field_type (user-scoped mappings)
-        keyword_standardization.create_index(
-            [("user_id", 1), ("field_type", 1)],
-            name="idx_keyword_user_field"
-        )
-        print("   ✅ Created: idx_keyword_user_field")
-
-        # TTL index for cache expiration (5 minutes = 300 seconds)
-        # Note: Only affects documents with is_cache=true
-        keyword_standardization.create_index(
-            [("last_used", 1)],
-            expireAfterSeconds=300,
-            name="idx_keyword_cache_ttl",
-            partialFilterExpression={"is_cache": True}
-        )
-        print("   ✅ Created: idx_keyword_cache_ttl (5-min TTL for cache)")
+        _safe_create_index(keyword_standardization, [("canonical_full", 1), ("field_type", 1)], name="idx_keyword_canonical_full")
+        _safe_create_index(keyword_standardization, [("canonical_abbrev", 1), ("field_type", 1)], name="idx_keyword_canonical_abbrev")
+        _safe_create_index(keyword_standardization, [("aliases", 1), ("field_type", 1)], name="idx_keyword_aliases")
+        _safe_create_index(keyword_standardization, [("user_id", 1), ("field_type", 1)], name="idx_keyword_user_field")
+        _safe_create_index(keyword_standardization, [("last_used", 1)], name="idx_keyword_cache_ttl", expireAfterSeconds=300, partialFilterExpression={"is_cache": True})
 
         # ============================================================
         # COLLECTION 10: standards (Engineering Standards)
         # ============================================================
-        print("\n📦 standards collection:")
+        logger.info("standards collection:")
         standards = db['standards']
 
-        # Index for user's documents
-        standards.create_index(
-            [("user_id", 1), ("uploaded_at", -1)],
-            name="idx_standards_user_date"
-        )
-        print("   ✅ Created: idx_standards_user_date")
-
-        # Index for filename search
-        standards.create_index(
-            [("user_id", 1), ("filename", 1)],
-            name="idx_standards_filename"
-        )
-        print("   ✅ Created: idx_standards_filename")
+        _safe_create_index(standards, [("user_id", 1), ("uploaded_at", -1)], name="idx_standards_user_date")
+        _safe_create_index(standards, [("user_id", 1), ("filename", 1)], name="idx_standards_filename")
 
         # ============================================================
         # COLLECTION 11: documents (General Documents)
         # ============================================================
-        print("\n📦 documents collection:")
+        logger.info("documents collection:")
         documents = db['documents']
 
-        # Index for product + vendor filter
-        documents.create_index(
-            [("product_type", 1), ("vendor_name", 1)],
-            name="idx_doc_product_vendor"
-        )
-        print("   ✅ Created: idx_doc_product_vendor")
+        _safe_create_index(documents, [("product_type", 1), ("vendor_name", 1)], name="idx_doc_product_vendor")
+        _safe_create_index(documents, [("upload_date", -1)], name="idx_doc_upload_date")
 
-        # Index for upload date
-        documents.create_index(
-            [("upload_date", -1)],
-            name="idx_doc_upload_date"
-        )
-        print("   ✅ Created: idx_doc_upload_date")
-
-        # ============================================================
-        # Summary
-        # ============================================================
-        print("\n" + "="*60)
-        print("   ✅ ALL INDEXES CREATED SUCCESSFULLY")
-        print("="*60 + "\n")
-
+        logger.info("[db_indexes] All indexes created/verified successfully")
         return True
 
     except Exception as e:
-        print(f"\n❌ Error creating indexes: {str(e)}")
-        import traceback
-        traceback.print_exc()
+        logger.error("Error creating indexes: %s", e, exc_info=True)
         return False
 
 

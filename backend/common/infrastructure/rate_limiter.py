@@ -185,8 +185,8 @@ def create_limiter(app: Flask) -> Limiter:
             try:
                 r = redis.from_url(
                     RateLimitConfig.REDIS_URL,
-                    socket_timeout=1,
-                    socket_connect_timeout=1,
+                    socket_timeout=0.5,
+                    socket_connect_timeout=0.5,
                     decode_responses=True,
                     retry_on_timeout=False
                 )
@@ -224,8 +224,8 @@ def create_limiter(app: Flask) -> Limiter:
         default_limits=RateLimitConfig.DEFAULT_LIMITS,
         storage_uri=storage_uri,
         storage_options={
-            'socket_connect_timeout': 2,
-            'socket_timeout': 2
+            'socket_connect_timeout': 0.5,
+            'socket_timeout': 0.5
         },
         strategy=RateLimitConfig.STRATEGY,
         headers_enabled=RateLimitConfig.HEADERS_ENABLED,

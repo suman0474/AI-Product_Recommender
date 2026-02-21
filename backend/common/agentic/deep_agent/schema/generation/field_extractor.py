@@ -1770,8 +1770,13 @@ def extract_schema_field_values_from_standards(
     if not schema:
         return schema
 
-    # Deep copy the schema
-    populated_schema = json.loads(json.dumps(schema))
+    # Deep copy the schema — use default=str so datetime / Decimal objects don't crash
+    # json.dumps(). If even that fails, fall back to copy.deepcopy.
+    import copy
+    try:
+        populated_schema = json.loads(json.dumps(schema, default=str))
+    except Exception:
+        populated_schema = copy.deepcopy(schema)
 
     fields_populated = 0
     fields_total = 0

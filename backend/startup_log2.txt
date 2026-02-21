@@ -1,3 +1,0 @@
-1. Loading .env file...
- * Serving Flask app 'main'
- * Debug mode: on

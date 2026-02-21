@@ -4,9 +4,9 @@ import os
 from typing import Dict, Any, List, Optional
 from pathlib import Path
 
-from common.rag.vector_store import get_vector_store
-from common.services.llm.fallback import create_llm_with_fallback
-from common.config import AgenticConfig
+# Standalone Module Imports
+from .standalone_vector_store import PineconeStandaloneStore
+from .standalone_llm import create_standalone_llm
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +17,8 @@ class TaxonomyRAG:
     """
 
     def __init__(self):
-        self.vector_store = get_vector_store()
+        # Use our isolated vector store
+        self.vector_store = PineconeStandaloneStore()
         self.collection_type = "taxonomy"
 
     def index_taxonomy(self, taxonomy_data: Dict[str, Any]) -> None:
@@ -121,78 +122,150 @@ class TaxonomyRAG:
             logger.error(f"[TaxonomyRAG] Retrieval failed: {e}")
             return []
 
-    def get_top_files_by_similarity(self, query: str, top_k: int = 3) -> str:
+    def get_top_files_by_similarity(self, query: str, top_k: int = 3) -> List[str]:
         """
-        Retrieve top files by cosine similarity to use for specification extraction.
-        Defaults to searching the 'documents' collection if it exists, otherwise searches whatever is available.
+        Retrieve top files by cosine similarity for specification extraction.
+        Returns a list of individual file content strings (one per matched document).
         """
         try:
             search_result = self.vector_store.search(
-                collection_type="documents",  # Assuming files are indexed here
+                collection_type="taxonomy",  # Target the taxonomy namespace
                 query=query,
                 top_k=top_k
             )
 
             if not search_result.get("success"):
                 logger.warning(f"[TaxonomyRAG] File search failed: {search_result.get('error')}")
-                return ""
+                return []
 
-            content = []
-            for item in search_result.get("results", []):
-                content.append(item.get("content", ""))
+            files = []
+            for idx, item in enumerate(search_result.get("results", [])):
+                text = item.get("content", "").strip()
+                score = item.get("relevance_score", 0.0)
+                if text:
+                    logger.info(
+                        f"[TaxonomyRAG] File {idx+1}/{top_k}: score={score:.4f} | length={len(text)} chars"
+                    )
+                    files.append(text)
 
-            return "\n\n---\n\n".join(content)
+            logger.info(f"[TaxonomyRAG] Retrieved {len(files)}/{top_k} files for query: '{query[:60]}'")
+            return files
         except Exception as e:
             logger.error(f"[TaxonomyRAG] File retrieval failed: {e}")
-            return ""
+            return []
 
-    def extract_specifications_from_files(self, product_name: str, files_content: str) -> dict:
+    def extract_specifications_from_files(
+        self, product_name: str, files: List[str]
+    ) -> dict:
         """
-        Extract technical specifications from the downloaded file contents using an LLM.
+        Iterate over each of the top retrieved files individually,
+        extract specifications from each, and deep-merge all results.
+        Falls back to a mechanical category placeholder if no specs are found.
         """
-        if not files_content:
-            return {}
+        if not files:
+            logger.warning(f"[TaxonomyRAG] No files provided for {product_name}. Returning fallback.")
+            return self._mechanical_fallback(product_name)
 
         try:
             from langchain_core.prompts import ChatPromptTemplate
             from langchain_core.output_parsers import JsonOutputParser
-            import json
 
-            llm = create_llm_with_fallback(temperature=0.0)
+            llm = create_standalone_llm(temperature=0.0)
 
             prompt_template = """
-You are an expert technical data extractor parsing industrial documents. 
-Given the following technical document contents, extract all relevant technical specifications, 
-operating parameters, dimensions, materials, and constraints for the product: "{product_name}".
+You are an expert technical data extractor. 
+Analyze the following document or definition for: "{product_name}".
 
-Return ONLY a valid JSON dictionary mapping specification names (e.g., "temperature_range", "material", "accuracy") to their extracted values. 
-If you cannot find any specifications, return an empty dictionary {{}}. Do not hallucinate or make up data.
+Your task is to extract ANY technical features, functional characteristics, 
+measured variables, primary purposes, materials, input/output types, or operational concepts you can find.
+
+Even if the text is just a short high-level definition without hard numbers (e.g. no temperature ranges), 
+you MUST extract its conceptual properties into a structured format. For example, if it says "Measures fluid flow", 
+extract {{"measured_variable": "Fluid Flow", "primary_function": "Measurement"}}.
 
 Document Contents:
-{files_content}
+{file_content}
 
+Return ONLY a valid JSON dictionary mapping these extracted characteristics to their values.
+Do not hallucinate, but be thorough in extracting the conceptual engineering features present.
 Output JSON Format:
 """
             prompt = ChatPromptTemplate.from_template(prompt_template)
             chain = prompt | llm | JsonOutputParser()
 
-            # Trim files_content to avoid token limits if too large.
-            # 20k chars is usually safe for Gemini Flash.
-            if len(files_content) > 30000:
-                files_content = files_content[:30000] + "... (truncated)"
+            merged_specs: dict = {}
 
-            result = chain.invoke({
-                "product_name": product_name,
-                "files_content": files_content
-            })
+            for idx, file_content in enumerate(files):
+                if not file_content.strip():
+                    continue
 
-            if isinstance(result, dict):
-                logger.info(f"[TaxonomyRAG] Extracted {len(result)} specs for {product_name} from files.")
-                return result
-            return {}
+                # Trim individual file content to safe token limit
+                if len(file_content) > 10000:
+                    file_content = file_content[:10000] + "... (truncated)"
+
+                logger.info(
+                    f"[TaxonomyRAG] Extracting specs from file {idx+1}/{len(files)} for '{product_name}'..."
+                )
+                try:
+                    result = chain.invoke({
+                        "product_name": product_name,
+                        "file_content": file_content
+                    })
+
+                    if isinstance(result, dict) and result:
+                        new_keys = 0
+                        for k, v in result.items():
+                            # Deep merge: only add if key not already present
+                            if k not in merged_specs:
+                                merged_specs[k] = v
+                                new_keys += 1
+                        logger.info(
+                            f"[TaxonomyRAG] File {idx+1}: added {new_keys} new spec keys "
+                            f"(total so far: {len(merged_specs)})"
+                        )
+                    else:
+                        logger.info(
+                            f"[TaxonomyRAG] File {idx+1}: no extractable specs found."
+                        )
+
+                except Exception as file_err:
+                    logger.warning(
+                        f"[TaxonomyRAG] Spec extraction failed for file {idx+1} of '{product_name}': {file_err}"
+                    )
+                    continue
+
+            if not merged_specs:
+                logger.warning(
+                    f"[TaxonomyRAG] No specs extracted from any file for '{product_name}'. "
+                    f"Applying fallback."
+                )
+                return self._mechanical_fallback(product_name)
+
+            logger.info(
+                f"[TaxonomyRAG] Extracted {len(merged_specs)} total specs for '{product_name}' "
+                f"from {len(files)} files (iterative merge)."
+            )
+            return merged_specs
+
         except Exception as e:
-            logger.error(f"[TaxonomyRAG] Specification extraction from files failed: {e}")
-            return {}
+            logger.error(f"[TaxonomyRAG] Specification extraction failed: {e}")
+            return self._mechanical_fallback(product_name)
+
+    def _mechanical_fallback(self, product_name: str) -> dict:
+        """
+        Fallback for items (e.g. mechanical accessories) where the taxonomy
+        database doesn't contain instrument specifications.
+        """
+        logger.info(f"[TaxonomyRAG] Applying mechanical fallback for '{product_name}'.")
+        return {
+            "product_name": product_name,
+            "category": "Mechanical Accessory",
+            "primary_function": "Mechanical mounting, support or protection",
+            "typical_materials": ["stainless steel", "aluminum", "carbon steel"],
+            "note": "No functional engineering specifications found in taxonomy. "
+                    "This item is likely a mechanical/structural accessory."
+        }
+
 
 
 

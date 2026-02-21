@@ -1,13 +1,11 @@
 # agentic/vector_store.py
-# Vector Store Implementation - Pinecone Primary, ChromaDB HTTP Secondary
-# FAISS has been completely removed
+# Vector Store Implementation - Pinecone Only
+# FAISS and ChromaDB have been completely removed
 #
 # Available backends:
 # 1. Pinecone - Primary (managed cloud service, works with Python 3.14)
-# 2. ChromaDB HTTP - Secondary (requires Docker for ChromaDB server)
 #
-# The chromadb Python package has compatibility issues with Python 3.14,
-# so we use either Pinecone or the HTTP-based ChromaDB client.
+# ChromaDB has been deprecated and removed due to Python 3.14 compatibility issues.
 
 import os
 import logging
@@ -25,9 +23,9 @@ logger = logging.getLogger(__name__)
 # Environment configuration
 VECTOR_STORE_TYPE = os.getenv("VECTOR_STORE_TYPE", "pinecone").lower()
 
-# ChromaDB settings (for HTTP mode with Docker)
-CHROMADB_HOST = os.getenv("CHROMADB_HOST", "localhost")
-CHROMADB_PORT = int(os.getenv("CHROMADB_PORT", "8000"))
+# ChromaDB settings (DEPRECATED - no longer used)
+# CHROMADB_HOST = os.getenv("CHROMADB_HOST", "localhost")
+# CHROMADB_PORT = int(os.getenv("CHROMADB_PORT", "8000"))
 
 # Pinecone Settings
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY", None)
@@ -430,50 +428,51 @@ def get_vector_store() -> BaseDocumentStore:
     """
     Get the singleton vector store instance.
     
-    Uses environment variable VECTOR_STORE_TYPE to determine backend:
-    - "pinecone" (default): Uses Pinecone managed service
-    - "chromadb" or "chromadb_http": Uses ChromaDB HTTP client (requires Docker)
+    Uses Pinecone as the only supported backend.
+    ChromaDB support has been removed.
     """
     global _store_instance
     
     if _store_instance is None:
         store_type = VECTOR_STORE_TYPE
         
+        # Warn if trying to use deprecated ChromaDB
         if store_type in ("chromadb", "chromadb_http"):
-            logger.info("Attempting to initialize ChromaDB HTTP document store...")
-            try:
-                from common.agentic.chromadb_http_client import ChromaDBHttpDocumentStore
-                _store_instance = ChromaDBHttpDocumentStore()
-                logger.info("ChromaDB HTTP document store initialized")
-            except Exception as e:
-                logger.warning(f"ChromaDB HTTP failed (is Docker running?): {e}")
-                logger.info("Falling back to Pinecone...")
-                _store_instance = PineconeDocumentStore()
-        else:
-            # Default to Pinecone
-            logger.info("Initializing Pinecone document store (primary)")
-            try:
-                _store_instance = PineconeDocumentStore()
-            except Exception as e:
-                logger.error(f"Failed to initialize Pinecone: {e}")
-                # Don't raise, let it use the mock fallback inside PineconeDocumentStore
-                _store_instance = PineconeDocumentStore()
+            logger.warning(
+                f"VECTOR_STORE_TYPE='{store_type}' is deprecated. "
+                "ChromaDB support has been removed. Using Pinecone instead."
+            )
+        
+        # Always use Pinecone
+        logger.info("Initializing Pinecone document store")
+        try:
+            _store_instance = PineconeDocumentStore()
+        except Exception as e:
+            logger.error(f"Failed to initialize Pinecone: {e}")
+            # Don't raise, let it use the mock fallback inside PineconeDocumentStore
+            _store_instance = PineconeDocumentStore()
     
     return _store_instance
 
 
 def create_vector_store(store_type: str = "pinecone", **kwargs) -> BaseDocumentStore:
-    """Create a new vector store instance (not singleton)."""
+    """
+    Create a new vector store instance (not singleton).
+    
+    Only Pinecone is supported. ChromaDB has been deprecated.
+    """
     store_type = store_type.lower()
     
     if store_type in ("chromadb", "chromadb_http"):
-        from common.agentic.chromadb_http_client import ChromaDBHttpDocumentStore
-        return ChromaDBHttpDocumentStore(**kwargs)
-    else:
-        return PineconeDocumentStore(**kwargs)
+        logger.warning(
+            f"ChromaDB (store_type='{store_type}') is deprecated and no longer supported. "
+            "Using Pinecone instead."
+        )
+    
+    return PineconeDocumentStore(**kwargs)
 
 
-# Backward compatibility aliases
-ChromaDocumentStore = PineconeDocumentStore  # Fallback to Pinecone
-get_chroma_store = get_vector_store
-create_chroma_store = create_vector_store
+# Backward compatibility aliases (DEPRECATED)
+ChromaDocumentStore = PineconeDocumentStore  # ChromaDB deprecated, use Pinecone
+get_chroma_store = get_vector_store  # DEPRECATED: Use get_vector_store
+create_chroma_store = create_vector_store  # DEPRECATED: Use create_vector_store

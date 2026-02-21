@@ -230,7 +230,12 @@ def enrich_identified_items_with_standards(
     logger.info("PARALLEL STANDARDS ENRICHMENT STARTING")
     logger.info(f"   Items to enrich: {len(items)}")
     logger.info(f"   Max workers: {max_workers}")
-    logger.info(f"   Cache size: {len(_standards_cache)}")
+    try:
+        from ..shared.cache import get_standards_cache_stats
+        _cache_size = get_standards_cache_stats().get("size", 0)
+    except Exception:
+        _cache_size = "n/a"
+    logger.info(f"   Cache size: {_cache_size}")
     logger.info("="*70)
     
     try:

@@ -178,12 +178,12 @@ class TaxonomyIntegrationAdapter:
                 query = f"{canonical_name} {cat} {sample_input}".strip()
                 
                 logger.info(f"[TaxonomyIntegration] Retrieving top 3 files using cosine similarity for: {canonical_name}")
-                files_content = rag.get_top_files_by_similarity(query=query, top_k=3)
+                files = rag.get_top_files_by_similarity(query=query, top_k=3)
                 
                 vector_specs = {}
-                if files_content:
-                    logger.info(f"[TaxonomyIntegration] Extracting specifications from files for {canonical_name}")
-                    vector_specs = rag.extract_specifications_from_files(canonical_name, files_content)
+                if files:
+                    logger.info(f"[TaxonomyIntegration] Extracting specifications from {len(files)} files for {canonical_name}")
+                    vector_specs = rag.extract_specifications_from_files(canonical_name, files)
                 
                 item["vector_specifications"] = vector_specs
             # ------------------------------------------------------------------------

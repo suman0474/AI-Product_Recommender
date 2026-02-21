@@ -640,7 +640,7 @@ export const callAgenticSalesAgent = async (
       hasSchema: !!(dataContext?.schema)
     });
 
-    const response = await axios.post('/api/sales-agent', payload);
+    const response = await axios.post('/api/agentic/sales-agent', payload);
 
     if (!response.data.success) {
       throw new Error(response.data.error || "Sales agent response generation failed");

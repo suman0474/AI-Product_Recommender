@@ -14,11 +14,22 @@ import logging
 import atexit
 from dotenv import load_dotenv
 
-# Configure logging
+# Configure logging with UTF-8 encoding (critical on Windows where default is cp1252)
+import sys
+import io
+
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
+_utf8_handler = logging.StreamHandler(sys.stdout)
+_utf8_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[_utf8_handler]
 )
+
 logger = logging.getLogger(__name__)
 
 
@@ -26,92 +37,65 @@ logger = logging.getLogger(__name__)
 # PHASE 2: APPLICATION-LEVEL CLEANUP HANDLERS
 # =============================================================================
 
+def _safe_log(msg, level='info'):
+    """Log safely during shutdown — silently ignores closed-stream errors."""
+    try:
+        getattr(logger, level)(msg)
+    except (ValueError, OSError):
+        pass  # Stream already closed during interpreter shutdown
+
+
 def _cleanup_bounded_caches():
-    """
-    Cleanup all bounded caches on application shutdown.
-    Prevents memory leaks and logs final statistics.
-    """
+    """Cleanup all bounded caches on application shutdown."""
     try:
         from common.infrastructure.caching.bounded_cache import (
             cleanup_all_caches,
             get_all_cache_stats,
             get_registry_summary
         )
-
-        logger.info("[CLEANUP] Cleaning up bounded caches...")
-
-        # Cleanup expired entries in all caches
+        _safe_log("[CLEANUP] Cleaning up bounded caches...")
         cleanup_results = cleanup_all_caches()
-
-        # Get final statistics
-        stats = get_all_cache_stats()
         summary = get_registry_summary()
-
-        logger.info(f"[CLEANUP] Cache cleanup results: {cleanup_results}")
-        logger.info(f"[CLEANUP] Registry summary: {summary}")
-
-        # Log per-cache stats
-        if stats:
-            logger.info("[CLEANUP] Final cache statistics:")
-            for cache_name, cache_stats in stats.items():
-                logger.info(f"[CLEANUP]   {cache_name}: {cache_stats}")
-
-        logger.info("[CLEANUP] ✓ Bounded caches cleanup complete")
+        _safe_log(f"[CLEANUP] Cache cleanup results: {cleanup_results}")
+        _safe_log(f"[CLEANUP] Registry summary: {summary}")
+        _safe_log("[CLEANUP] ✓ Bounded caches cleanup complete")
     except ImportError:
-        logger.debug("[CLEANUP] BoundedCache module not available (not initialized)")
+        pass
     except Exception as e:
-        logger.error(f"[CLEANUP] Error cleaning up bounded caches: {e}", exc_info=True)
+        _safe_log(f"[CLEANUP] Error cleaning up bounded caches: {e}", 'error')
 
 
 def _shutdown_global_executor():
-    """
-    Shutdown the global thread pool executor.
-    Ensures all pending tasks complete before shutdown.
-    """
+    """Shutdown the global thread pool executor."""
     try:
         from common.infrastructure.state.execution.executor_manager import shutdown_global_executor, get_executor_stats
-
-        logger.info("[CLEANUP] Shutting down global executor...")
-
-        # Get stats before shutdown
+        _safe_log("[CLEANUP] Shutting down global executor...")
         stats = get_executor_stats()
-        logger.info(f"[CLEANUP] Global executor stats: {stats}")
-
-        # Shutdown with wait=True to ensure all tasks complete
+        _safe_log(f"[CLEANUP] Global executor stats: {stats}")
         shutdown_global_executor(wait=True)
-
-        logger.info("[CLEANUP] ✓ Global executor shutdown complete")
+        _safe_log("[CLEANUP] ✓ Global executor shutdown complete")
     except ImportError:
-        logger.debug("[CLEANUP] Global executor not available (not initialized)")
+        pass
     except Exception as e:
-        logger.error(f"[CLEANUP] Error shutting down global executor: {e}", exc_info=True)
-
-
+        _safe_log(f"[CLEANUP] Error shutting down global executor: {e}", 'error')
 
 
 def register_cleanup_handlers():
     """
     Register cleanup handlers for application shutdown.
     These run in reverse order (LIFO) when the application exits.
-
-    Cleanup sequence:
-    1. Stop background cleanup task
-    2. Cleanup bounded caches
-    3. Shutdown global executor
-    4. Log final status
     """
     logger.info("[INIT] Step 4: Registering cleanup handlers...")
 
-    # Register handlers in reverse order of initialization
-    # They will execute in reverse order (LIFO)
     atexit.register(_shutdown_global_executor)
     atexit.register(_cleanup_bounded_caches)
 
-    # Register final status logging
     def _log_final_status():
-        logger.info("="*70)
-        logger.info("[CLEANUP] Application shutdown complete")
-        logger.info("="*70)
+        _safe_log("=" * 70)
+        _safe_log("[CLEANUP] Application shutdown complete")
+        _safe_log("=" * 70)
+        # Cleanly shut down the logging system before Python closes streams
+        logging.shutdown()
 
     atexit.register(_log_final_status)
 
@@ -330,13 +314,15 @@ def initialize_singletons() -> None:
     This should be called AFTER validate_all_configs() to ensure
     all required environment variables are present.
     """
-    # Initialize MongoDB Manager (NEW - Phase 1 refactoring)
+    # Initialize MongoDB Manager (Phase 1 refactoring)
+    # is_mongodb_available() now triggers the lazy connection before checking
     try:
         from common.core.mongodb_manager import mongodb_manager, is_mongodb_available
         if is_mongodb_available():
             logger.info("[INIT]   ✓ MongoDB Manager connected")
         else:
-            logger.warning("[INIT]   ⚠ MongoDB not available - using Azure Blob fallback")
+            error = mongodb_manager.get_connection_error() or "unknown error"
+            logger.warning(f"[INIT]   ⚠ MongoDB not available ({error}) - using Azure Blob fallback")
     except ImportError:
         logger.warning("[INIT]   ⚠ MongoDB Manager not available (install pymongo)")
     except Exception as e:
@@ -532,10 +518,15 @@ if __name__ == "__main__":
     # Test initialization
     try:
         initialize_application()
-        print("\n✓ Initialization successful")
-        print("\nStatus:")
+        logger.info("=" * 70)
+        logger.info("✓ Initialization successful")
+        logger.info("=" * 70)
+        logger.info("\nStatus:")
         status = check_initialization_status()
         for key, value in status.items():
-            print(f"  {key}: {value}")
+            logger.info(f"  {key}: {value}")
     except Exception as e:
-        print(f"\n✗ Initialization failed: {e}")
+        logger.error("=" * 70)
+        logger.error(f"✗ Initialization failed: {e}")
+        logger.error("=" * 70)
+        sys.exit(1)

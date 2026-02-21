@@ -2,6 +2,9 @@ from typing import IO, List, Dict, Any
 import os
 import json
 import re
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Try PyMuPDF first, fall back to pypdf if DLL loading fails (common on Windows)
 PYMUPDF_AVAILABLE = False
@@ -9,14 +12,14 @@ try:
     import fitz  # PyMuPDF
     PYMUPDF_AVAILABLE = True
 except ImportError as e:
-    print(f"PyMuPDF not available: {e}. Using pypdf fallback.")
+    logger.warning(f"PyMuPDF not available: {e}. Using pypdf fallback.")
 except OSError as e:
-    print(f"PyMuPDF DLL load failed: {e}. Using pypdf fallback.")
+    logger.warning(f"PyMuPDF DLL load failed: {e}. Using pypdf fallback.")
 
 if not PYMUPDF_AVAILABLE:
     try:
         from pypdf import PdfReader
-        print("Using pypdf as PDF extraction backend.")
+        logger.info("Using pypdf as PDF extraction backend.")
     except ImportError:
         raise ImportError("Neither PyMuPDF nor pypdf is available. Install one of them.")
 
@@ -26,8 +29,6 @@ from langchain_core.prompts import PromptTemplate
 
 # REMOVED: Azure Blob imports (upload_to_azure)
 # REMOVED: LLM standardization import (llm_standardization)
-
-print("1. Loading .env file...")
 ### REMOVED: identify_and_save_product_image function ###
 
 # ---
@@ -42,7 +43,7 @@ def extract_data_from_pdf(pdf_stream: IO[bytes]) -> List[str]:
     page_chunks = []
     
     if PYMUPDF_AVAILABLE:
-        print("2. Extracting text from PDF using PyMuPDF...")
+        logger.info("2. Extracting text from PDF using PyMuPDF...")
         try:
             pdf_stream.seek(0)
             doc = fitz.open(stream=pdf_stream, filetype="pdf")
@@ -67,15 +68,15 @@ def extract_data_from_pdf(pdf_stream: IO[bytes]) -> List[str]:
 
                 page_chunks.append(combined_text)
 
-            print("2.1 PDF extraction into chunks successful.")
+            logger.info("2.1 PDF extraction into chunks successful.")
             return page_chunks
 
         except Exception as e:
-            print(f"Error during PDF extraction with PyMuPDF: {e}")
+            logger.error(f"Error during PDF extraction with PyMuPDF: {e}")
             raise
     else:
         # Fallback to pypdf
-        print("2. Extracting text from PDF using pypdf (fallback)...")
+        logger.info("2. Extracting text from PDF using pypdf (fallback)...")
         try:
             pdf_stream.seek(0)
             reader = PdfReader(pdf_stream)
@@ -96,11 +97,11 @@ def extract_data_from_pdf(pdf_stream: IO[bytes]) -> List[str]:
 
                 page_chunks.append(combined_text)
 
-            print("2.1 PDF extraction into chunks successful (pypdf).")
+            logger.info("2.1 PDF extraction into chunks successful (pypdf).")
             return page_chunks
 
         except Exception as e:
-            print(f"Error during PDF extraction with pypdf: {e}")
+            logger.error(f"Error during PDF extraction with pypdf: {e}")
             raise
 
 
@@ -129,7 +130,7 @@ def preprocess_specifications_text(text: str) -> str:
 
 ### Send chunks to the LLM for structured JSON extraction ###
 def send_to_language_model(chunks: List[str]) -> List[Dict[str, Any]]:
-    print("3. Sending concatenated text to the language model...")
+    logger.info("3. Sending concatenated text to the language model...")
     api_key = os.getenv("GOOGLE_API_KEY")
     if not api_key:
         raise ValueError("Please set your GOOGLE_API_KEY environment variable.")
@@ -327,8 +328,8 @@ Text:
         # Ensure the result is always a list, even if the LLM returns a single object
         return data if isinstance(data, list) else [data]
     else:
-        print("Warning: Could not decode JSON from LLM response after all parsing strategies.")
-        print("LLM Output (first 500 chars):", content[:500])
+        logger.warning("Warning: Could not decode JSON from LLM response after all parsing strategies.")
+        logger.warning(f"LLM Output (first 500 chars): {content[:500]}")
         
         # Last resort: Try to extract any model information using regex
         fallback_result = []
@@ -344,7 +345,7 @@ Text:
                 "models": [],
                 "_parsing_note": "Extracted via regex fallback due to JSON parsing failure"
             })
-            print(f"Fallback extraction: product_type={product_type_match.group(1) if product_type_match else 'N/A'}, vendor={vendor_match.group(1) if vendor_match else 'N/A'}")
+            logger.info(f"Fallback extraction: product_type={product_type_match.group(1) if product_type_match else chr(39)+chr(39)}, vendor={vendor_match.group(1) if vendor_match else chr(39)+chr(39)}")
         
         return fallback_result
 
@@ -376,7 +377,7 @@ def aggregate_results(results: List[Dict], file_name: str = "") -> Dict:
     """
     Aggregate and normalize extracted LLM results into a structured JSON format.
     """
-    print("5. Aggregating and cleaning results...")
+    logger.info("5. Aggregating and cleaning results...")
 
     def is_meaningful_spec(specs: Dict[str, Any]) -> bool:
         """Check if the specification dictionary has any meaningful values."""
@@ -444,7 +445,7 @@ def aggregate_results(results: List[Dict], file_name: str = "") -> Dict:
 
 def generate_dynamic_path(final_result: Dict[str, Any]) -> str:
     """Generate MongoDB identifier instead of file path"""
-    print("6. Generating MongoDB identifier...")
+    logger.info("6. Generating MongoDB identifier...")
     vendor_name = re.sub(r'[<>:"/\\|?*]', '', final_result.get("vendor") or "UnknownVendor").strip()
     product_type = re.sub(r'[<>:"/\\|?*]', '', (final_result.get("product_type") or "UnknownProductType").lower()).strip()
     model_series_names = [m.get("model_series") for m in final_result.get("models", []) if m.get("model_series")]
@@ -456,7 +457,7 @@ def generate_dynamic_path(final_result: Dict[str, Any]) -> str:
 
 def save_json(final_result: Dict[str, Any], file_path: str = None):
     """Save JSON to Azure Blob instead of local file"""
-    print(f"7. Saving JSON output to Azure Blob...")
+    logger.info(f"7. Saving JSON output to Azure Blob...")
     
     from common.services.azure.blob_utils import azure_blob_file_manager
     
@@ -475,9 +476,9 @@ def save_json(final_result: Dict[str, Any], file_path: str = None):
             'path': f'vendors/{vendor_name}/{product_type}/{model_series}.json'
         }
         azure_blob_file_manager.upload_json_data(final_result, metadata)
-        print(f"7.1 JSON saved successfully to Azure Blob: vendors/{vendor_name}/{product_type}/{model_series}.json")
+        logger.info(f"7.1 JSON saved successfully to Azure Blob: vendors/{vendor_name}/{product_type}/{model_series}.json")
     except Exception as e:
-        print(f"7.1 Failed to save to Azure Blob: {e}")
+        logger.error(f"7.1 Failed to save to Azure Blob: {e}")
         raise
 
 

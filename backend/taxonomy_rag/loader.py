@@ -3,7 +3,7 @@ import os
 import logging
 from typing import Optional, Dict, Any
 
-from common.agentic.deep_agent.memory import DeepAgentMemory
+
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +31,7 @@ def load_taxonomy(filepath: Optional[str] = None) -> Dict[str, Any]:
         return {}
 
 
-def inject_taxonomy_into_memory(memory: DeepAgentMemory, filepath: Optional[str] = None) -> None:
+def inject_taxonomy_into_memory(memory: Any, filepath: Optional[str] = None) -> None:
     """Load taxonomy and store it in agent memory."""
     taxonomy = load_taxonomy(filepath)
 

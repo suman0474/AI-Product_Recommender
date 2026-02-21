@@ -84,21 +84,96 @@ def validate_requirements_tool(
     """
     Validate user requirements against the product schema.
     """
-    # This logic was previously in SchemaAgent.validate_requirements.
-    # We need to reimplement it or delegate to a new validation service.
-    # For now, strictly to fix the import error, we will return a permissive result
-    # but log a warning that validation logic is pending migration.
+    import json
+    import os
+    from common.services.llm.fallback import create_llm_with_fallback
+    from langchain_core.prompts import ChatPromptTemplate
+    from langchain_core.output_parsers import JsonOutputParser
     
-    logger.warning("[validate_requirements_tool] Using placeholder validation (pending full migration)")
+    logger.info(f"[validate_requirements_tool] Parsing against schema for '{product_type}'...")
     
-    # Simple extraction simulation (placeholder)
-    return {
-        "is_valid": True, # Assume valid to unblock workflow
-        "missing_fields": [],
-        "optional_fields": [],
-        "provided_requirements": {}, # Should extract based on LLM in real impl
-        "refined_product_type": product_type
-    }
+    if not product_schema:
+        logger.warning("[validate_requirements_tool] No schema provided, cannot validate.")
+        return {
+            "is_valid": False,
+            "missing_fields": [],
+            "optional_fields": [],
+            "provided_requirements": {},
+            "refined_product_type": product_type
+        }
+    
+    try:
+        llm = create_llm_with_fallback(
+            model="gemini-2.5-flash",
+            temperature=0.1,
+            google_api_key=os.getenv("GOOGLE_API_KEY")
+        )
+        
+        prompt = ChatPromptTemplate.from_template("""
+        You are an industrial engineer validating user requirements against a product schema.
+        
+        Product Type: {product_type}
+        User Input:
+        {user_input}
+        
+        Schema Mandatory Fields:
+        {mandatory_fields}
+        
+        Analyze what the user requested. If the user input mentions specifications that map to the schema, extract them.
+        Identify which of the schema's mandatory fields are NOT provided or mentioned by the user at all.
+        A field is missing only if the user input implies nothing about it.
+
+        Return ONLY a JSON object with this exact structure:
+        {{
+            "provided_requirements": {{"field_name": {{"value": "extracted value", "unit": "extracted unit"}}}},
+            "missing_fields": ["missing_mandatory_field_1", "missing_mandatory_field_2"],
+            "optional_fields": [],
+            "refined_product_type": "{product_type}",
+            "is_valid": true or false
+        }}
+        Set is_valid to true ONLY if missing_fields is empty.
+        """)
+        
+        mandatory_list = product_schema.get("mandatory", [])
+        if not mandatory_list:
+            mandatory_reqs = product_schema.get("mandatoryRequirements", {})
+            if mandatory_reqs:
+                if isinstance(mandatory_reqs, dict):
+                    mandatory_list = list(mandatory_reqs.keys())
+                elif isinstance(mandatory_reqs, list):
+                    mandatory_list = mandatory_reqs
+            else:
+                props = product_schema.get("properties", {})
+                mandatory_list = [k for k, v in props.items() if isinstance(v, dict) and (v.get("required") or str(v.get("importance")).lower() == "high")]
+        
+        mandatory_fields = json.dumps(mandatory_list)
+        chain = prompt | llm | JsonOutputParser()
+        
+        result = chain.invoke({
+            "product_type": product_type,
+            "user_input": user_input,
+            "mandatory_fields": mandatory_fields
+        })
+        
+        is_valid = len(result.get("missing_fields", [])) == 0
+        
+        return {
+            "is_valid": is_valid,
+            "missing_fields": result.get("missing_fields", []),
+            "optional_fields": result.get("optional_fields", []),
+            "provided_requirements": result.get("provided_requirements", {}),
+            "refined_product_type": result.get("refined_product_type", product_type)
+        }
+        
+    except Exception as e:
+        logger.error(f"[validate_requirements_tool] Validation fallback error: {e}")
+        return {
+            "is_valid": False, 
+            "missing_fields": mandatory_list if 'mandatory_list' in locals() and mandatory_list else ["All required specifications"],
+            "optional_fields": [],
+            "provided_requirements": {},
+            "refined_product_type": product_type
+        }
 
 @tool("get_missing_fields", args_schema=GetMissingFieldsInput)
 def get_missing_fields_tool(

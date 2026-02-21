@@ -160,7 +160,7 @@ class EnrichmentWorker:
 
         try:
             # Call existing extraction function
-            from common.standards_deep_agent import _extract_specs_from_domains_parallel
+            from common.standards.generation.deep_agent import _extract_specs_from_domains_parallel
 
             results = _extract_specs_from_domains_parallel(
                 user_requirement=user_requirement,
@@ -257,7 +257,7 @@ class EnrichmentWorker:
         specs_needed = payload["specs_needed"]
 
         # Find remaining domains
-        from common.standards_deep_agent import FALLBACK_DOMAINS_ORDER, MAX_STANDARDS_ITERATIONS
+        from common.standards.generation.deep_agent import FALLBACK_DOMAINS_ORDER, MAX_STANDARDS_ITERATIONS
 
         remaining_domains = [d for d in FALLBACK_DOMAINS_ORDER if d not in current_domains]
 
@@ -276,7 +276,7 @@ class EnrichmentWorker:
         domains_to_try = remaining_domains[:3]
 
         try:
-            from common.standards_deep_agent import _extract_specs_from_domains_parallel
+            from common.standards.generation.deep_agent import _extract_specs_from_domains_parallel
 
             results = _extract_specs_from_domains_parallel(
                 user_requirement=payload["user_requirement"],

@@ -237,7 +237,7 @@ def _enrich_item_with_llm(
     logger.info(f"[LLM-ENRICHER] Enriching with LLM: {item_name}")
 
     try:
-        from ..llm_specs_generator import generate_llm_specs
+        from common.standards.generation.llm_generator import generate_llm_specs
 
         result = generate_llm_specs(
             product_type=item_name,
@@ -272,7 +272,7 @@ def _enrich_item_with_standards(
     logger.info(f"[STANDARDS-ENRICHER] Enriching with Standards: {item_name}")
 
     try:
-        from common.standards_deep_agent import run_standards_deep_agent
+        from common.standards.generation.deep_agent import run_standards_deep_agent
 
         result = run_standards_deep_agent(
             user_requirement=f"{category} - {item_name}",

@@ -389,6 +389,7 @@ def solution_analysis_node(state: SolutionDeepAgentState) -> SolutionDeepAgentSt
             model=AgenticConfig.FLASH_MODEL,
             temperature=0.1,
             google_api_key=os.getenv("GOOGLE_API_KEY"),
+            timeout=180,  # Solution analysis can be complex — allow 3 minutes
         )
 
         # Use the deep solution analysis prompt
@@ -582,6 +583,20 @@ def deep_identification_node(state: SolutionDeepAgentState) -> SolutionDeepAgent
 
             solution_analysis = state.get("solution_analysis", {})
 
+            # Deduplicate instruments: keep unique by (category, product_name).
+            seen_instruments: dict = {}
+            deduped_instruments = []
+            for inst in instruments:
+                cat = (inst.get("category") or "").strip().lower()
+                name = (inst.get("product_name") or inst.get("name") or "").strip().lower()
+                dedup_key = f"{cat}||{name}"
+                if dedup_key not in seen_instruments:
+                    seen_instruments[dedup_key] = True
+                    deduped_instruments.append(inst)
+                else:
+                    logger.info(f"[SolutionDeepAgent] Deduplicating instrument: {name} ({cat})")
+            instruments = deduped_instruments
+
             for inst in instruments:
                 sample_input = inst.get("sample_input", "")
                 safety = solution_analysis.get("safety_requirements", {})
@@ -609,6 +624,34 @@ def deep_identification_node(state: SolutionDeepAgentState) -> SolutionDeepAgent
                 )
             except Exception as e:
                 logger.warning(f"[SolutionDeepAgent] Accessory normalization failed: {e}")
+
+            # Deduplicate accessories: the LLM generates one entry per instrument for
+            # shared accessory types (e.g. "Cable Gland" x11 for 11 instruments).
+            # Merge duplicates by (category, accessory_name) key — keep first occurrence,
+            # accumulate quantity, and collect all related_instrument references.
+            seen_accessories: dict = {}
+            deduped_accessories = []
+            for acc in accessories:
+                cat = (acc.get("category") or "").strip().lower()
+                name = (acc.get("accessory_name") or acc.get("name") or "").strip().lower()
+                dedup_key = f"{cat}||{name}"
+                if dedup_key and dedup_key not in seen_accessories:
+                    seen_accessories[dedup_key] = len(deduped_accessories)
+                    deduped_accessories.append(dict(acc))
+                else:
+                    # Merge into the existing entry: accumulate quantity and related_instrument
+                    existing = deduped_accessories[seen_accessories[dedup_key]]
+                    existing["quantity"] = (existing.get("quantity") or 1) + (acc.get("quantity") or 1)
+                    # Collect all parent instruments this accessory serves
+                    existing_related = existing.get("related_instrument", "")
+                    new_related = acc.get("related_instrument", "")
+                    if new_related and new_related not in existing_related:
+                        existing["related_instrument"] = f"{existing_related}, {new_related}" if existing_related else new_related
+            accessories = deduped_accessories
+            logger.info(
+                f"[SolutionDeepAgent] Accessories after deduplication: {len(accessories)} "
+                f"(from {len(acc_result.get('accessories', []))} raw)"
+            )
 
             for acc in accessories:
                 acc_sample = f"{acc.get('category', 'Accessory')} for {acc.get('related_instrument', 'instruments')}"
@@ -861,7 +904,9 @@ def parallel_enrichment_node(state: SolutionDeepAgentState) -> SolutionDeepAgent
                 merged_specs = dict(item.get("specifications") or {})
                 for key, val in extracted_specs.items():
                     if key not in merged_specs:
-                        merged_specs[key] = val
+                        # Guarantee the [STANDARDS] tag for the UI
+                        val_str = str(val).replace("[STANDARDS]", "").strip()
+                        merged_specs[key] = f"{val_str} [STANDARDS]"
 
                 enriched_item = dict(item)
                 enriched_item["specifications"] = merged_specs
@@ -957,7 +1002,15 @@ def sample_input_generation_node(state: SolutionDeepAgentState) -> SolutionDeepA
 
         # Generate sample inputs with natural language prose
         for item in all_items:
-            item["sample_input"] = build_sample_input(item)
+            existing_sample = item.get("sample_input", "").strip()
+            new_spec_sample = build_sample_input(item).strip()
+            
+            if existing_sample and new_spec_sample:
+                # Clean up trailing periods to prevent double punctuation
+                existing_clean = existing_sample.rstrip(".")
+                item["sample_input"] = f"{existing_clean}. {new_spec_sample}"
+            else:
+                item["sample_input"] = new_spec_sample or existing_sample
 
         # Attach parent provenance to every item so the frontend can forward
         # these IDs when it dispatches a child product-search for that item.
