@@ -59,6 +59,7 @@ class TaxonomyRAG:
             for item in taxonomy_data.get("accessories", []):
                 doc_content = f"Accessory: {item['name']}\n"
                 doc_content += f"Category: {item.get('category', 'General')}\n"
+                doc_content += f"Definition: {item.get('definition', '')}\n"
                 if item.get("related_instruments"):
                     doc_content += f"Related Instruments: {', '.join(item['related_instruments'])}\n"
                 if item.get("aliases"):
