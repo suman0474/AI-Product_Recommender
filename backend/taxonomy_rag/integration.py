@@ -165,6 +165,29 @@ class TaxonomyIntegrationAdapter:
             # Combine all items for batch retrieval
             all_normalized_items = standardized_instruments + standardized_accessories
             
+            # --- NEW: Retrieve specifications via vector similarity (top 3 files) ---
+            from .rag import get_taxonomy_rag
+            rag = get_taxonomy_rag()
+            
+            for item in all_normalized_items:
+                canonical_name = item.get("canonical_name") or item.get("product_name") or item.get("name", "")
+                cat = item.get("category", "")
+                sample_input = item.get("sample_input", "")
+                
+                # Descriptive query for cosine similarity search
+                query = f"{canonical_name} {cat} {sample_input}".strip()
+                
+                logger.info(f"[TaxonomyIntegration] Retrieving top 3 files using cosine similarity for: {canonical_name}")
+                files_content = rag.get_top_files_by_similarity(query=query, top_k=3)
+                
+                vector_specs = {}
+                if files_content:
+                    logger.info(f"[TaxonomyIntegration] Extracting specifications from files for {canonical_name}")
+                    vector_specs = rag.extract_specifications_from_files(canonical_name, files_content)
+                
+                item["vector_specifications"] = vector_specs
+            # ------------------------------------------------------------------------
+            
             spec_results = retriever.get_specifications_batch(all_normalized_items)
             
             # Close MongoDB connection if used
@@ -180,6 +203,14 @@ class TaxonomyIntegrationAdapter:
                 item_key = f"item_{idx}"
                 spec_data = spec_results.get(item_key, {})
                 
+                # Merge vector specs and db specs
+                merged_specs = item.get("vector_specifications", {})
+                db_specs = spec_data.get("specifications", {})
+                for k, v in db_specs.items():
+                    merged_specs[k] = v  # DB overrides or supplements
+                    
+                has_spec = len(merged_specs) > 0
+                
                 # Merge normalized item with specification data
                 aggregated_item = {
                     "id": idx + 1,
@@ -189,8 +220,8 @@ class TaxonomyIntegrationAdapter:
                     "quantity": item.get("quantity", 1),
                     "taxonomy_matched": item.get("taxonomy_matched", False),
                     "match_source": item.get("match_source", "unknown"),
-                    "specifications": spec_data.get("specifications", {}),
-                    "spec_found": spec_data.get("spec_found", False),
+                    "specifications": merged_specs,
+                    "spec_found": has_spec,
                 }
                 
                 # Include user-provided specs if available
@@ -199,7 +230,7 @@ class TaxonomyIntegrationAdapter:
                 
                 items_with_specifications.append(aggregated_item)
                 
-                if spec_data.get("spec_found"):
+                if has_spec:
                     specs_found += 1
             
             # Calculate specification statistics

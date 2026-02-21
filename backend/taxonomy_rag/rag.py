@@ -120,6 +120,81 @@ class TaxonomyRAG:
             logger.error(f"[TaxonomyRAG] Retrieval failed: {e}")
             return []
 
+    def get_top_files_by_similarity(self, query: str, top_k: int = 3) -> str:
+        """
+        Retrieve top files by cosine similarity to use for specification extraction.
+        Defaults to searching the 'documents' collection if it exists, otherwise searches whatever is available.
+        """
+        try:
+            search_result = self.vector_store.search(
+                collection_type="documents",  # Assuming files are indexed here
+                query=query,
+                top_k=top_k
+            )
+
+            if not search_result.get("success"):
+                logger.warning(f"[TaxonomyRAG] File search failed: {search_result.get('error')}")
+                return ""
+
+            content = []
+            for item in search_result.get("results", []):
+                content.append(item.get("content", ""))
+
+            return "\n\n---\n\n".join(content)
+        except Exception as e:
+            logger.error(f"[TaxonomyRAG] File retrieval failed: {e}")
+            return ""
+
+    def extract_specifications_from_files(self, product_name: str, files_content: str) -> dict:
+        """
+        Extract technical specifications from the downloaded file contents using an LLM.
+        """
+        if not files_content:
+            return {}
+
+        try:
+            from langchain_core.prompts import ChatPromptTemplate
+            from langchain_core.output_parsers import JsonOutputParser
+            import json
+
+            llm = create_llm_with_fallback(temperature=0.0)
+
+            prompt_template = """
+You are an expert technical data extractor parsing industrial documents. 
+Given the following technical document contents, extract all relevant technical specifications, 
+operating parameters, dimensions, materials, and constraints for the product: "{product_name}".
+
+Return ONLY a valid JSON dictionary mapping specification names (e.g., "temperature_range", "material", "accuracy") to their extracted values. 
+If you cannot find any specifications, return an empty dictionary {{}}. Do not hallucinate or make up data.
+
+Document Contents:
+{files_content}
+
+Output JSON Format:
+"""
+            prompt = ChatPromptTemplate.from_template(prompt_template)
+            chain = prompt | llm | JsonOutputParser()
+
+            # Trim files_content to avoid token limits if too large.
+            # 20k chars is usually safe for Gemini Flash.
+            if len(files_content) > 30000:
+                files_content = files_content[:30000] + "... (truncated)"
+
+            result = chain.invoke({
+                "product_name": product_name,
+                "files_content": files_content
+            })
+
+            if isinstance(result, dict):
+                logger.info(f"[TaxonomyRAG] Extracted {len(result)} specs for {product_name} from files.")
+                return result
+            return {}
+        except Exception as e:
+            logger.error(f"[TaxonomyRAG] Specification extraction from files failed: {e}")
+            return {}
+
+
+
 
 _taxonomy_rag_instance = None
 
