@@ -10,7 +10,7 @@ from langchain_core.tools import BaseTool
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from common.rag.vector_store import get_vector_store
+from common.rag.shared.vector_store import get_vector_store
 
 logger = logging.getLogger(__name__)
 

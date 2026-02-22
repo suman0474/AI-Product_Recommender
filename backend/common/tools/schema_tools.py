@@ -134,25 +134,108 @@ def validate_requirements_tool(
         Set is_valid to true ONLY if missing_fields is empty.
         """)
         
-        mandatory_list = product_schema.get("mandatory", [])
-        if not mandatory_list:
-            mandatory_reqs = product_schema.get("mandatoryRequirements", {})
-            if mandatory_reqs:
-                if isinstance(mandatory_reqs, dict):
-                    mandatory_list = list(mandatory_reqs.keys())
-                elif isinstance(mandatory_reqs, list):
-                    mandatory_list = mandatory_reqs
-            else:
-                props = product_schema.get("properties", {})
-                mandatory_list = [k for k, v in props.items() if isinstance(v, dict) and (v.get("required") or str(v.get("importance")).lower() == "high")]
+        mandatory_reqs = product_schema.get("mandatory_requirements") or product_schema.get("mandatoryRequirements") or product_schema.get("mandatory", {})
+        optional_reqs = product_schema.get("optional_requirements") or product_schema.get("optionalRequirements") or product_schema.get("optional", {})
+
+        # ── Fix #1: Extract LEAF field names, not section names ───────────────
+        # After schema generation, mandatory_reqs looks like:
+        #   { "Performance": { "Accuracy": {...}, "OutputSignal": {...} }, "Electrical": {...} }
+        # Building the list from mandatory_reqs.keys() would give ["Performance", "Electrical"],
+        # NOT the real field names the LLM needs to match against the user's input.
+        # This helper recursively collects all leaf field names.
+        def _flatten_schema_keys(schema_section: Any, max_depth: int = 3) -> List[str]:
+            """Recursively extract leaf field names from a potentially nested schema section."""
+            keys = []
+            if not isinstance(schema_section, dict):
+                return keys
+            for k, v in schema_section.items():
+                if k.startswith('_'):
+                    continue
+                if isinstance(v, dict):
+                    if 'value' in v or 'suggested_values' in v or 'source' in v:
+                        # This is a field metadata object — k is the field name
+                        keys.append(k)
+                    elif max_depth > 1:
+                        # Recurse into nested section
+                        nested = _flatten_schema_keys(v, max_depth - 1)
+                        if nested:
+                            keys.extend(nested)
+                        else:
+                            # Treat k itself as a field (flat schema)
+                            keys.append(k)
+                    else:
+                        keys.append(k)
+                else:
+                    # Primitive value — k is a field name
+                    keys.append(k)
+            return keys
+
+        if isinstance(mandatory_reqs, dict):
+            mandatory_list = _flatten_schema_keys(mandatory_reqs)
+            if not mandatory_list:
+                mandatory_list = list(mandatory_reqs.keys())
+        else:
+            mandatory_list = mandatory_reqs if isinstance(mandatory_reqs, list) else []
+
+        if isinstance(optional_reqs, dict):
+            optional_list = _flatten_schema_keys(optional_reqs)
+            if not optional_list:
+                optional_list = list(optional_reqs.keys())
+        else:
+            optional_list = optional_reqs if isinstance(optional_reqs, list) else []
+
+        if not mandatory_list and not optional_list:
+            props = product_schema.get("properties", {})
+            mandatory_list = [k for k, v in props.items() if isinstance(v, dict) and (v.get("required") or str(v.get("importance")).lower() == "high")]
+            optional_list = [k for k, v in props.items() if k not in mandatory_list]
+
+        logger.info(
+            "[validate_requirements_tool] Schema fields — mandatory: %d, optional: %d",
+            len(mandatory_list), len(optional_list)
+        )
+
+        prompt = ChatPromptTemplate.from_template("""
+        You are an industrial engineer validating user requirements against a product schema.
+        
+        Product Type: {product_type}
+        User Input:
+        {user_input}
+        
+        Schema Mandatory Fields:
+        {mandatory_fields}
+
+        Schema Optional Fields:
+        {optional_fields}
+        
+        TASK:
+        1. Extract specifications from User Input that map to the Schema Fields.
+        2. Identify which Mandatory Fields are NOT mentioned or implied by the user.
+        3. CRITICAL: Use the EXACT field name strings from the Schema Fields lists as keys in your response.
+           If the schema field is "Accuracy", use "Accuracy" — NOT "accuracy" or "measurement_accuracy".
+           If the schema field is "OutputSignal", use "OutputSignal" — NOT "output" or "output_signal".
+           Only use keys that exist in the Schema Fields lists above.
+        4. If a value has a unit (like bar, mA, barG, °C), extract the numeric part as value and unit separately.
+
+        Return ONLY a JSON object:
+        {{
+            "provided_requirements": {{"ExactSchemaFieldName": {{"value": "extracted value", "unit": "extracted unit or empty"}}}},
+            "missing_fields": ["ExactSchemaFieldName1", ...],
+            "optional_fields": ["ExactSchemaFieldName1", ...],
+            "refined_product_type": "{product_type}",
+            "is_valid": true or false
+        }}
+        Set is_valid to true ONLY if missing_fields is empty.
+        """)
         
         mandatory_fields = json.dumps(mandatory_list)
+        optional_fields = json.dumps(optional_list)
         chain = prompt | llm | JsonOutputParser()
         
         result = chain.invoke({
             "product_type": product_type,
             "user_input": user_input,
-            "mandatory_fields": mandatory_fields
+            "mandatory_fields": mandatory_fields,
+            "optional_fields": optional_fields
         })
         
         is_valid = len(result.get("missing_fields", [])) == 0

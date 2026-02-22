@@ -567,7 +567,53 @@ def build_sample_input(item: dict, project_name: str = "Project", max_specs: int
     for g in groups:
         groups[g] = groups[g][:8]
 
-    # ── Step 3: Assemble natural language description ──────────────────
+    # ── Step 3: LLM generation of proper sentence format ──────────────────
+    spec_dict = {k: val for k, val, _ in capped_entries}
+    purpose = item.get("purpose") or item.get("solution_purpose") or item.get("related_instrument") or "N/A"
+    
+    prompt_text = """You are a technical specification writer. Rewrite the following structured product specifications into a professional, cohesive, and easily readable paragraph consisting of completely proper sentences.
+
+PRODUCT: {name}
+CATEGORY: {category}
+PROJECT: {project_name}
+PURPOSE: {purpose}
+SPECIFICATIONS:
+{specs}
+
+RULES:
+- Combine related specifications logically (e.g., grouping all temperature settings, grouping all materials).
+- Remove any duplicate information or redundant terms.
+- NEVER use bracketed tags like [STANDARDS] or [INFERRED].
+- Write proper, grammatically correct sentences without bullet points or lists (e.g., "A Coriolis Mass Flow Meter is required for this solution. It should be suitable for hydrocarbon service...").
+- Do NOT output bullet points or lists. Only output the final continuous paragraph text.
+- Do NOT include any introductory or concluding conversational text (e.g., "Here is the paragraph:").
+"""
+
+    try:
+        from langchain_core.prompts import ChatPromptTemplate
+        from langchain_core.output_parsers import StrOutputParser
+        from common.utils.llm_manager import get_cached_llm
+        from common.config import AgenticConfig
+        
+        llm = get_cached_llm(model=AgenticConfig.FLASH_MODEL, temperature=0.1)
+        prompt = ChatPromptTemplate.from_template(prompt_text)
+        chain = prompt | llm | StrOutputParser()
+        
+        result = chain.invoke({
+            "name": name,
+            "category": category,
+            "project_name": project_name,
+            "purpose": purpose,
+            "specs": json.dumps(spec_dict, indent=2)
+        })
+        
+        if result and len(result.strip()) > 10:
+            return result.strip()
+    except Exception as e:
+        logger.error(f"[SAMPLE_INPUT] LLM generation failed for {name}: {e}")
+        # Down-grading to fallback programmatic string construction
+
+    # Fallback: Assemble natural language description programmatically
     parts = [f"{name}"]
 
     # Service / application / Purpose

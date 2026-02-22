@@ -1,45 +1,27 @@
-# agentic/index_rag/__init__.py
-# Index RAG Package - Product search and retrieval from indexed databases
+# common/index_rag/__init__.py
+# Backward-compatibility shim — canonical location is now common.rag.index
 
-from .index_rag_workflow import (
+from common.rag.index import (
     IndexRAGState,
     create_index_rag_state,
     create_index_rag_workflow,
     get_index_rag_workflow,
-    run_index_rag_workflow
-)
-
-from .index_rag_agent import (
+    run_index_rag_workflow,
+    IndexRAGAgent,
     create_index_rag_agent,
-    IndexRAGAgent
-)
-
-from .index_rag_memory import (
+    run_index_rag,
     IndexRAGMemory,
     index_rag_memory,
-    add_to_conversation_memory,
-    resolve_follow_up_query,
     get_index_rag_memory,
-    clear_conversation_memory
+    resolve_follow_up_query,
+    add_to_conversation_memory,
+    clear_conversation_memory,
 )
 
 __all__ = [
-    # Workflow
-    'IndexRAGState',
-    'create_index_rag_state',
-    'create_index_rag_workflow',
-    'get_index_rag_workflow',
-    'run_index_rag_workflow',
-    
-    # Agent
-    'create_index_rag_agent',
-    'IndexRAGAgent',
-    
-    # Memory
-    'IndexRAGMemory',
-    'index_rag_memory',
-    'add_to_conversation_memory',
-    'resolve_follow_up_query',
-    'get_index_rag_memory',
-    'clear_conversation_memory'
+    'IndexRAGState', 'create_index_rag_state', 'create_index_rag_workflow',
+    'get_index_rag_workflow', 'run_index_rag_workflow',
+    'IndexRAGAgent', 'create_index_rag_agent', 'run_index_rag',
+    'IndexRAGMemory', 'index_rag_memory', 'get_index_rag_memory',
+    'resolve_follow_up_query', 'add_to_conversation_memory', 'clear_conversation_memory',
 ]

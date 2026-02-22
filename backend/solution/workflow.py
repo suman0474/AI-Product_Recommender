@@ -844,7 +844,7 @@ def parallel_enrichment_node(state: SolutionDeepAgentState) -> SolutionDeepAgent
         return state
 
     try:
-        from common.standards.rag.enrichment import enrich_identified_items_with_standards
+        from common.rag.standards import enrich_identified_items_with_standards
         from langchain_core.prompts import ChatPromptTemplate
         from langchain_core.output_parsers import JsonOutputParser
         from common.prompts import STANDARDS_DEEP_AGENT_PROMPTS
@@ -2107,7 +2107,7 @@ def standards_application_node(state: SolutionDeepAgentState) -> SolutionDeepAge
             # Thread A: Document RAG (Pinecone, domain-routed)
             def _run_doc_rag():
                 try:
-                    from common.standards.rag.enrichment import enrich_identified_items_with_standards
+                    from common.rag.standards import enrich_identified_items_with_standards
                     enriched = enrich_identified_items_with_standards(
                         items=[item.copy()],
                         product_type=category,

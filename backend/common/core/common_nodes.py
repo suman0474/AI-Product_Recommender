@@ -579,8 +579,8 @@ def apply_strategy_and_filter_vendors_node(
     and returns filtered/prioritized vendor list.
 
     UPDATED: Now uses CSV-based strategy filtering instead of RAG.
-    The CSV file (instrumentation_procurement_strategy.csv) contains
-    vendor strategy statements that are used to prioritize vendors.
+    Reads vendor strategy data from MongoDB (stratergy collection)
+    to prioritize vendors.
 
     Used by: Solution, Product Search, Comparison workflows.
 
@@ -599,7 +599,7 @@ def apply_strategy_and_filter_vendors_node(
     logger.info(f"[{workflow_name}] Node: Applying CSV-based strategy filter...")
 
     try:
-        from .strategy_csv_filter import filter_vendors_by_strategy
+        from common.rag.strategy.mongodb_loader import filter_vendors_by_strategy
 
         product_type = state.get(product_type_key) or "industrial instrument"
 

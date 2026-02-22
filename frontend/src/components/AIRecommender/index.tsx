@@ -632,6 +632,8 @@ const AIRecommender = ({
           if ("value" in val && val.value && typeof val.value === "string") {
             // This field has a Deep Agent value - use it
             extracted[fullKey] = val.value;
+            // Also store by leaf key for flat-lookup compatibility
+            extracted[key] = val.value;
           } else {
             // Recurse into nested objects
             const nested = extractDeepAgentValues(val, fullKey);
@@ -660,13 +662,40 @@ const AIRecommender = ({
       }
     }
 
+    // ── Fix #3: Extract {value: '...'} objects directly from mandatory/optionalRequirements ──
+    // The schema stores standards-default values in the format:
+    //   { Accuracy: { value: "±0.075%", source: "standards" } }
+    // or nested under sections:
+    //   { Performance: { Accuracy: { value: "±0.075%", source: "standards" } } }
+    // These were never read into collectedData before this fix.
+    const extractFromRequirements = (reqs: any) => {
+      if (!reqs || typeof reqs !== "object") return;
+      Object.entries(reqs).forEach(([key, val]: [string, any]) => {
+        if (val && typeof val === "object" && !Array.isArray(val)) {
+          if ("value" in val && val.value && val.value !== "Not specified" && val.value !== "") {
+            // Direct field with value — store by leaf key (lower priority than user-provided)
+            if (!(key in deepAgentValues)) deepAgentValues[key] = val.value;
+          } else {
+            // Nested section — recurse one level
+            Object.entries(val).forEach(([k2, v2]: [string, any]) => {
+              if (v2 && typeof v2 === "object" && "value" in v2 && v2.value && v2.value !== "Not specified" && v2.value !== "") {
+                if (!(k2 in deepAgentValues)) deepAgentValues[k2] = v2.value;
+              }
+            });
+          }
+        }
+      });
+    };
+    extractFromRequirements(schema.mandatoryRequirements);
+    extractFromRequirements(schema.optionalRequirements);
+
     // Get all schema keys
     const allKeys = [
       ...(schema.mandatoryRequirements ? Object.keys(schema.mandatoryRequirements) : []),
       ...(schema.optionalRequirements ? Object.keys(schema.optionalRequirements) : []),
     ];
 
-    // Merge: user-provided values take priority, then Deep Agent values, then empty
+    // Merge: user-provided values take priority, then Deep Agent / schema defaults, then empty
     allKeys.forEach((key) => {
       if (!(key in merged) || merged[key] === "" || merged[key] === null) {
         // Check if Deep Agent has a value for this key (try exact match and camelCase variations)
@@ -680,7 +709,7 @@ const AIRecommender = ({
       }
     });
 
-    console.log(`[MERGE] Merged ${Object.keys(deepAgentValues).length} Deep Agent values into collectedData`);
+    console.log(`[MERGE] Merged ${Object.keys(deepAgentValues).length} Deep Agent / schema values into collectedData`);
     return merged;
   };
 
@@ -1147,6 +1176,18 @@ const AIRecommender = ({
             productType: result.product_type || prev.productType
           }));
 
+          // ── Fix #3 complement: Immediately seed collectedData from schema field values ──
+          // After Fix #5 runs on the backend, the schema's field objects contain user-provided
+          // values (source="user_provided") and standards defaults (source="standards_specifications").
+          // Merge those into collectedData so the sidebar shows them as green values right away.
+          const initialProvidedReqs = result.provided_requirements || {};
+          const initialCollectedData = mergeRequirementsWithSchema(
+            { ...initialProvidedReqs },
+            schemaForSidebar as any
+          );
+          setCollectedData((prev: any) => ({ ...prev, ...initialCollectedData }));
+          console.log(`[${searchSessionId}] [AGENTIC_PS] Seeded collectedData with ${Object.keys(initialCollectedData).length} values from schema`);
+
           // Auto-undock sidebar to show schema
           setIsDocked(false);
         }
@@ -1216,6 +1257,7 @@ const AIRecommender = ({
             }
           };
           setState((prev) => ({ ...prev, analysisResult: analysisResult as any, identifiedItems: null }));
+          setIsRightDocked(false);
         }
       } else {
         console.error(`[${searchSessionId}] [AGENTIC_PS] Request failed:`, result.error);
@@ -1306,6 +1348,7 @@ const AIRecommender = ({
                   analysisResult: { overallRanking: { rankedProducts: resumeResult.ranked_products } } as any,
                   identifiedItems: null
                 }));
+                setIsRightDocked(false);
               }
             } else {
               await streamAssistantMessage(`Sorry, resume failed: ${resumeResult?.error || 'Unknown error'}`);
@@ -1447,12 +1490,12 @@ const AIRecommender = ({
           } else if (productSearchWorkflow.currentPhase === 'collect_missing_fields') {
             // User is providing field values - parse as field data
             userProvidedFields = { userInput: trimmedInput };
-          } else if (productSearchWorkflow.currentPhase === 'await_advanced_params') {
-            // User is deciding whether to discover advanced specs
-            // "yes" = discover advanced specs, "no" = skip
+          } else if (productSearchWorkflow.currentPhase === 'await_advanced_params' || productSearchWorkflow.currentPhase === 'advanced_specs_discovered') {
+            // User is deciding whether to discover/add advanced specs
+            // "yes" = discover/add advanced specs, "no" = skip
             if (wantsToContinue || wantsToAdd) {
-              // Any affirmative = yes to advanced params
-              userDecision = wantsToContinue ? 'yes' : 'no';
+              // Note: 'no' sets wantsToAdd to true
+              userDecision = wantsToAdd ? 'no' : 'yes';
             }
           } else if (productSearchWorkflow.currentPhase === 'await_advanced_selection') {
             // User is selecting which advanced specs to add
@@ -1469,12 +1512,18 @@ const AIRecommender = ({
           }
 
           // Call resumeProductSearch with user's decision
+          const mergedRequirements = {
+            ...(collectedData || {}),
+            ...(userProvidedFields || {})
+          };
+
           const result = await resumeProductSearch(
             productSearchWorkflow.threadId,
             userDecision,
-            userProvidedFields,
+            mergedRequirements, // Pass existing specs + new inputs to backend so it doesn't get lost
             userDecision ? undefined : trimmedInput, // Only pass as user_input if not a decision
-            searchSessionId
+            searchSessionId,
+            productSearchWorkflow.currentPhase
           );
 
           console.log(`[${searchSessionId}] [AGENTIC_PS] Resume result:`, {
@@ -1594,6 +1643,7 @@ const AIRecommender = ({
                 }
               };
               setState((prev) => ({ ...prev, analysisResult: analysisResult as any }));
+              setIsRightDocked(false);
             }
           } else {
             // Error - show message

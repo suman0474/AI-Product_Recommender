@@ -47,7 +47,7 @@ from debug_flags import (
 )
 
 # Import from rag_logger
-from common.rag.logger import (
+from common.rag.shared.logger import (
     RAGLogger,
     set_trace_id,
     get_trace_id,

@@ -1841,6 +1841,7 @@ export interface AgenticProductSearchResponse {
     advancedParameters?: any[];
   };
   error?: string;                      // Error message if failed
+  provided_requirements?: Record<string, any>; // Requirements already extracted from input
 }
 
 /**
@@ -1981,7 +1982,8 @@ export const callAgenticProductSearch = async (
       ready_for_vendor_search: responseData.readyForVendorSearch || false,
       completed: responseData.completed || !isInterrupted,
       // CRITICAL: Include final_requirements for triggering analysis after workflow completion
-      final_requirements: responseData.finalRequirements
+      final_requirements: responseData.finalRequirements,
+      provided_requirements: responseData.providedRequirements || {}
     };
 
   } catch (error: any) {
@@ -2092,7 +2094,8 @@ export const resumeProductSearch = async (
   userDecision?: string,
   userProvidedFields?: Record<string, any>,
   userInput?: string,
-  sessionId?: string
+  sessionId?: string,
+  currentPhase?: string
 ): Promise<AgenticProductSearchResponse> => {
   try {
     if (!threadId) {
@@ -2108,6 +2111,7 @@ export const resumeProductSearch = async (
       // UI-MANAGED THREAD IDs (required by backend)
       main_thread_id: mainThreadId,
       workflow_thread_id: threadId,  // Use existing thread ID for resume
+      current_phase: currentPhase,
     };
 
     if (userDecision) {

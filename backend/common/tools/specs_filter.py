@@ -209,9 +209,9 @@ def apply_strategy_filter(
     
     try:
         # FIX: Import from correct path (strategy_rag subdirectory, not stub)
-        from common.agentic.workflows.strategy_rag.strategy_rag_enrichment import (
+        from common.rag.strategy.enrichment import (
             get_strategy_with_auto_fallback,
-            filter_vendors_by_strategy
+            filter_vendors_by_strategy_data as filter_vendors_by_strategy
         )
         
         # Get product type if not provided

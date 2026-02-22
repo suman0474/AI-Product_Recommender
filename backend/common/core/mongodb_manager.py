@@ -93,9 +93,13 @@ class MongoDBManager:
  
             self._client = MongoClient(
                 self._mongodb_uri,
-                serverSelectionTimeoutMS=5000,
-                connectTimeoutMS=10000,
-                socketTimeoutMS=30000
+                serverSelectionTimeoutMS=10000,
+                connectTimeoutMS=20000,
+                socketTimeoutMS=60000,
+                maxPoolSize=100,
+                minPoolSize=10,
+                maxIdleTimeMS=120000,
+                waitQueueTimeoutMS=15000
             )
  
             # Test connection

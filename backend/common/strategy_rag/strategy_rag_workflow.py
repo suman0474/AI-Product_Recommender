@@ -7,7 +7,7 @@
 # Still uses CSV-based filtering (no LLM generation per user requirement).
 #
 # PURPOSE: Filter and prioritize vendors based on procurement strategy statements
-# from the instrumentation_procurement_strategy.csv file.
+# Reads vendor strategy data from MongoDB (stratergy collection).
 #
 # NODES:
 # 1. validate_input - Validate product type and resolve follow-ups
@@ -25,8 +25,8 @@ from typing import Dict, Any, List, Optional, TypedDict, Literal
 
 from langgraph.graph import StateGraph, END
 
-from .strategy_csv_filter import (
-    StrategyCSVFilter,
+from common.rag.strategy.mongodb_loader import (
+    load_strategy_from_mongodb,
     filter_vendors_by_strategy,
     get_vendor_strategy_info,
     get_strategy_filter
@@ -36,7 +36,7 @@ from .strategy_csv_filter import (
 try:
     from common.utils.fast_fail import should_fail_fast, check_and_set_fast_fail
     from common.infrastructure.caching.rag_cache import cache_get, cache_set
-    from common.rag.logger import StrategyRAGLogger, set_trace_id
+    from common.rag.shared.logger import StrategyRAGLogger, set_trace_id
     UTILITIES_AVAILABLE = True
 except ImportError:
     UTILITIES_AVAILABLE = False
@@ -163,7 +163,7 @@ def validate_input_node(state: StrategyRAGState) -> StrategyRAGState:
 
     # Try to resolve follow-ups using memory
     try:
-        from .strategy_rag_memory import strategy_rag_memory
+        from common.rag.strategy.memory import strategy_rag_memory
         
         session_id = state.get('session_id')
         if session_id:
@@ -243,7 +243,7 @@ def load_strategy_node(state: StrategyRAGState) -> StrategyRAGState:
         state['strategy_notes'] = "; ".join(notes_parts) if notes_parts else \
             "No specific strategy defined for this product category."
 
-        state['sources_used'] = ['instrumentation_procurement_strategy.csv']
+        state['sources_used'] = ['mongodb']
         state['confidence'] = 0.85 if preferred else 0.5
 
         logger.info(f"Loaded {len(preferred)} preferred, {len(neutral)} neutral vendors")
@@ -494,7 +494,7 @@ def finalize_node(state: StrategyRAGState) -> StrategyRAGState:
 
     # Store in memory for future follow-ups
     try:
-        from .strategy_rag_memory import add_to_strategy_memory
+        from common.rag.strategy.memory import add_to_strategy_memory
 
         session_id = state.get('session_id')
         if session_id and state['status'] == 'success':

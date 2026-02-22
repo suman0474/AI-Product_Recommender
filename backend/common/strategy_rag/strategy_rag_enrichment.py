@@ -6,19 +6,19 @@
 # UPDATED: Simplified from complex RAG enrichment to CSV-based filtering.
 #
 # PURPOSE: Enrich product search workflow with vendor strategy data from
-# the instrumentation_procurement_strategy.csv file.
+# Reads vendor strategy data from MongoDB (stratergy collection).
 #
 # =============================================================================
 
 import logging
 from typing import Dict, Any, List, Optional
 
-from .strategy_csv_filter import (
+from common.rag.strategy.mongodb_loader import (
     filter_vendors_by_strategy,
     get_vendor_strategy_info,
     get_strategy_filter
 )
-from .strategy_rag_workflow import get_strategy_for_product
+from common.rag.strategy.workflow import get_strategy_for_product
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +77,7 @@ def enrich_with_strategy_rag(
                 'procurement_priorities': result.get('procurement_priorities', {}),
                 'strategy_notes': result.get('strategy_notes', ''),
                 'confidence': result.get('confidence', 0.5),
-                'sources_used': result.get('sources_used', ['instrumentation_procurement_strategy.csv']),
+                'sources_used': result.get('sources_used', ['mongodb']),
                 'citations': [],
                 'category': result.get('metadata', {}).get('category'),
                 'subcategory': result.get('metadata', {}).get('subcategory')
@@ -180,10 +180,7 @@ def filter_vendors_by_strategy_data(
     
     if product_type:
         try:
-            from .strategy_vector_store import get_strategy_vector_store
-            vector_store = get_strategy_vector_store()
-            use_semantic = True
-            logger.debug("[StrategyEnrichment] Using semantic scoring for vendor ranking")
+            pass  # Vector store removed - using MongoDB-based scoring only
         except ImportError:
             pass
         except Exception as e:

@@ -120,10 +120,8 @@ class VendorAnalysisTool:
             
             try:
                 strategy_rag_invoked = True
-                from common.strategy_rag.strategy_rag_enrichment import (
-                    get_strategy_with_auto_fallback,
-                    filter_vendors_by_strategy
-                )
+                from common.rag.strategy.enrichment import get_strategy_with_auto_fallback
+                from common.rag.strategy.mongodb_loader import filter_vendors_by_strategy
                 
                 strategy_context = get_strategy_with_auto_fallback(
                     product_type=product_type,

@@ -53,32 +53,55 @@ _session_enrichment_cache: BoundedCache = get_or_create_cache(
 )
 
 
-def _get_session_enrichment(product_type: str, session_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def _get_session_enrichment(product_type: str, session_id: str) -> Optional[Dict[str, Any]]:
     """
     Get cached enrichment result for this session.
 
     Args:
         product_type: Product type to look up
-        session_id: Session identifier. If None, uses a global shared scope.
+        session_id: Session identifier (REQUIRED for isolation between concurrent requests)
+
+    Returns:
+        Cached enrichment result or None if not found/session_id missing
+
+    Note:
+        [FIX Feb 2026] Made session_id required to prevent cross-session contamination.
+        Previously, missing session_id caused global cache scope which led to
+        concurrent requests interfering with each other's state.
     """
+    if not session_id:
+        logger.warning("[FIX #A1] _get_session_enrichment called without session_id - skipping cache lookup to prevent cross-session contamination")
+        return None  # Don't use global cache - return cache miss
+
     normalized_type = product_type.lower().strip()
-    key = f"{session_id}:{normalized_type}" if session_id else normalized_type
+    # Always include session_id prefix for strict isolation
+    key = f"enrichment:{session_id}:{normalized_type}"
 
     # BoundedCache is thread-safe internally, no lock needed
     return _session_enrichment_cache.get(key)
 
 
-def _cache_session_enrichment(product_type: str, enrichment_result: Dict[str, Any], session_id: Optional[str] = None):
+def _cache_session_enrichment(product_type: str, enrichment_result: Dict[str, Any], session_id: str):
     """
     Cache enrichment result for this session.
 
     Args:
         product_type: Product type to cache
         enrichment_result: Data to cache
-        session_id: Session identifier. If None, uses global shared scope.
+        session_id: Session identifier (REQUIRED for isolation between concurrent requests)
+
+    Note:
+        [FIX Feb 2026] Made session_id required to prevent cross-session contamination.
+        Previously, missing session_id caused global cache scope which led to
+        concurrent requests interfering with each other's state.
     """
+    if not session_id:
+        logger.warning("[FIX #A1] _cache_session_enrichment called without session_id - skipping cache write to prevent cross-session contamination")
+        return  # Don't pollute global cache
+
     normalized_type = product_type.lower().strip()
-    key = f"{session_id}:{normalized_type}" if session_id else normalized_type
+    # Always include session_id prefix for strict isolation
+    key = f"enrichment:{session_id}:{normalized_type}"
 
     # BoundedCache is thread-safe internally, no lock needed
     _session_enrichment_cache.set(key, enrichment_result)
@@ -104,18 +127,181 @@ _session_context_cache: BoundedCache = get_or_create_cache(
 
 
 def _get_session_context(session_id: str) -> Optional[Dict[str, Any]]:
-    """Get cached session context (product_type, schema, etc.) for HITL responses."""
+    """
+    Get cached session context (product_type, schema, etc.) for HITL responses.
+
+    Args:
+        session_id: Session identifier (REQUIRED for isolation)
+
+    Returns:
+        Cached context dict or None if not found
+
+    Note:
+        [FIX Feb 2026] Added 'context:' prefix to key for namespace isolation
+    """
     if not session_id:
+        logger.warning("[SessionContext] _get_session_context called without session_id")
         return None
-    return _session_context_cache.get(session_id)
+    # Prefix key for namespace isolation
+    key = f"context:{session_id}"
+    return _session_context_cache.get(key)
 
 
 def _cache_session_context(session_id: str, context: Dict[str, Any]):
-    """Cache session context after validation for HITL response handling."""
+    """
+    Cache session context after validation for HITL response handling.
+
+    Args:
+        session_id: Session identifier (REQUIRED for isolation)
+        context: Dict containing product_type, schema, provided_requirements, etc.
+
+    Note:
+        [FIX Feb 2026] Added 'context:' prefix to key for namespace isolation
+    """
     if not session_id:
+        logger.warning("[SessionContext] _cache_session_context called without session_id - skipping")
         return
-    _session_context_cache.set(session_id, context)
-    logger.info(f"[SessionContext] Cached context for session {session_id}: product_type={context.get('product_type')}")
+    # Prefix key for namespace isolation
+    key = f"context:{session_id}"
+    _session_context_cache.set(key, context)
+    logger.info(f"[SessionContext] Cached context for {key}: product_type={context.get('product_type')}")
+
+
+def clear_session_cache(session_id: str):
+    """
+    Clear all cached data for a specific session.
+    Call this when a session ends or user starts a new search.
+
+    Args:
+        session_id: Session identifier to clear
+
+    Note:
+        [FIX Feb 2026] Added to support proper session cleanup and prevent
+        stale data from interfering with new searches.
+    """
+    if not session_id:
+        logger.warning("[SessionCleanup] clear_session_cache called without session_id")
+        return
+
+    # Clear context cache for this session
+    context_key = f"context:{session_id}"
+    _session_context_cache.delete(context_key)
+
+    # Note: For enrichment cache, we use prefixed keys per product type
+    # We can't easily clear all keys for a session without iterating
+    # The TTL (30 min) will handle cleanup, but we log a warning
+    logger.info(f"[SessionCleanup] Cleared session context cache for: {session_id}")
+    logger.info(f"[SessionCleanup] Note: Enrichment cache entries will expire via TTL (30 min)")
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  THREAD-LOCAL CONTEXT FOR REQUEST ISOLATION                               ║
+# ║  [FIX Feb 2026] Ensures each concurrent request has isolated state        ║
+# ║  [UPGRADE Feb 2026] Now integrates with ExecutionContext system           ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+import contextvars
+
+# Import ExecutionContext for proper context integration
+from common.infrastructure.context import (
+    ExecutionContext,
+    get_context as get_execution_context,
+    get_session_id as get_ctx_session_id,
+    get_cache_key as get_ctx_cache_key
+)
+
+# Thread-local context for current request - prevents cross-request contamination
+# NOTE: These are maintained for backward compatibility. New code should use ExecutionContext.
+_current_session_id: contextvars.ContextVar[str] = contextvars.ContextVar('current_session_id', default='')
+_current_workflow_thread_id: contextvars.ContextVar[str] = contextvars.ContextVar('current_workflow_thread_id', default='')
+
+
+def set_request_context(session_id: str, workflow_thread_id: str = ''):
+    """
+    Set thread-local context for current request.
+    Call at the start of request processing.
+
+    Args:
+        session_id: Session identifier for this request
+        workflow_thread_id: Optional workflow thread ID
+
+    Note:
+        This maintains backward compatibility. The ExecutionContext is set
+        separately by the API layer using execution_context() context manager.
+    """
+    _current_session_id.set(session_id)
+    _current_workflow_thread_id.set(workflow_thread_id)
+    logger.debug(f"[RequestContext] Set context: session={session_id}, thread={workflow_thread_id}")
+
+
+def get_request_session_id() -> str:
+    """
+    Get session_id for current request from thread-local context.
+
+    Checks in order:
+    1. ExecutionContext (preferred, set by API layer)
+    2. Legacy _current_session_id contextvar
+
+    Returns:
+        Session ID or empty string if not set
+    """
+    # First try ExecutionContext (preferred)
+    ctx = get_execution_context()
+    if ctx and ctx.session_id:
+        return ctx.session_id
+
+    # Fallback to legacy contextvar
+    return _current_session_id.get()
+
+
+def get_request_workflow_thread_id() -> str:
+    """
+    Get workflow_thread_id for current request from thread-local context.
+
+    Checks in order:
+    1. ExecutionContext (preferred, set by API layer)
+    2. Legacy _current_workflow_thread_id contextvar
+
+    Returns:
+        Workflow thread ID or empty string if not set
+    """
+    # First try ExecutionContext (preferred)
+    ctx = get_execution_context()
+    if ctx and ctx.workflow_id:
+        return ctx.workflow_id
+
+    # Fallback to legacy contextvar
+    return _current_workflow_thread_id.get()
+
+
+def get_isolated_cache_key(suffix: str) -> str:
+    """
+    Get a cache key scoped to the current execution context.
+
+    Uses ExecutionContext for proper session/workflow isolation.
+
+    Args:
+        suffix: Cache key suffix (e.g., "enrichment:pressure_transmitter")
+
+    Returns:
+        Isolated cache key in format: ctx:{session_id}:{workflow_id}:{suffix}
+    """
+    ctx = get_execution_context()
+    if ctx:
+        return ctx.to_cache_key(suffix)
+
+    # Fallback to session_id-based key
+    session_id = get_request_session_id()
+    if session_id:
+        return f"session:{session_id}:{suffix}"
+
+    logger.warning(f"[CacheKey] No context for cache key '{suffix}' - using global scope")
+    return f"global:{suffix}"
+
+
+def clear_request_context():
+    """Clear thread-local context after request completes."""
+    _current_session_id.set('')
+    _current_workflow_thread_id.set('')
 
 
 class ValidationTool:
@@ -299,6 +485,7 @@ class ValidationTool:
                             "success": True,
                             "product_type": expected_product_type,
                             "schema": _ctx.get("schema", {}),
+                            "provided_requirements": _ctx.get("provided_requirements", {}),
                             "is_valid": True,  # User confirmed to proceed
                             "hitl_response": "yes",
                             "validation_bypassed": True,
@@ -386,6 +573,7 @@ class ValidationTool:
                                 "success": True,
                                 "product_type": cached_product_type,
                                 "schema": cached_context.get("schema", {}),  # BUG FIX: preserve schema from Turn 1
+                                "provided_requirements": cached_context.get("provided_requirements", {}),  # BUG FIX: preserve requirements
                                 "is_valid": True,
                                 "hitl_response": "yes",
                                 "validation_bypassed": True,
@@ -635,7 +823,7 @@ class ValidationTool:
                             return schema
 
                     try:
-                        from common.standards.rag.enrichment import (
+                        from common.rag.standards import (
                             enrich_identified_items_with_standards,
                             is_standards_related_question
                         )
@@ -950,7 +1138,7 @@ class ValidationTool:
             validation_result = validate_requirements_tool.invoke({
                 "user_input": user_input,
                 "product_type": product_type,
-                "schema": schema
+                "product_schema": schema
             })
 
             provided_requirements = validation_result.get("provided_requirements", {})
@@ -974,6 +1162,60 @@ class ValidationTool:
                 
             for k, v in provided_requirements.items():
                 provided_requirements[k] = flatten_field_value(v)
+
+            # ══════════════════════════════════════════════════════════════════
+            # FIX #5 (CRITICAL): Write user-provided values back into the schema
+            # field objects so the frontend sidebar can display them.
+            #
+            # Background: validate_requirements_tool extracts values from the
+            # user's prose input (e.g. "accuracy": "±0.1%") into provided_requirements.
+            # The LeftSidebar renders schema.mandatoryRequirements / optionalRequirements
+            # directly — it does NOT read provided_requirements. So without this
+            # merge the user's values are silently discarded and all fields show
+            # "Not specified".
+            # ══════════════════════════════════════════════════════════════════
+            def _normalize_for_match(s: str) -> str:
+                """Lowercase snake_case / camelCase key for fuzzy matching."""
+                import re
+                s = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', s)
+                return s.lower().replace(' ', '_').replace('-', '_')
+
+            def _merge_provided_into_schema(schema_dict: dict, provided: dict) -> None:
+                """
+                Walk schema sections and inject user-provided values into
+                field objects that still show 'Not specified' or an empty value.
+                User-provided values have the highest priority.
+                """
+                if not provided or not schema_dict:
+                    return
+                # Build a normalized lookup: norm_key -> flat_value
+                norm_provided = {_normalize_for_match(k): str(v) for k, v in provided.items() if v}
+
+                def _apply_to_section(section: dict) -> None:
+                    for field_key, field_val in section.items():
+                        if field_key.startswith('_'):
+                            continue
+                        norm_field = _normalize_for_match(field_key)
+                        if isinstance(field_val, dict) and 'value' in field_val:
+                            # Only overwrite if user provided a value
+                            if norm_field in norm_provided:
+                                field_val['value'] = norm_provided[norm_field]
+                                field_val['source'] = 'user_provided'
+                        elif isinstance(field_val, dict):
+                            # Nested section one level deep
+                            _apply_to_section(field_val)
+
+                for section_name, section_val in schema_dict.items():
+                    if section_name.startswith('_'):
+                        continue
+                    if isinstance(section_val, dict):
+                        _apply_to_section(section_val)
+
+            _merge_provided_into_schema(schema, provided_requirements)
+            logger.info(
+                "[ValidationTool] [FIX #5] Merged %d provided_requirements into schema field objects",
+                len(provided_requirements)
+            )
 
             missing_fields = validation_result.get("missing_fields", [])
             is_valid = validation_result.get("is_valid", False)

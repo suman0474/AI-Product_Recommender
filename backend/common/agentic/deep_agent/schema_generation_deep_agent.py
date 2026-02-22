@@ -383,7 +383,7 @@ class SchemaGenerationDeepAgent:
             )
 
             # Call Standards RAG
-            from common.standards.rag import run_standards_rag_workflow
+            from common.rag.standards import run_standards_rag_workflow
 
             result = run_standards_rag_workflow(
                 question=prompt,
@@ -553,11 +553,11 @@ class SchemaGenerationDeepAgent:
         contributions = {s.value: 0 for s in SchemaSourceType}
 
         # Priority 1: User specs (highest priority)
+        # BUG FIX (Bug 4): We no longer inject specific user values into the reusable schema template.
+        # The schema should act as a generic blueprint. User specs are still captured as 
+        # preferences via provided_requirements but they shouldn't define the schema itself.
         if user_specs:
-            for key, value in user_specs.items():
-                if value and str(value).strip():
-                    aggregated[key] = value
-                    contributions[SchemaSourceType.USER_SPECIFIED.value] += 1
+            logger.info(f"[DEEP_AGENT] [FIX Bug 4] User specs provided but not injected into generic schema template.")
 
         # Sort sources by confidence (descending)
         sorted_results = sorted(

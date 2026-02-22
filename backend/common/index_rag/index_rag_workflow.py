@@ -12,7 +12,7 @@ from langgraph.graph import StateGraph, END
 try:
     from common.utils.fast_fail import should_fail_fast, check_and_set_fast_fail
     from common.infrastructure.caching.rag_cache import cache_get, cache_set
-    from common.rag.logger import IndexRAGLogger, set_trace_id
+    from common.rag.shared.logger import IndexRAGLogger, set_trace_id
     UTILITIES_AVAILABLE = True
 except ImportError:
     UTILITIES_AVAILABLE = False
@@ -148,7 +148,7 @@ def classify_intent_node(state: IndexRAGState) -> IndexRAGState:
     try:
         # Step 1: Resolve follow-up queries using memory
         try:
-            from .index_rag_memory import resolve_follow_up_query, index_rag_memory
+            from common.rag.index.memory import resolve_follow_up_query, index_rag_memory
             
             resolved_query = resolve_follow_up_query(
                 session_id=state['session_id'],
@@ -169,7 +169,7 @@ def classify_intent_node(state: IndexRAGState) -> IndexRAGState:
             state['is_follow_up'] = False
         
         # Step 2: Classify intent using the resolved query
-        from .index_rag_agent import create_index_rag_agent
+        from common.rag.index.agent import create_index_rag_agent
         
         agent = create_index_rag_agent()
         result = agent.classify_intent(state['resolved_query'])
@@ -183,7 +183,7 @@ def classify_intent_node(state: IndexRAGState) -> IndexRAGState:
         
         # Step 3: Store in conversation memory for future follow-ups
         try:
-            from .index_rag_memory import add_to_conversation_memory
+            from common.rag.index.memory import add_to_conversation_memory
             
             add_to_conversation_memory(
                 session_id=state['session_id'],
@@ -283,7 +283,7 @@ def structure_output_node(state: IndexRAGState) -> IndexRAGState:
     logger.info("[IndexRAG Node 3] Structuring output...")
     
     try:
-        from .index_rag_agent import create_index_rag_agent
+        from common.rag.index.agent import create_index_rag_agent
         
         agent = create_index_rag_agent()
         result = agent.structure_output(

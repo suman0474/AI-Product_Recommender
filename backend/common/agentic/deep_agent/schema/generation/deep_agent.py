@@ -383,7 +383,7 @@ class SchemaGenerationDeepAgent:
             )
 
             # Call Standards RAG
-            from common.standards.rag import run_standards_rag_workflow
+            from common.rag.standards import run_standards_rag_workflow
 
             result = run_standards_rag_workflow(
                 question=prompt,

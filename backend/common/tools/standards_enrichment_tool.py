@@ -138,7 +138,7 @@ def _call_standards_rag(question: str, top_k: int = 5) -> Dict[str, Any]:
         Standards RAG response with answer, citations, confidence
     """
     try:
-        from common.standards.rag import run_standards_rag_workflow
+        from common.rag.standards import run_standards_rag_workflow
 
         result = run_standards_rag_workflow(
             question=question,
@@ -193,7 +193,7 @@ def _fast_vector_search(query: str, top_k: int = 5) -> Dict[str, Any]:
         Dictionary with documents and extracted standards info (no LLM processing)
     """
     try:
-        from common.rag.vector_store import get_vector_store
+        from common.rag.shared.vector_store import get_vector_store
         
         store = get_vector_store()
         result = store.search(
@@ -411,7 +411,7 @@ def get_applicable_standards(
 
     # Always use LLM-powered RAG (fast_mode is deprecated)
     try:
-        from common.standards.rag import run_standards_rag_workflow
+        from common.rag.standards import run_standards_rag_workflow
 
         # Build comprehensive standards question
         question = f"""What are the applicable engineering standards (ISO, IEC, API, ANSI, ISA),
@@ -494,7 +494,7 @@ def _get_applicable_standards_fallback(
     logger.info(f"[StandardsEnrichment-Fallback] Vector search for: {product_type}")
     
     try:
-        from common.rag.vector_store import get_vector_store
+        from common.rag.shared.vector_store import get_vector_store
         
         store = get_vector_store()
         query = f"{product_type} standards specifications certifications requirements IEC ISO API SIL ATEX"
@@ -761,7 +761,7 @@ Provide specific values where available according to standards documents."""
         
         # NEW: Use JSON-only schema enrichment instead of conversational RAG
         try:
-            from common.standards.rag import get_standards_chat_agent
+            from common.rag.standards import get_standards_chat_agent
 
             agent = get_standards_chat_agent()
             json_response = agent.run_schema_enrichment(comprehensive_question, top_k=top_k)

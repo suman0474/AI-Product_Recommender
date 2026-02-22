@@ -14,7 +14,7 @@ from pydantic import BaseModel, field_validator
 
 import os
 # Import existing infrastructure
-from common.rag.vector_store import get_vector_store
+from common.rag.shared.vector_store import get_vector_store
 from common.services.llm.fallback import create_llm_with_fallback
 from common.prompts import RAG_PROMPTS
 

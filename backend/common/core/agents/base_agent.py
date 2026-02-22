@@ -157,7 +157,7 @@ class BaseRAGAgent(ABC):
         Returns:
             Vector store instance
         """
-        from common.rag.vector_store import get_vector_store
+        from common.rag.shared.vector_store import get_vector_store
         return get_vector_store()
 
     def _create_prompt(self) -> ChatPromptTemplate:

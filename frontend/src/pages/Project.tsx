@@ -1050,9 +1050,9 @@ const Project = () => {
                         console.warn(`[SEQUENTIAL_LOAD] ✗ No image data for ${productType}`);
                     }
                 } else if (response.status === 404) {
-                    // Image not found - automatically trigger regeneration
-                    console.log(`[SEQUENTIAL_LOAD] Not found: ${productType}. Triggering automatic regeneration...`);
-                    regenerateImage(productType);
+                    // Image not found in backend or DB - explicitly mark as failed so UI shows placeholder instantly
+                    setFailedImages(prev => new Set(prev).add(productType));
+                    console.log(`[SEQUENTIAL_LOAD] Not found: ${productType}. Displaying placeholder.`);
                 } else {
                     // Other HTTP errors - mark as failed
                     setFailedImages(prev => new Set(prev).add(productType));

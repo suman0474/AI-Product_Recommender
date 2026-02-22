@@ -146,7 +146,7 @@ def populate_schema_fields_with_standards(
     # ║  Saves 15-30+ seconds by avoiding the retrieval→generate→retry cycle  ║
     # ╚════════════════════════════════════════════════════════════════════════╝
     try:
-        from common.rag.vector_store import get_vector_store
+        from common.rag.shared.vector_store import get_vector_store
         vector_store = get_vector_store()
         if not vector_store.is_healthy():
             health_status = vector_store.get_health_status()
@@ -160,7 +160,7 @@ def populate_schema_fields_with_standards(
 
     try:
         from common.agentic.deep_agent.agents.adaptive_prompt_engine import get_adaptive_prompt_engine
-        from common.standards.rag import run_standards_rag_workflow
+        from common.rag.standards import run_standards_rag_workflow
 
         prompt_engine = get_adaptive_prompt_engine()
 

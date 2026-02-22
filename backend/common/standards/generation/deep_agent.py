@@ -54,7 +54,7 @@ from langchain_core.output_parsers import JsonOutputParser
 from docx import Document as DocxDocument
 
 from common.agentic.checkpointing import compile_with_checkpointing
-from common.rag.vector_store import get_vector_store
+from common.rag.shared.vector_store import get_vector_store
 from common.services.llm.fallback import create_llm_with_fallback
 from common.utils.llm_manager import get_cached_llm
 from common.prompts import STANDARDS_DEEP_AGENT_PROMPTS

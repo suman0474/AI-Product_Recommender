@@ -31,7 +31,15 @@ validate_with_schema()            -- Validate input against schema
 # TOOL CLASSES
 # =============================================================================
 
-from .validation_tool import ValidationTool, clear_session_enrichment_cache
+from .validation_tool import (
+    ValidationTool,
+    clear_session_enrichment_cache,
+    clear_session_cache,
+    set_request_context,
+    get_request_session_id,
+    get_request_workflow_thread_id,
+    clear_request_context
+)
 from .advanced_specification_agent import AdvancedSpecificationAgent
 from .vendor_analysis_deep_agent import VendorAnalysisDeepAgent, VendorAnalysisTool
 from .ranking_tool import RankingTool
@@ -42,18 +50,32 @@ from .sales_agent_tool import SalesAgentTool
 # =============================================================================
 
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, TYPE_CHECKING
+
+# ExecutionContext for proper session/workflow isolation
+from common.infrastructure.context import (
+    ExecutionContext,
+    execution_context,
+    get_context,
+    get_session_id as ctx_get_session_id
+)
+
+if TYPE_CHECKING:
+    from common.infrastructure.context import ExecutionContext
 
 logger = logging.getLogger(__name__)
 
 
 def run_product_search_workflow(
     user_input: str,
-    session_id: str,
+    session_id: str = "",
     expected_product_type: Optional[str] = None,
     user_provided_fields: Optional[Dict[str, Any]] = None,
     enable_ppi: bool = True,
     auto_mode: bool = True,
+    ctx: Optional["ExecutionContext"] = None,
+    user_decision: Optional[str] = None,
+    current_phase: Optional[str] = None,
     **kwargs
 ) -> Dict[str, Any]:
     """
@@ -61,11 +83,12 @@ def run_product_search_workflow(
 
     Args:
         user_input: User's search query
-        session_id: Session identifier
+        session_id: Session identifier (DEPRECATED - use ctx instead)
         expected_product_type: Optional product type hint
         user_provided_fields: User-provided specification fields
         enable_ppi: Enable Potential Product Index workflow if no schema exists
         auto_mode: Run automatically without HITL pauses
+        ctx: ExecutionContext for proper session/workflow isolation (preferred)
         **kwargs: Additional parameters (main_thread_id, parent_workflow_id, etc.)
 
     Returns:
@@ -82,19 +105,118 @@ def run_product_search_workflow(
             },
             "error": str (if failed)
         }
+
+    Note:
+        [FIX Feb 2026] Added ExecutionContext for proper session isolation.
+        This prevents concurrent requests from interfering with each other's state.
     """
+    import uuid
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # CONTEXT RESOLUTION: Prefer ExecutionContext, fallback to session_id
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    # Try to get context from: 1) parameter, 2) thread-local storage, 3) create from session_id
+    effective_ctx = ctx or get_context()
+
+    if effective_ctx:
+        # Use ExecutionContext for isolation
+        session_id = effective_ctx.session_id
+        workflow_thread_id = effective_ctx.workflow_id
+        logger.info(f"[ProductSearch] Using ExecutionContext: {effective_ctx.to_log_context()}")
+    else:
+        # Legacy path: create context from session_id
+        if not session_id:
+            session_id = f"search_{uuid.uuid4().hex[:16]}"
+            logger.warning(f"[ProductSearch] No context or session_id provided, generated: {session_id}")
+
+        workflow_thread_id = kwargs.get('workflow_thread_id', '')
+
+        # Create an ExecutionContext for this request
+        effective_ctx = ExecutionContext(
+            session_id=session_id,
+            workflow_type="product_search",
+            workflow_id=workflow_thread_id
+        )
+        logger.info(f"[ProductSearch] Created ExecutionContext from session_id: {session_id}")
+
     logger.info(f"[ProductSearch] Starting workflow for session: {session_id}")
+
+    # Set thread-local context for this request (enables isolation in nested calls)
+    set_request_context(session_id, workflow_thread_id)
 
     try:
         # =====================================================================
+        # FIX: Check if we are waiting for response to advanced specs prompt
+        # We check both cached state AND explicit frontend parameters
+        # =====================================================================
+        from search.validation_tool import _get_session_context, _cache_session_context
+        cached_context = _get_session_context(session_id) or {}
+        advanced_specs_presented = cached_context.get("advanced_specs_presented", False)
+        
+        normalized_input = user_input.lower().strip()
+        is_hitl_no_response = normalized_input in ["no", "n", "none"] or normalized_input.startswith("no ")
+        is_hitl_yes_response = normalized_input in ["yes", "y", "sure", "yeah", "yep"]
+        
+        validation_result = None
+        
+        if advanced_specs_presented or current_phase in ["advanced_specs_discovered", "await_advanced_selection"]:
+            if is_hitl_no_response or user_decision == "no":
+                logger.info("[ProductSearch] User declined advanced specs, proceeding directly to analysis")
+                cached_context["advanced_specs_presented"] = False
+                _cache_session_context(session_id, cached_context)
+                
+                current_schema = cached_context.get("schema")
+                if not current_schema and expected_product_type:
+                    from common.tools.schema_tools import load_schema_tool
+                    schema_res = load_schema_tool(expected_product_type)
+                    current_schema = schema_res.get("schema", {}) if isinstance(schema_res, dict) else {}
+
+                # Setup validation_result as if validation succeeded to continue to next phase
+                validation_result = {
+                    "is_valid": True,
+                    "product_type": cached_context.get("product_type", expected_product_type),
+                    "schema": current_schema or {},
+                    "provided_requirements": user_provided_fields or cached_context.get("provided_requirements", {})
+                }
+            elif is_hitl_yes_response or user_decision == "yes":
+                logger.info("[ProductSearch] User accepted advanced specs, prompting for input")
+                
+                current_schema = cached_context.get("schema")
+                if not current_schema and expected_product_type:
+                    from common.tools.schema_tools import load_schema_tool
+                    schema_res = load_schema_tool(expected_product_type)
+                    current_schema = schema_res.get("schema", {}) if isinstance(schema_res, dict) else {}
+
+                return {
+                    "success": True,
+                    "response": "Please type the names or details of the advanced specifications you'd like to add.",
+                    "response_data": {
+                        "product_type": cached_context.get("product_type", expected_product_type),
+                        "schema": current_schema or {},
+                        "provided_requirements": user_provided_fields or cached_context.get("provided_requirements", {}),
+                        "advanced_parameters": cached_context.get("advanced_parameters", []),
+                        "missing_fields": [],
+                        "awaiting_user_input": True,
+                        "current_phase": "collect_advanced_specs",
+                        "validation_bypassed": True
+                    }
+                }
+            else:
+                # User provided specifications directly instead of yes/no
+                logger.info("[ProductSearch] User provided advanced specs directly, routing to validation")
+                cached_context["advanced_specs_presented"] = False
+                _cache_session_context(session_id, cached_context)
+                # Let it fall through to ValidationTool
+
+        # =====================================================================
         # FIX: Short-circuit conversational inputs ("ok", etc.)
         # =====================================================================
-        normalized_input = user_input.lower().strip()
-        conversational_phrases = {'ok', 'okay', 'proceed', 'continue', 'sure', 'thanks', 'thank you', 'stop', 'cancel'}
+        conversational_phrases = {'ok', 'okay', 'proceed', 'continue', 'thanks', 'thank you', 'stop', 'cancel'}
         
         words = normalized_input.split()
         # Only bypass if it's very short and contains conversational words, OR it's an exact match
-        if (len(words) < 4 and any(word in conversational_phrases for word in words)) or normalized_input in conversational_phrases or normalized_input == 'show me':
+        if not validation_result and ((len(words) < 4 and any(word in conversational_phrases for word in words)) or normalized_input in conversational_phrases or normalized_input == 'show me'):
             logger.info(f"[ProductSearch] Detected conversational input '{user_input}', routing to SalesAgentTool")
             sales_agent = SalesAgentTool()
             response_message = sales_agent.process_step(
@@ -119,13 +241,14 @@ def run_product_search_workflow(
             }
 
         # Step 1: Validation
-        validation_tool = ValidationTool()
-        validation_result = validation_tool.validate(
-            user_input=user_input,
-            expected_product_type=expected_product_type,
-            session_id=session_id,
-            enable_standards_enrichment=enable_ppi
-        )
+        if not validation_result:
+            validation_tool = ValidationTool()
+            validation_result = validation_tool.validate(
+                user_input=user_input,
+                expected_product_type=expected_product_type,
+                session_id=session_id,
+                enable_standards_enrichment=enable_ppi
+            )
 
         # ═══════════════════════════════════════════════════════════════════════════
         # HANDLE VALIDATION BYPASSED (User said "YES" to HITL prompt)
@@ -156,12 +279,35 @@ def run_product_search_workflow(
             num_specs = len(advanced_params)
             logger.info(f"[ProductSearch] ✓ Advanced specs already discovered: {num_specs} parameters")
 
+            # Formulate the response with bullet points and a Yes/No prompt
+            base_msg = validation_result.get("message", f"Discovered {num_specs} advanced specifications for {product_type}")
+            
+            # Format up to 10 parameters as a bulleted list
+            formatted_params = ""
+            if advanced_params:
+                bullets = []
+                for p in advanced_params[:10]:
+                    name = str(p.get("name") or p.get("key", "")).replace("_", " ").title()
+                    bullets.append(f"- {name}")
+                formatted_params = "\n\n" + "\n".join(bullets)
+                
+            prompt_msg = "\n\nWould you like to add any of these advanced specifications to your requirements? (Yes / No)"
+            full_response = f"{base_msg}{formatted_params}{prompt_msg}"
+
+            # Set flag in session context that advanced specs were presented
+            from search.validation_tool import _get_session_context, _cache_session_context
+            cached_context = _get_session_context(session_id) or {}
+            cached_context["advanced_specs_presented"] = True
+            cached_context["advanced_parameters"] = advanced_params
+            _cache_session_context(session_id, cached_context)
+
             return {
                 "success": True,
-                "response": validation_result.get("message", f"Discovered {num_specs} advanced specifications for {product_type}. Please provide your requirements for vendor matching."),
+                "response": full_response,
                 "response_data": {
                     "product_type": product_type,
                     "schema": validation_result.get("schema", {}),  # BUG FIX: preserve schema from Turn 1
+                    "provided_requirements": validation_result.get("provided_requirements", {}),  # BUG FIX: preserve data
                     "advanced_parameters": advanced_params,
                     "advanced_specs_info": advanced_specs_info,
                     "ranked_products": [],
@@ -282,6 +428,12 @@ def run_product_search_workflow(
             "response_data": {},
             "error": str(e)
         }
+
+    finally:
+        # ═══════════════════════════════════════════════════════════════════════════
+        # FIX: Always clear request context to prevent leakage to other requests
+        # ═══════════════════════════════════════════════════════════════════════════
+        clear_request_context()
 
 
 def run_validation_only(

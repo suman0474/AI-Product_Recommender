@@ -55,7 +55,7 @@ Apply the requested modifications and return the updated BOM data as a JSON obje
       "category": "<category>",
       "quantity": <quantity>,
       "specifications": {{}},
-      "sample_input": "<updated sample input string>",
+      "sample_input": "<A fully readable paragraph in proper sentence format describing the requirement, without any bracketed tags like [STANDARDS]>",
       "purpose": "<purpose>"
     }}
   ],

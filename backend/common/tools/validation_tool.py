@@ -402,7 +402,7 @@ class ValidationTool:
                             return schema
 
                     try:
-                        from common.standards.rag import (
+                        from common.rag.standards import (
                             enrich_identified_items_with_standards,
                             is_standards_related_question
                         )

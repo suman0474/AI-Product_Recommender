@@ -12,7 +12,11 @@ from langchain_core.output_parsers import JsonOutputParser
 
 import os
 # Import existing infrastructure
-from common.rag.vector_store import get_vector_store
+from common.rag.strategy.mongodb_loader import (
+    load_strategy_from_mongodb,
+    filter_vendors_by_strategy,
+    get_vendor_strategy_info,
+)
 from common.services.llm.fallback import create_llm_with_fallback
 from common.prompts import RAG_PROMPTS
 logger = logging.getLogger(__name__)

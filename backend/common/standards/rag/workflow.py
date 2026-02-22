@@ -18,10 +18,10 @@ from common.services.llm.fallback import create_llm_with_fallback
 
 # Import new utility modules for Phase 1 & 2 gap fixes
 try:
-    from ..fast_fail import should_fail_fast, check_and_set_fast_fail
-    from ..rag_cache import cache_get, cache_set
-    from ..rag_logger import StandardsRAGLogger, set_trace_id
-    from ..circuit_breaker import get_circuit_breaker, CircuitOpenError
+    from common.utils.fast_fail import should_fail_fast, check_and_set_fast_fail
+    from common.infrastructure.caching.rag_cache import cache_get, cache_set
+    from common.rag.shared.logger import StandardsRAGLogger, set_trace_id
+    from common.infrastructure.circuit_breaker import get_circuit_breaker, CircuitOpenError
     UTILITIES_AVAILABLE = True
 except ImportError:
     UTILITIES_AVAILABLE = False
@@ -687,7 +687,7 @@ def finalize_node(state: StandardsRAGState) -> StandardsRAGState:
 
     # Store in conversation memory for future follow-ups
     try:
-        from .standards_rag_memory import add_to_standards_memory
+        from common.rag.standards.memory import add_to_standards_memory
         
         session_id = state.get('session_id')
         if session_id and state['answer']:

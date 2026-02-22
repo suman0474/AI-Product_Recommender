@@ -1960,7 +1960,7 @@ def query_standards_for_field(
         Extracted value or None
     """
     try:
-        from common.standards.rag import run_standards_rag_workflow
+        from common.rag.standards import run_standards_rag_workflow
 
         query = f"What is the standard {field_name} specification for {product_type}?"
         if field_context:
@@ -2005,7 +2005,7 @@ def query_standards_for_field_enhanced(
         Extracted concrete value or None
     """
     try:
-        from common.standards.rag import run_standards_rag_workflow
+        from common.rag.standards import run_standards_rag_workflow
         
         # Convert camelCase to readable format
         readable_field = _camel_to_words(field_name)

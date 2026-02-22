@@ -107,7 +107,10 @@ function renderFlatFieldsList(
 
         if (isMetadataObject) {
           // This is a structured field metadata object - extract the value and treat as leaf
-          const extractedValue = (value as any).value;
+          // Priority: collectedData (user-provided) > schema field value (standards default)
+          let extractedValue = collectedData[key]      // flat leaf key first
+            ?? collectedData[fullKey]                   // dotted path
+            ?? (value as any).value;                    // schema field's own value
 
           // Check if filled - handle string or non-string values
           const isFilled = extractedValue !== undefined &&
@@ -146,10 +149,21 @@ function renderFlatFieldsList(
         }
       } else {
         // This is a leaf field, group it by category
-        let valueRaw = getNestedValue(collectedData, fullKey);
+        // Fix #2: Schema has nested sections (e.g. "Performance.accuracy") but collectedData
+        // is a flat dict (e.g. {accuracy: "±0.1%"}). Try all three lookup strategies.
+        let valueRaw = getNestedValue(collectedData, fullKey)    // "Performance.accuracy"
+          ?? collectedData[fullKey]                              // exact flat key (rare)
+          ?? collectedData[key];                                 // leaf key only ("accuracy")
         // Handle structured Deep Agent data in collectedData
         if (valueRaw && typeof valueRaw === "object" && !Array.isArray(valueRaw) && "value" in valueRaw) {
           valueRaw = valueRaw.value;
+        }
+        // Also check if the schema field itself has a populated value (from standards defaults)
+        if ((valueRaw === undefined || valueRaw === "" || valueRaw === null) && value && typeof value === "object" && "value" in value) {
+          const schemaFieldVal = (value as any).value;
+          if (schemaFieldVal && schemaFieldVal !== "Not specified" && schemaFieldVal !== "") {
+            valueRaw = schemaFieldVal;
+          }
         }
         const isFilled = valueRaw !== undefined && valueRaw !== "" && valueRaw !== null;
         const fieldName = prettify(key);
